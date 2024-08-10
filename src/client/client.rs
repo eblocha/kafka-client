@@ -7,34 +7,23 @@ use std::{
     },
 };
 
+use bytes::BytesMut;
 use dashmap::DashMap;
 use derive_more::derive::From;
 use futures::{SinkExt, StreamExt};
-use kafka_protocol::{
-    messages::{ApiKey, ResponseHeader},
-    protocol::Decodable,
-};
 use tokio::{
     net::{TcpStream, ToSocketAddrs},
     sync::{mpsc, oneshot},
 };
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-use super::{
-    codec::{
-        correlated::{CorrelatedDecoder, CorrelationId},
-        request::{EncodableRequest, RequestEncoder, VersionedRequest},
-    },
-    request::KafkaRequest,
-    response::KafkaResponse,
-};
+use crate::client::codec::sendable::RequestRecord;
 
-#[derive(Debug, Clone)]
-struct RequestRecord {
-    api_key: ApiKey,
-    api_version: i16,
-    response_header_version: i16,
-}
+use super::codec::{
+    correlated::{CorrelatedDecoder, CorrelationId},
+    request::{EncodableRequest, RequestEncoder, VersionedRequest},
+    sendable::Sendable,
+};
 
 #[derive(Debug, Clone, Default)]
 struct ClientState {
@@ -50,7 +39,7 @@ pub enum KafkaClientError {
     Stopped,
 }
 
-type ResponseSender = oneshot::Sender<Result<KafkaResponse, KafkaClientError>>;
+type ResponseSender = oneshot::Sender<Result<BytesMut, KafkaClientError>>;
 
 /// Configuration for the Kafka client
 #[derive(Debug, Clone)]
@@ -75,20 +64,15 @@ impl Default for KafkaClientConfig {
 
 pub struct KafkaClient {
     state: ClientState,
-    sender: mpsc::Sender<(VersionedRequest, ResponseSender)>,
+    sender: mpsc::Sender<(EncodableRequest, ResponseSender)>,
     shutdown: oneshot::Sender<()>,
     client_id: Option<Arc<str>>,
-}
-
-#[inline]
-fn into_invalid_data(error: anyhow::Error) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
 impl KafkaClient {
     async fn run<S>(
         tcp: TcpStream,
-        mut rx: mpsc::Receiver<(VersionedRequest, ResponseSender)>,
+        mut rx: mpsc::Receiver<(EncodableRequest, ResponseSender)>,
         shutdown: S,
         max_frame_length: usize,
     ) where
@@ -101,44 +85,33 @@ impl KafkaClient {
 
         // TODO is there a more efficient data structure?
         // We know the keys are created sequentially with an atomic i32
-        let senders: Arc<DashMap<CorrelationId, (RequestRecord, ResponseSender)>> =
-            Arc::new(DashMap::new());
+        let senders: Arc<DashMap<CorrelationId, ResponseSender>> = Arc::new(DashMap::new());
 
         let senders_1 = senders.clone();
         let write_fut = async move {
             while let Some((req, sender)) = rx.recv().await {
-                let correlation_id = req.correlation_id;
-
-                let encodable_request: EncodableRequest = req.into();
-                let api_key = encodable_request.api_key();
-                let api_version = encodable_request.api_version();
-
-                let record = RequestRecord {
-                    api_key,
-                    api_version,
-                    response_header_version: api_key.response_header_version(api_version),
-                };
+                let correlation_id = req.correlation_id();
 
                 if sender.is_closed() {
                     // abandonded request, no need to send it
                     continue;
                 }
 
-                if let Err(e) = stream_out.send(encodable_request).await {
+                if let Err(e) = stream_out.send(req).await {
                     // failed to push message to tcp stream.
                     // if this send fails, the request was abandoned.
                     let _ = sender.send(Err(e.into()));
                     continue;
                 }
 
-                senders_1.insert(correlation_id, (record, sender));
+                senders_1.insert(correlation_id, sender);
             }
         };
 
         let senders_2 = senders.clone();
         let read_fut = async move {
             while let Some(read_result) = stream_in.next().await {
-                let mut frame = match read_result {
+                let frame = match read_result {
                     Ok(frame) => frame,
                     Err(e) => {
                         // TODO should we set up another channel to receive these errors?
@@ -149,26 +122,13 @@ impl KafkaClient {
                     }
                 };
 
-                let Some((_, (record, sender))) = senders_2.remove(&frame.id) else {
+                let Some((_, sender)) = senders_2.remove(&frame.id) else {
                     eprintln!("discarding frame with correlation id {:?}", frame.id);
                     continue;
                 };
 
-                if let Err(e) =
-                    ResponseHeader::decode(&mut frame.frame, record.response_header_version)
-                {
-                    // ok to ignore since it just means the request was abandoned
-                    let _ = sender.send(Err(into_invalid_data(e).into()));
-                    continue;
-                }
-
-                let msg =
-                    KafkaResponse::decode(&mut frame.frame, record.api_version, record.api_key)
-                        .map_err(into_invalid_data)
-                        .map_err(Into::into);
-
                 // ok to ignore since it just means the request was abandoned
-                let _ = sender.send(msg);
+                let _ = sender.send(Ok(frame.frame));
             }
         };
 
@@ -187,7 +147,7 @@ impl KafkaClient {
 
         let client_id = config.client_id.clone();
 
-        let (tx, rx) = mpsc::channel::<(VersionedRequest, ResponseSender)>(config.send_buffer_size);
+        let (tx, rx) = mpsc::channel::<(EncodableRequest, ResponseSender)>(config.send_buffer_size);
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
@@ -213,31 +173,43 @@ impl KafkaClient {
         let _ = self.shutdown.send(());
     }
 
-    pub async fn send(
+    pub async fn send<R: Sendable>(
         &self,
-        req: KafkaRequest,
+        req: R,
         api_version: i16,
-    ) -> Result<KafkaResponse, KafkaClientError> {
+    ) -> Result<R::Response, KafkaClientError> {
         let (tx, rx) = oneshot::channel();
 
+        let versioned = VersionedRequest {
+            api_version,
+            correlation_id: self
+                .state
+                .next_correlation_id
+                .fetch_add(1, Ordering::Relaxed)
+                .into(),
+            request: req.into(),
+            client_id: self.client_id.clone(),
+        };
+
+        let encodable_request: EncodableRequest = versioned.into();
+
+        let api_key = encodable_request.api_key();
+        let api_version = encodable_request.api_version();
+
+        let record = RequestRecord {
+            api_key,
+            api_version,
+            response_header_version: api_key.response_header_version(api_version),
+        };
+
         self.sender
-            .send((
-                VersionedRequest {
-                    api_version,
-                    correlation_id: self
-                        .state
-                        .next_correlation_id
-                        .fetch_add(1, Ordering::Relaxed)
-                        .into(),
-                    request: req,
-                    client_id: self.client_id.clone(),
-                },
-                tx,
-            ))
+            .send((encodable_request, tx))
             .await
             .map_err(|_| KafkaClientError::Stopped)?;
 
         // error happens when the client dropped our sender before sending anything.
-        rx.await.map_err(|_| KafkaClientError::Stopped)?
+        let frame = rx.await.map_err(|_| KafkaClientError::Stopped)??;
+
+        Ok(R::decode_frame(frame, record)?)
     }
 }

@@ -79,8 +79,7 @@ pub async fn main() -> anyhow::Result<()> {
                         .build()
                         .unwrap()])
                     .build()?])
-                .build()?
-                .into(),
+                .build()?,
             12,
         )
         .await
