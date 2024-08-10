@@ -89,15 +89,16 @@ impl KafkaClient {
 
         let senders_1 = senders.clone();
         let write_fut = async move {
-            while let Some((req, sender)) = rx.recv().await {
+            while let Some((req, mut sender)) = rx.recv().await {
                 let correlation_id = req.correlation_id();
 
-                if sender.is_closed() {
-                    // abandonded request, no need to send it
-                    continue;
-                }
+                // send is cancel-safe for FramedWrite
+                let result = tokio::select! {
+                    res = stream_out.send(req) => res,
+                    _ = sender.closed() => Ok(())
+                };
 
-                if let Err(e) = stream_out.send(req).await {
+                if let Err(e) = result {
                     // failed to push message to tcp stream.
                     // if this send fails, the request was abandoned.
                     let _ = sender.send(Err(e.into()));
