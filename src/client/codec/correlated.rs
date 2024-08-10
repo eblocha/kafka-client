@@ -24,10 +24,11 @@ pub struct CorrelatedDecoder {
 }
 
 impl CorrelatedDecoder {
-    pub fn new() -> Self {
+    pub fn new(max_frame_length: usize) -> Self {
         Self {
             raw_codec: codec::LengthDelimitedCodec::builder()
                 .length_field_length(LENGTH_FIELD_LENGTH)
+                .max_frame_length(max_frame_length)
                 .new_codec(),
         }
     }
@@ -66,7 +67,7 @@ mod test {
     fn includes_id() {
         let mut data: BytesMut = BytesMut::from_iter(b"\x00\x00\x00\x04\x00\x00\x00\x00");
 
-        let mut codec = CorrelatedDecoder::new();
+        let mut codec = CorrelatedDecoder::new(8 * 1024 * 1024);
 
         let res = codec.decode(&mut data).unwrap();
 
@@ -83,7 +84,7 @@ mod test {
     fn invalid_id() {
         let mut data: BytesMut = BytesMut::from_iter(b"\x00\x00\x00\x03\x00\x00\x00");
 
-        let mut codec = CorrelatedDecoder::new();
+        let mut codec = CorrelatedDecoder::new(8 * 1024 * 1024);
 
         let res = codec.decode(&mut data);
 
@@ -98,7 +99,7 @@ mod test {
     fn not_enough_data() {
         let mut data: BytesMut = BytesMut::from_iter(b"\x00\x00\x00\x04\x00\x00\x00");
 
-        let mut codec = CorrelatedDecoder::new();
+        let mut codec = CorrelatedDecoder::new(8 * 1024 * 1024);
 
         let res = codec.decode(&mut data).unwrap();
 

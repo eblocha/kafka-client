@@ -1,4 +1,5 @@
 use std::{
+    future::Future,
     io,
     sync::{
         atomic::{AtomicI32, Ordering},
@@ -8,17 +9,14 @@ use std::{
 
 use dashmap::DashMap;
 use derive_more::derive::From;
-use futures::{SinkExt, TryStreamExt};
+use futures::{SinkExt, StreamExt};
 use kafka_protocol::{
     messages::{ApiKey, ResponseHeader},
     protocol::Decodable,
 };
 use tokio::{
     net::{TcpStream, ToSocketAddrs},
-    sync::{
-        mpsc::{UnboundedReceiver, UnboundedSender},
-        oneshot,
-    },
+    sync::{mpsc, oneshot},
 };
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -43,18 +41,36 @@ struct ClientState {
     next_correlation_id: Arc<AtomicI32>,
 }
 
+#[allow(unused)]
 #[derive(Debug, From)]
 pub enum KafkaClientError {
+    /// Indicates an IO problem. This could be a bad socket or an encoding problem.
     Io(#[from] io::Error),
-    Rejected(VersionedRequest),
-    Other,
+    /// The client has stopped processing requests
+    Stopped,
 }
 
 type ResponseSender = oneshot::Sender<Result<KafkaResponse, KafkaClientError>>;
 
+#[derive(Debug, Clone)]
+pub struct KafkaClientConfig {
+    pub send_buffer_size: usize,
+    pub max_frame_length: usize,
+}
+
+impl Default for KafkaClientConfig {
+    fn default() -> Self {
+        Self {
+            send_buffer_size: 512,
+            max_frame_length: 8 * 1024 * 1024,
+        }
+    }
+}
+
 pub struct KafkaClient {
     state: ClientState,
-    sender: UnboundedSender<(VersionedRequest, ResponseSender)>,
+    sender: mpsc::Sender<(VersionedRequest, ResponseSender)>,
+    shutdown: oneshot::Sender<()>,
 }
 
 #[inline]
@@ -63,11 +79,21 @@ fn into_invalid_data(error: anyhow::Error) -> io::Error {
 }
 
 impl KafkaClient {
-    async fn run(tcp: TcpStream, mut rx: UnboundedReceiver<(VersionedRequest, ResponseSender)>) {
+    async fn run<S>(
+        tcp: TcpStream,
+        mut rx: mpsc::Receiver<(VersionedRequest, ResponseSender)>,
+        shutdown: S,
+        config: KafkaClientConfig
+    ) where
+        S: Future + Send + 'static,
+        S::Output: Send + 'static,
+    {
         let (r, w) = tcp.into_split();
-        let mut stream_in = FramedRead::new(r, CorrelatedDecoder::new());
-        let mut stream_out = FramedWrite::new(w, RequestEncoder::new());
+        let mut stream_in = FramedRead::new(r, CorrelatedDecoder::new(config.max_frame_length));
+        let mut stream_out = FramedWrite::new(w, RequestEncoder::new(config.max_frame_length));
 
+        // TODO is there a more efficient data structure?
+        // We know the keys are created sequentially with an atomic i32
         let senders: Arc<DashMap<CorrelationId, (RequestRecord, ResponseSender)>> =
             Arc::new(DashMap::new());
 
@@ -92,12 +118,9 @@ impl KafkaClient {
                 }
 
                 if let Err(e) = stream_out.send(encodable_request).await {
-                    // failed to push message to tcp stream
-                    if !sender.is_closed() {
-                        sender
-                            .send(Err(e.into()))
-                            .expect("Send failed on open oneshot channel. This is a bug.");
-                    }
+                    // failed to push message to tcp stream.
+                    // if this send fails, the request was abandoned.
+                    let _ = sender.send(Err(e.into()));
                     continue;
                 }
 
@@ -107,8 +130,18 @@ impl KafkaClient {
 
         let senders_2 = senders.clone();
         let read_fut = async move {
-            // TODO handle read error from tcp stream
-            while let Some(mut frame) = stream_in.try_next().await.unwrap() {
+            while let Some(read_result) = stream_in.next().await {
+                let mut frame = match read_result {
+                    Ok(frame) => frame,
+                    Err(e) => {
+                        // TODO should we set up another channel to receive these errors?
+                        // This means the tcp socket is bad somehow, or the frame looked funky.
+                        // Probably best to get a new connection.
+                        eprintln!("encountered unrecoverable IO error {e:?}");
+                        break;
+                    }
+                };
+
                 let Some((_, (record, sender))) = senders_2.remove(&frame.id) else {
                     eprintln!("discarding frame with correlation id {:?}", frame.id);
                     continue;
@@ -117,50 +150,49 @@ impl KafkaClient {
                 if let Err(e) =
                     ResponseHeader::decode(&mut frame.frame, record.response_header_version)
                 {
-                    if !sender.is_closed() {
-                        sender
-                            .send(Err(into_invalid_data(e).into()))
-                            .expect("Send failed on open oneshot channel. This is a bug.");
-                    }
+                    // ok to ignore since it just means the request was abandoned
+                    let _ = sender.send(Err(into_invalid_data(e).into()));
                     continue;
                 }
 
-                match KafkaResponse::decode(&mut frame.frame, record.api_version, record.api_key) {
-                    Ok(response) => {
-                        if !sender.is_closed() {
-                            sender
-                                .send(Ok(response))
-                                .expect("Send failed on open oneshot channel. This is a bug.")
-                        }
-                    }
-                    Err(e) => {
-                        if !sender.is_closed() {
-                            sender
-                                .send(Err(into_invalid_data(e).into()))
-                                .expect("Send failed on open oneshot channel. This is a bug.")
-                        }
-                    }
-                }
+                let msg =
+                    KafkaResponse::decode(&mut frame.frame, record.api_version, record.api_key)
+                        .map_err(into_invalid_data)
+                        .map_err(Into::into);
+
+                // ok to ignore since it just means the request was abandoned
+                let _ = sender.send(msg);
             }
         };
 
-        // TODO shutdown signal
         tokio::select! {
             _ = write_fut => {},
             _ = read_fut => {}
+            _ = shutdown => {}
         };
     }
 
-    pub async fn connect<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
+    pub async fn connect<A: ToSocketAddrs>(addr: A, config: KafkaClientConfig) -> io::Result<Self> {
         let tcp = TcpStream::connect(addr).await?;
 
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<(VersionedRequest, ResponseSender)>();
+        let (tx, rx) = mpsc::channel::<(VersionedRequest, ResponseSender)>(config.send_buffer_size);
 
-        tokio::spawn(KafkaClient::run(tcp, rx));
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+        tokio::spawn(KafkaClient::run(tcp, rx, shutdown_rx, config));
 
         let state = ClientState::default();
 
-        Ok(Self { state, sender: tx })
+        Ok(Self {
+            state,
+            sender: tx,
+            shutdown: shutdown_tx,
+        })
+    }
+
+    pub fn shutdown(self) {
+        // If this fails, it means the client has already dropped the receiver, so it's already shut down.
+        let _ = self.shutdown.send(());
     }
 
     pub async fn send(
@@ -168,7 +200,7 @@ impl KafkaClient {
         req: KafkaRequest,
         api_version: i16,
     ) -> Result<KafkaResponse, KafkaClientError> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
 
         self.sender
             .send((
@@ -183,9 +215,10 @@ impl KafkaClient {
                 },
                 tx,
             ))
-            .map_err(|e| KafkaClientError::Rejected(e.0 .0))?;
+            .await
+            .map_err(|_| KafkaClientError::Stopped)?;
 
         // error happens when the client dropped our sender before sending anything.
-        rx.await.map_err(|_| KafkaClientError::Other)?
+        rx.await.map_err(|_| KafkaClientError::Stopped)?
     }
 }

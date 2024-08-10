@@ -59,10 +59,11 @@ pub struct RequestEncoder {
 }
 
 impl RequestEncoder {
-    pub fn new() -> Self {
+    pub fn new(max_frame_length: usize) -> Self {
         Self {
             raw_codec: codec::LengthDelimitedCodec::builder()
                 .length_field_length(LENGTH_FIELD_LENGTH)
+                .max_frame_length(max_frame_length)
                 .new_codec(),
         }
     }
