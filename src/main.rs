@@ -1,19 +1,14 @@
 mod client;
 
-use bytes::{Bytes, BytesMut};
 use client::KafkaClient;
 
 use kafka_protocol::{
-    indexmap::IndexMap,
     messages::{
-        fetch_request::{FetchPartition, FetchTopic, FetchTopicBuilder},
-        produce_request::{PartitionProduceData, TopicProduceData},
-        FetchRequest, MetadataRequest, ProduceRequest, TopicName,
+        fetch_request::{FetchPartition, FetchTopic},
+        FetchRequest, TopicName,
     },
     protocol::{Builder, StrBytes},
-    records::{Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType},
 };
-use uuid::Uuid;
 
 #[tokio::main]
 pub async fn main() -> anyhow::Result<()> {
@@ -88,7 +83,8 @@ pub async fn main() -> anyhow::Result<()> {
                 .into(),
             12,
         )
-        .await?;
+        .await
+        .unwrap();
 
     println!("{res:#?}");
 

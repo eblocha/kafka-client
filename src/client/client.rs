@@ -7,14 +7,18 @@ use std::{
 };
 
 use dashmap::DashMap;
-use futures::{future::select_all, SinkExt, TryStreamExt};
+use derive_more::derive::From;
+use futures::{SinkExt, TryStreamExt};
 use kafka_protocol::{
     messages::{ApiKey, ResponseHeader},
     protocol::Decodable,
 };
 use tokio::{
     net::{TcpStream, ToSocketAddrs},
-    sync::{mpsc::UnboundedSender, oneshot},
+    sync::{
+        mpsc::{UnboundedReceiver, UnboundedSender},
+        oneshot,
+    },
 };
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -39,32 +43,27 @@ struct ClientState {
     next_correlation_id: Arc<AtomicI32>,
 }
 
-type ResponseSender = oneshot::Sender<KafkaResponse>;
+#[derive(Debug, From)]
+pub enum KafkaClientError {
+    Io(#[from] io::Error),
+    Rejected(VersionedRequest),
+    Other,
+}
+
+type ResponseSender = oneshot::Sender<Result<KafkaResponse, KafkaClientError>>;
 
 pub struct KafkaClient {
     state: ClientState,
     sender: UnboundedSender<(VersionedRequest, ResponseSender)>,
 }
 
-// #[inline]
-// fn into_invalid_input(error: anyhow::Error) -> io::Error {
-//     io::Error::new(io::ErrorKind::InvalidInput, error)
-// }
-
-// #[inline]
-// fn into_invalid_data(error: anyhow::Error) -> io::Error {
-//     io::Error::new(io::ErrorKind::InvalidData, error)
-// }
+#[inline]
+fn into_invalid_data(error: anyhow::Error) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, error)
+}
 
 impl KafkaClient {
-    pub async fn connect<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
-        let tcp = TcpStream::connect(addr).await?;
-
-        let (tx, mut rx) =
-            tokio::sync::mpsc::unbounded_channel::<(VersionedRequest, ResponseSender)>();
-
-        let state = ClientState::default();
-
+    async fn run(tcp: TcpStream, mut rx: UnboundedReceiver<(VersionedRequest, ResponseSender)>) {
         let (r, w) = tcp.into_split();
         let mut stream_in = FramedRead::new(r, CorrelatedDecoder::new());
         let mut stream_out = FramedWrite::new(w, RequestEncoder::new());
@@ -73,7 +72,7 @@ impl KafkaClient {
             Arc::new(DashMap::new());
 
         let senders_1 = senders.clone();
-        let write = tokio::spawn(async move {
+        let write_fut = async move {
             while let Some((req, sender)) = rx.recv().await {
                 let correlation_id = req.correlation_id;
 
@@ -87,54 +86,106 @@ impl KafkaClient {
                     response_header_version: api_key.response_header_version(api_version),
                 };
 
+                if sender.is_closed() {
+                    // abandonded request, no need to send it
+                    continue;
+                }
+
+                if let Err(e) = stream_out.send(encodable_request).await {
+                    // failed to push message to tcp stream
+                    if !sender.is_closed() {
+                        sender
+                            .send(Err(e.into()))
+                            .expect("Send failed on open oneshot channel. This is a bug.");
+                    }
+                    continue;
+                }
+
                 senders_1.insert(correlation_id, (record, sender));
-                stream_out.send(encodable_request).await.unwrap();
             }
-        });
+        };
 
         let senders_2 = senders.clone();
-        let read = tokio::spawn(async move {
+        let read_fut = async move {
+            // TODO handle read error from tcp stream
             while let Some(mut frame) = stream_in.try_next().await.unwrap() {
-                if let Some((_, (record, sender))) = senders_2.remove(&frame.id) {
-                    let _ =
-                        ResponseHeader::decode(&mut frame.frame, record.response_header_version)
-                            .unwrap();
+                let Some((_, (record, sender))) = senders_2.remove(&frame.id) else {
+                    eprintln!("discarding frame with correlation id {:?}", frame.id);
+                    continue;
+                };
 
-                    let response =
-                        KafkaResponse::decode(&mut frame.frame, record.api_version, record.api_key)
-                            .unwrap();
+                if let Err(e) =
+                    ResponseHeader::decode(&mut frame.frame, record.response_header_version)
+                {
+                    if !sender.is_closed() {
+                        sender
+                            .send(Err(into_invalid_data(e).into()))
+                            .expect("Send failed on open oneshot channel. This is a bug.");
+                    }
+                    continue;
+                }
 
-                    sender
-                        .send(response)
-                        .expect("response could not be delivered");
-                } else {
-                    eprintln!("discarding frame with correlation id {:?}", frame.id)
+                match KafkaResponse::decode(&mut frame.frame, record.api_version, record.api_key) {
+                    Ok(response) => {
+                        if !sender.is_closed() {
+                            sender
+                                .send(Ok(response))
+                                .expect("Send failed on open oneshot channel. This is a bug.")
+                        }
+                    }
+                    Err(e) => {
+                        if !sender.is_closed() {
+                            sender
+                                .send(Err(into_invalid_data(e).into()))
+                                .expect("Send failed on open oneshot channel. This is a bug.")
+                        }
+                    }
                 }
             }
-        });
+        };
 
-        // TODO shutdown
-        tokio::spawn(select_all([read, write]));
+        // TODO shutdown signal
+        tokio::select! {
+            _ = write_fut => {},
+            _ = read_fut => {}
+        };
+    }
+
+    pub async fn connect<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
+        let tcp = TcpStream::connect(addr).await?;
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<(VersionedRequest, ResponseSender)>();
+
+        tokio::spawn(KafkaClient::run(tcp, rx));
+
+        let state = ClientState::default();
 
         Ok(Self { state, sender: tx })
     }
 
-    pub async fn send(&self, req: KafkaRequest, api_version: i16) -> anyhow::Result<KafkaResponse> {
-        let (cb_tx, cb_rx) = tokio::sync::oneshot::channel();
+    pub async fn send(
+        &self,
+        req: KafkaRequest,
+        api_version: i16,
+    ) -> Result<KafkaResponse, KafkaClientError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
 
-        self.sender.send((
-            VersionedRequest {
-                api_version,
-                correlation_id: self
-                    .state
-                    .next_correlation_id
-                    .fetch_add(1, Ordering::Relaxed)
-                    .into(),
-                request: req,
-            },
-            cb_tx,
-        ))?;
+        self.sender
+            .send((
+                VersionedRequest {
+                    api_version,
+                    correlation_id: self
+                        .state
+                        .next_correlation_id
+                        .fetch_add(1, Ordering::Relaxed)
+                        .into(),
+                    request: req,
+                },
+                tx,
+            ))
+            .map_err(|e| KafkaClientError::Rejected(e.0 .0))?;
 
-        Ok(cb_rx.await?)
+        // error happens when the client dropped our sender before sending anything.
+        rx.await.map_err(|_| KafkaClientError::Other)?
     }
 }
