@@ -12,7 +12,7 @@ use kafka_protocol::{
 
 #[tokio::main]
 pub async fn main() -> anyhow::Result<()> {
-    let client = KafkaClient::connect("127.0.0.1:9092", KafkaClientConfig::default()).await?;
+    let client = KafkaClient::connect("127.0.0.1:9092", &KafkaClientConfig::default()).await?;
 
     // let mut record_buf = BytesMut::new();
 

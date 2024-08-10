@@ -52,10 +52,15 @@ pub enum KafkaClientError {
 
 type ResponseSender = oneshot::Sender<Result<KafkaResponse, KafkaClientError>>;
 
+/// Configuration for the Kafka client
 #[derive(Debug, Clone)]
 pub struct KafkaClientConfig {
+    /// Size of the request send buffer. Further requests will experience backpressure.
     pub send_buffer_size: usize,
+    /// Maximum frame length allowed in the transport layer. If a request is larger than this, an error is returned.
     pub max_frame_length: usize,
+    /// Client id to include with every request.
+    pub client_id: Option<Arc<str>>,
 }
 
 impl Default for KafkaClientConfig {
@@ -63,6 +68,7 @@ impl Default for KafkaClientConfig {
         Self {
             send_buffer_size: 512,
             max_frame_length: 8 * 1024 * 1024,
+            client_id: None,
         }
     }
 }
@@ -71,6 +77,7 @@ pub struct KafkaClient {
     state: ClientState,
     sender: mpsc::Sender<(VersionedRequest, ResponseSender)>,
     shutdown: oneshot::Sender<()>,
+    client_id: Option<Arc<str>>,
 }
 
 #[inline]
@@ -83,14 +90,14 @@ impl KafkaClient {
         tcp: TcpStream,
         mut rx: mpsc::Receiver<(VersionedRequest, ResponseSender)>,
         shutdown: S,
-        config: KafkaClientConfig
+        max_frame_length: usize,
     ) where
         S: Future + Send + 'static,
         S::Output: Send + 'static,
     {
         let (r, w) = tcp.into_split();
-        let mut stream_in = FramedRead::new(r, CorrelatedDecoder::new(config.max_frame_length));
-        let mut stream_out = FramedWrite::new(w, RequestEncoder::new(config.max_frame_length));
+        let mut stream_in = FramedRead::new(r, CorrelatedDecoder::new(max_frame_length));
+        let mut stream_out = FramedWrite::new(w, RequestEncoder::new(max_frame_length));
 
         // TODO is there a more efficient data structure?
         // We know the keys are created sequentially with an atomic i32
@@ -172,14 +179,24 @@ impl KafkaClient {
         };
     }
 
-    pub async fn connect<A: ToSocketAddrs>(addr: A, config: KafkaClientConfig) -> io::Result<Self> {
+    pub async fn connect<A: ToSocketAddrs>(
+        addr: A,
+        config: &KafkaClientConfig,
+    ) -> io::Result<Self> {
         let tcp = TcpStream::connect(addr).await?;
+
+        let client_id = config.client_id.clone();
 
         let (tx, rx) = mpsc::channel::<(VersionedRequest, ResponseSender)>(config.send_buffer_size);
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
-        tokio::spawn(KafkaClient::run(tcp, rx, shutdown_rx, config));
+        tokio::spawn(KafkaClient::run(
+            tcp,
+            rx,
+            shutdown_rx,
+            config.max_frame_length,
+        ));
 
         let state = ClientState::default();
 
@@ -187,6 +204,7 @@ impl KafkaClient {
             state,
             sender: tx,
             shutdown: shutdown_tx,
+            client_id,
         })
     }
 
@@ -212,6 +230,7 @@ impl KafkaClient {
                         .fetch_add(1, Ordering::Relaxed)
                         .into(),
                     request: req,
+                    client_id: self.client_id.clone(),
                 },
                 tx,
             ))

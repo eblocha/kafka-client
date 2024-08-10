@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, sync::Arc};
 
 use bytes::BytesMut;
 use kafka_protocol::{
@@ -16,6 +16,7 @@ pub struct VersionedRequest {
     pub request: KafkaRequest,
     pub correlation_id: CorrelationId,
     pub api_version: i16,
+    pub client_id: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone)]
@@ -44,7 +45,10 @@ impl From<VersionedRequest> for EncodableRequest {
             request: value.request,
             header: {
                 let mut h = RequestHeader::default();
-                h.client_id = Some(StrBytes::from_static_str("eblocha"));
+                h.client_id = value
+                    .client_id
+                    // FIXME there's no way around this copy until kafka-protocol supports Arc<str> (or better yet AsRef<str>)
+                    .map(|id| StrBytes::from_string(id.as_ref().to_owned()));
                 h.correlation_id = value.correlation_id.0;
                 h.request_api_key = api_key as i16;
                 h.request_api_version = value.api_version;
