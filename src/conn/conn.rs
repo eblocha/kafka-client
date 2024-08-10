@@ -19,14 +19,14 @@ use tokio::{
 };
 use tokio_util::codec::Framed;
 
-use crate::client::codec::sendable::RequestRecord;
+use crate::conn::codec::sendable::RequestRecord;
 
 use super::codec::{
     sendable::Sendable, CorrelationId, EncodableRequest, KafkaCodec, VersionedRequest,
 };
 
 #[derive(Debug, Clone, Default)]
-struct ClientState {
+struct ConnectionState {
     next_correlation_id: Arc<AtomicI32>,
 }
 
@@ -50,7 +50,7 @@ type ResponseSender = oneshot::Sender<Result<BytesMut, KafkaClientError>>;
 
 /// Configuration for the Kafka client
 #[derive(Debug, Clone)]
-pub struct KafkaClientConfig {
+pub struct KafkaConnectionConfig {
     /// Size of the request send buffer. Further requests will experience backpressure.
     pub send_buffer_size: usize,
     /// Maximum frame length allowed in the transport layer. If a request is larger than this, an error is returned.
@@ -59,7 +59,7 @@ pub struct KafkaClientConfig {
     pub client_id: Option<Arc<str>>,
 }
 
-impl Default for KafkaClientConfig {
+impl Default for KafkaConnectionConfig {
     fn default() -> Self {
         Self {
             send_buffer_size: 512,
@@ -69,14 +69,14 @@ impl Default for KafkaClientConfig {
     }
 }
 
-struct KafkaClientBackgroundTaskRunner<IO, S> {
+struct KafkaConnectionBackgroundTaskRunner<IO, S> {
     io: IO,
     rx: mpsc::Receiver<(EncodableRequest, ResponseSender)>,
     shutdown: S,
     max_frame_length: usize,
 }
 
-impl<IO, S> KafkaClientBackgroundTaskRunner<IO, S> {
+impl<IO, S> KafkaConnectionBackgroundTaskRunner<IO, S> {
     async fn run(mut self) -> Result<(), ShutdownError>
     where
         S: Future + Send + 'static,
@@ -143,18 +143,18 @@ impl<IO, S> KafkaClientBackgroundTaskRunner<IO, S> {
     }
 }
 
-pub struct KafkaClient {
-    state: ClientState,
+pub struct KafkaConnection {
+    state: ConnectionState,
     sender: mpsc::Sender<(EncodableRequest, ResponseSender)>,
     shutdown: oneshot::Sender<()>,
     client_id: Option<Arc<str>>,
     background_task_handle: JoinHandle<Result<(), ShutdownError>>,
 }
 
-impl KafkaClient {
+impl KafkaConnection {
     pub async fn connect<A: ToSocketAddrs>(
         addr: A,
-        config: &KafkaClientConfig,
+        config: &KafkaConnectionConfig,
     ) -> io::Result<Self> {
         let tcp = TcpStream::connect(addr).await?;
 
@@ -165,7 +165,7 @@ impl KafkaClient {
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
         let background_task_handle = tokio::spawn(
-            KafkaClientBackgroundTaskRunner {
+            KafkaConnectionBackgroundTaskRunner {
                 io: tcp,
                 rx,
                 shutdown: shutdown_rx,
@@ -174,7 +174,7 @@ impl KafkaClient {
             .run(),
         );
 
-        let state = ClientState::default();
+        let state = ConnectionState::default();
 
         let client = Self {
             state,

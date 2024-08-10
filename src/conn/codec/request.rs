@@ -7,7 +7,7 @@ use kafka_protocol::{
 };
 use tokio_util::codec;
 
-use crate::client::request::KafkaRequest;
+use crate::conn::request::KafkaRequest;
 
 use super::{correlated::CorrelationId, LENGTH_FIELD_LENGTH};
 

@@ -54,7 +54,7 @@ use kafka_protocol::{
     protocol::Decodable,
 };
 
-use crate::client::{request::KafkaRequest, response::KafkaResponse};
+use crate::conn::{request::KafkaRequest, response::KafkaResponse};
 
 #[inline]
 fn into_invalid_data(error: anyhow::Error) -> io::Error {

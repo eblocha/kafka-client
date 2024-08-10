@@ -1,6 +1,6 @@
-mod client;
+mod conn;
 
-use client::{KafkaClient, KafkaClientConfig};
+use conn::{KafkaConnection, KafkaConnectionConfig};
 
 use kafka_protocol::{
     messages::{
@@ -12,7 +12,7 @@ use kafka_protocol::{
 
 #[tokio::main]
 pub async fn main() -> anyhow::Result<()> {
-    let client = KafkaClient::connect("127.0.0.1:9092", &KafkaClientConfig::default()).await?;
+    let conn = KafkaConnection::connect("127.0.0.1:9092", &KafkaConnectionConfig::default()).await?;
 
     // let mut record_buf = BytesMut::new();
 
@@ -60,7 +60,7 @@ pub async fn main() -> anyhow::Result<()> {
 
     // println!("{res:#?}");
 
-    let res = client
+    let res = conn
         .send(
             FetchRequest::builder()
                 .cluster_id(Some(StrBytes::from_static_str("CvtEUt71RdKpIueT-oot1Q")))
@@ -87,7 +87,7 @@ pub async fn main() -> anyhow::Result<()> {
 
     println!("{res:#?}");
 
-    client.shutdown();
+    conn.shutdown();
 
     Ok(())
 }
