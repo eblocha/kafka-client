@@ -12,18 +12,17 @@ use dashmap::DashMap;
 use derive_more::derive::From;
 use futures::{SinkExt, StreamExt};
 use tokio::{
+    io::{AsyncRead, AsyncWrite},
     net::{TcpStream, ToSocketAddrs},
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
-use tokio_util::codec::{FramedRead, FramedWrite};
+use tokio_util::codec::Framed;
 
 use crate::client::codec::sendable::RequestRecord;
 
 use super::codec::{
-    correlated::{CorrelatedDecoder, CorrelationId},
-    request::{EncodableRequest, RequestEncoder, VersionedRequest},
-    sendable::Sendable,
+    sendable::Sendable, CorrelationId, EncodableRequest, KafkaCodec, VersionedRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -70,28 +69,22 @@ impl Default for KafkaClientConfig {
     }
 }
 
-pub struct KafkaClient {
-    state: ClientState,
-    sender: mpsc::Sender<(EncodableRequest, ResponseSender)>,
-    shutdown: oneshot::Sender<()>,
-    client_id: Option<Arc<str>>,
-    background_task_handle: JoinHandle<Result<(), ShutdownError>>,
+struct KafkaClientBackgroundTaskRunner<IO, S> {
+    io: IO,
+    rx: mpsc::Receiver<(EncodableRequest, ResponseSender)>,
+    shutdown: S,
+    max_frame_length: usize,
 }
 
-impl KafkaClient {
-    async fn run<S>(
-        tcp: TcpStream,
-        mut rx: mpsc::Receiver<(EncodableRequest, ResponseSender)>,
-        shutdown: S,
-        max_frame_length: usize,
-    ) -> Result<(), ShutdownError>
+impl<IO, S> KafkaClientBackgroundTaskRunner<IO, S> {
+    async fn run(mut self) -> Result<(), ShutdownError>
     where
         S: Future + Send + 'static,
         S::Output: Send + 'static,
+        IO: AsyncRead + AsyncWrite,
     {
-        let (r, w) = tcp.into_split();
-        let mut stream_in = FramedRead::new(r, CorrelatedDecoder::new(max_frame_length));
-        let mut stream_out = FramedWrite::new(w, RequestEncoder::new(max_frame_length));
+        let (mut sink, mut stream) =
+            Framed::new(self.io, KafkaCodec::new(self.max_frame_length)).split();
 
         // TODO is there a more efficient data structure?
         // We know the keys are created sequentially with an atomic i32
@@ -99,12 +92,12 @@ impl KafkaClient {
 
         let senders_1 = senders.clone();
         let write_fut = async move {
-            while let Some((req, mut sender)) = rx.recv().await {
+            while let Some((req, mut sender)) = self.rx.recv().await {
                 let correlation_id = req.correlation_id();
 
                 // send is cancel-safe for FramedWrite
                 let result = tokio::select! {
-                    res = stream_out.send(req) => res,
+                    res = sink.send(req) => res,
                     _ = sender.closed() => Ok(())
                 };
 
@@ -121,7 +114,7 @@ impl KafkaClient {
 
         let senders_2 = senders.clone();
         let read_fut = async move {
-            while let Some(read_result) = stream_in.next().await {
+            while let Some(read_result) = stream.next().await {
                 let frame = match read_result {
                     Ok(frame) => frame,
                     Err(e) => {
@@ -145,10 +138,20 @@ impl KafkaClient {
         tokio::select! {
             _ = write_fut => Ok(()),
             res = read_fut => res,
-            _ = shutdown => Ok(())
+            _ = self.shutdown => Ok(())
         }
     }
+}
 
+pub struct KafkaClient {
+    state: ClientState,
+    sender: mpsc::Sender<(EncodableRequest, ResponseSender)>,
+    shutdown: oneshot::Sender<()>,
+    client_id: Option<Arc<str>>,
+    background_task_handle: JoinHandle<Result<(), ShutdownError>>,
+}
+
+impl KafkaClient {
     pub async fn connect<A: ToSocketAddrs>(
         addr: A,
         config: &KafkaClientConfig,
@@ -161,12 +164,15 @@ impl KafkaClient {
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
-        let background_task_handle = tokio::spawn(KafkaClient::run(
-            tcp,
-            rx,
-            shutdown_rx,
-            config.max_frame_length,
-        ));
+        let background_task_handle = tokio::spawn(
+            KafkaClientBackgroundTaskRunner {
+                io: tcp,
+                rx,
+                shutdown: shutdown_rx,
+                max_frame_length: config.max_frame_length,
+            }
+            .run(),
+        );
 
         let state = ClientState::default();
 

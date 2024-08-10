@@ -20,7 +20,7 @@ pub struct VersionedRequest {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct EncodableRequest {
+pub struct EncodableRequest {
     request: KafkaRequest,
     header: RequestHeader,
     api_key: ApiKey,
