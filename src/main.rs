@@ -87,5 +87,7 @@ pub async fn main() -> anyhow::Result<()> {
 
     println!("{res:#?}");
 
+    client.shutdown();
+
     Ok(())
 }

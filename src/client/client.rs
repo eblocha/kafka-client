@@ -14,6 +14,7 @@ use futures::{SinkExt, StreamExt};
 use tokio::{
     net::{TcpStream, ToSocketAddrs},
     sync::{mpsc, oneshot},
+    task::JoinHandle,
 };
 use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -37,6 +38,13 @@ pub enum KafkaClientError {
     Io(#[from] io::Error),
     /// The client has stopped processing requests
     Stopped,
+}
+
+#[allow(unused)]
+#[derive(Debug, From)]
+pub enum ShutdownError {
+    Io(#[from] io::Error),
+    Panic,
 }
 
 type ResponseSender = oneshot::Sender<Result<BytesMut, KafkaClientError>>;
@@ -67,6 +75,7 @@ pub struct KafkaClient {
     sender: mpsc::Sender<(EncodableRequest, ResponseSender)>,
     shutdown: oneshot::Sender<()>,
     client_id: Option<Arc<str>>,
+    background_task_handle: JoinHandle<Result<(), ShutdownError>>,
 }
 
 impl KafkaClient {
@@ -75,7 +84,8 @@ impl KafkaClient {
         mut rx: mpsc::Receiver<(EncodableRequest, ResponseSender)>,
         shutdown: S,
         max_frame_length: usize,
-    ) where
+    ) -> Result<(), ShutdownError>
+    where
         S: Future + Send + 'static,
         S::Output: Send + 'static,
     {
@@ -115,29 +125,28 @@ impl KafkaClient {
                 let frame = match read_result {
                     Ok(frame) => frame,
                     Err(e) => {
-                        // TODO should we set up another channel to receive these errors?
                         // This means the tcp socket is bad somehow, or the frame looked funky.
                         // Probably best to get a new connection.
-                        eprintln!("encountered unrecoverable IO error {e:?}");
-                        break;
+                        return Err(ShutdownError::Io(e));
                     }
                 };
 
                 let Some((_, sender)) = senders_2.remove(&frame.id) else {
-                    eprintln!("discarding frame with correlation id {:?}", frame.id);
                     continue;
                 };
 
                 // ok to ignore since it just means the request was abandoned
                 let _ = sender.send(Ok(frame.frame));
             }
+
+            Ok(())
         };
 
         tokio::select! {
-            _ = write_fut => {},
-            _ = read_fut => {}
-            _ = shutdown => {}
-        };
+            _ = write_fut => Ok(()),
+            res = read_fut => res,
+            _ = shutdown => Ok(())
+        }
     }
 
     pub async fn connect<A: ToSocketAddrs>(
@@ -152,7 +161,7 @@ impl KafkaClient {
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
-        tokio::spawn(KafkaClient::run(
+        let background_task_handle = tokio::spawn(KafkaClient::run(
             tcp,
             rx,
             shutdown_rx,
@@ -161,19 +170,38 @@ impl KafkaClient {
 
         let state = ClientState::default();
 
-        Ok(Self {
+        let client = Self {
             state,
             sender: tx,
             shutdown: shutdown_tx,
             client_id,
-        })
+            background_task_handle,
+        };
+
+        Ok(client)
     }
 
+    /// Send the shutdown signal to the background task
     pub fn shutdown(self) {
         // If this fails, it means the client has already dropped the receiver, so it's already shut down.
         let _ = self.shutdown.send(());
     }
 
+    /// Wait for the client to shut down
+    pub async fn wait_for_shutdown(self) -> Result<(), ShutdownError> {
+        match self.background_task_handle.await {
+            Ok(res) => res,
+            Err(join_err) => {
+                if join_err.is_panic() {
+                    Err(ShutdownError::Panic)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// Sends a request and returns a future to await the response
     pub async fn send<R: Sendable>(
         &self,
         req: R,
