@@ -1,5 +1,4 @@
 use std::{
-    future::Future,
     io,
     sync::{
         atomic::{AtomicI32, Ordering},
@@ -69,18 +68,15 @@ impl Default for KafkaConnectionConfig {
     }
 }
 
-struct KafkaConnectionBackgroundTaskRunner<IO, S> {
+struct KafkaConnectionBackgroundTaskRunner<IO> {
     io: IO,
     rx: mpsc::Receiver<(EncodableRequest, ResponseSender)>,
-    shutdown: S,
     max_frame_length: usize,
 }
 
-impl<IO, S> KafkaConnectionBackgroundTaskRunner<IO, S> {
+impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
     async fn run(mut self) -> Result<(), ShutdownError>
     where
-        S: Future + Send + 'static,
-        S::Output: Send + 'static,
         IO: AsyncRead + AsyncWrite,
     {
         let (mut sink, mut stream) =
@@ -137,8 +133,7 @@ impl<IO, S> KafkaConnectionBackgroundTaskRunner<IO, S> {
 
         tokio::select! {
             _ = write_fut => Ok(()),
-            res = read_fut => res,
-            _ = self.shutdown => Ok(())
+            res = read_fut => res
         }
     }
 }
@@ -146,7 +141,6 @@ impl<IO, S> KafkaConnectionBackgroundTaskRunner<IO, S> {
 pub struct KafkaConnection {
     state: ConnectionState,
     sender: mpsc::Sender<(EncodableRequest, ResponseSender)>,
-    shutdown: oneshot::Sender<()>,
     client_id: Option<Arc<str>>,
     background_task_handle: JoinHandle<Result<(), ShutdownError>>,
 }
@@ -162,13 +156,10 @@ impl KafkaConnection {
 
         let (tx, rx) = mpsc::channel::<(EncodableRequest, ResponseSender)>(config.send_buffer_size);
 
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-
         let background_task_handle = tokio::spawn(
             KafkaConnectionBackgroundTaskRunner {
                 io: tcp,
                 rx,
-                shutdown: shutdown_rx,
                 max_frame_length: config.max_frame_length,
             }
             .run(),
@@ -179,32 +170,11 @@ impl KafkaConnection {
         let client = Self {
             state,
             sender: tx,
-            shutdown: shutdown_tx,
             client_id,
             background_task_handle,
         };
 
         Ok(client)
-    }
-
-    /// Send the shutdown signal to the background task
-    pub fn shutdown(self) {
-        // If this fails, it means the client has already dropped the receiver, so it's already shut down.
-        let _ = self.shutdown.send(());
-    }
-
-    /// Wait for the client to shut down
-    pub async fn wait_for_shutdown(self) -> Result<(), ShutdownError> {
-        match self.background_task_handle.await {
-            Ok(res) => res,
-            Err(join_err) => {
-                if join_err.is_panic() {
-                    Err(ShutdownError::Panic)
-                } else {
-                    Ok(())
-                }
-            }
-        }
     }
 
     /// Sends a request and returns a future to await the response
@@ -246,5 +216,11 @@ impl KafkaConnection {
         let frame = rx.await.map_err(|_| KafkaClientError::Stopped)??;
 
         Ok(R::decode_frame(frame, record)?)
+    }
+}
+
+impl Drop for KafkaConnection {
+    fn drop(&mut self) {
+        self.background_task_handle.abort();
     }
 }

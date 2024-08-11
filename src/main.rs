@@ -14,52 +14,6 @@ use kafka_protocol::{
 pub async fn main() -> anyhow::Result<()> {
     let conn = KafkaConnection::connect("127.0.0.1:9092", &KafkaConnectionConfig::default()).await?;
 
-    // let mut record_buf = BytesMut::new();
-
-    // RecordBatchEncoder::encode(
-    //     &mut record_buf,
-    //     [Record {
-    //         transactional: false,
-    //         control: false,
-    //         partition_leader_epoch: -1,
-    //         producer_id: 0,
-    //         producer_epoch: 0,
-    //         timestamp_type: TimestampType::Creation,
-    //         offset: 0,
-    //         sequence: 0,
-    //         timestamp: 1723270529927,
-    //         key: Some(Bytes::from_static(b"key")),
-    //         value: Some(Bytes::from_static(b"Hello world")),
-    //         headers: IndexMap::new(),
-    //     }]
-    //     .iter(),
-    //     &RecordEncodeOptions {
-    //         version: 2,
-    //         compression: Compression::None,
-    //     },
-    // )?;
-
-    // let res = client
-    //     .send(
-    //         ProduceRequest::builder()
-    //             .acks(1)
-    //             .topic_data(IndexMap::from_iter([(
-    //                 TopicName(StrBytes::from_static_str("test-topic")),
-    //                 TopicProduceData::builder()
-    //                     .partition_data(vec![PartitionProduceData::builder()
-    //                         .index(0)
-    //                         .records(Some(record_buf.into()))
-    //                         .build()?])
-    //                     .build()?,
-    //             )]))
-    //             .build()?
-    //             .into(),
-    //         9,
-    //     )
-    //     .await?;
-
-    // println!("{res:#?}");
-
     let res = conn
         .send(
             FetchRequest::builder()
@@ -86,8 +40,6 @@ pub async fn main() -> anyhow::Result<()> {
         .unwrap();
 
     println!("{res:#?}");
-
-    conn.shutdown();
 
     Ok(())
 }
