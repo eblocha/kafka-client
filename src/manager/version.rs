@@ -88,7 +88,7 @@ impl VersionedConnection {
         })
     }
 
-    /// Send a response using the highest common version
+    /// Send a request using the highest common version
     pub async fn send<R: Sendable>(
         &self,
         req: R,

@@ -90,15 +90,18 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                         // send is cancel-safe for Framed
                         let result = tokio::select! {
                             res = sink.send(req) => res,
-                            _ = sender.closed() => Ok(())
+                            _ = sender.closed() => continue
                         };
 
-                        if let Err(e) = result {
-                            // failed to push message to tcp stream.
-                            // if this send fails, the request was abandoned.
-                            let _ = sender.send(Err(e.into()));
-                        } else {
-                            senders.insert(correlation_id, sender);
+                        match result {
+                            Err(e) => {
+                                // failed to push message to tcp stream.
+                                // if this send fails, the request was abandoned.
+                                let _ = sender.send(Err(e.into()));
+                            },
+                            Ok(_) => {
+                                senders.insert(correlation_id, sender);
+                            }
                         }
                     },
                     None => break
