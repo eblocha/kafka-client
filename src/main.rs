@@ -9,10 +9,13 @@ use kafka_protocol::{
     },
     protocol::{Builder, StrBytes},
 };
+use tokio::net::TcpStream;
 
 #[tokio::main]
 pub async fn main() -> anyhow::Result<()> {
-    let conn = KafkaConnection::connect("127.0.0.1:9092", &KafkaConnectionConfig::default()).await?;
+    let tcp = TcpStream::connect("127.0.0.1:9092").await?;
+
+    let conn = KafkaConnection::connect(tcp, &KafkaConnectionConfig::default()).await?;
 
     let res = conn
         .send(

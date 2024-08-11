@@ -12,7 +12,6 @@ use derive_more::derive::From;
 use futures::{SinkExt, StreamExt};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    net::{TcpStream, ToSocketAddrs},
     sync::{mpsc, oneshot},
     task::JoinHandle,
 };
@@ -146,24 +145,21 @@ pub struct KafkaConnection {
 }
 
 impl KafkaConnection {
-    pub async fn connect<A: ToSocketAddrs>(
-        addr: A,
+    pub async fn connect<IO: AsyncRead + AsyncWrite + Send + 'static>(
+        io: IO,
         config: &KafkaConnectionConfig,
     ) -> io::Result<Self> {
-        let tcp = TcpStream::connect(addr).await?;
-
         let client_id = config.client_id.clone();
 
         let (tx, rx) = mpsc::channel::<(EncodableRequest, ResponseSender)>(config.send_buffer_size);
 
-        let background_task_handle = tokio::spawn(
-            KafkaConnectionBackgroundTaskRunner {
-                io: tcp,
-                rx,
-                max_frame_length: config.max_frame_length,
-            }
-            .run(),
-        );
+        let task_runner = KafkaConnectionBackgroundTaskRunner {
+            io,
+            rx,
+            max_frame_length: config.max_frame_length,
+        };
+
+        let background_task_handle = tokio::spawn(task_runner.run());
 
         let state = ConnectionState::default();
 
