@@ -31,8 +31,9 @@ pub async fn main() -> anyhow::Result<()> {
             r.topics = Some(vec![topic]);
             r
         })
-        .await
-        .unwrap();
+        .await?;
+
+    conn.shutdown().await;
 
     println!("{res:#?}");
 

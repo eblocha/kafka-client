@@ -13,9 +13,12 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::{mpsc, oneshot},
-    task::JoinHandle,
 };
-use tokio_util::codec::Framed;
+use tokio_util::{
+    codec::Framed,
+    sync::{CancellationToken, DropGuard},
+    task::{task_tracker::TaskTrackerWaitFuture, TaskTracker},
+};
 
 use crate::conn::codec::sendable::RequestRecord;
 
@@ -28,7 +31,6 @@ struct ConnectionState {
     next_correlation_id: AtomicI32,
 }
 
-#[allow(unused)]
 #[derive(Debug, Error)]
 pub enum KafkaConnectionError {
     /// Indicates an IO problem. This could be a bad socket or an encoding problem.
@@ -37,15 +39,6 @@ pub enum KafkaConnectionError {
     /// The client has stopped processing requests
     #[error("the connection is closed")]
     Closed,
-}
-
-#[allow(unused)]
-#[derive(Debug, Error)]
-pub enum ShutdownError {
-    #[error(transparent)]
-    Io(#[from] io::Error),
-    #[error("the background task panicked")]
-    Panic,
 }
 
 type ResponseSender = oneshot::Sender<Result<BytesMut, KafkaConnectionError>>;
@@ -75,10 +68,11 @@ struct KafkaConnectionBackgroundTaskRunner<IO> {
     io: IO,
     rx: mpsc::Receiver<(EncodableRequest, ResponseSender)>,
     max_frame_length: usize,
+    cancellation_token: CancellationToken,
 }
 
 impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
-    async fn run(mut self) -> Result<(), ShutdownError>
+    async fn run(mut self) -> io::Result<()>
     where
         IO: AsyncRead + AsyncWrite,
     {
@@ -114,14 +108,7 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
         let senders_2 = senders.clone();
         let read_fut = async move {
             while let Some(read_result) = stream.next().await {
-                let frame = match read_result {
-                    Ok(frame) => frame,
-                    Err(e) => {
-                        // This means the tcp socket is bad somehow, or the frame looked funky.
-                        // Probably best to get a new connection.
-                        return Err(ShutdownError::Io(e));
-                    }
-                };
+                let frame = read_result?;
 
                 let Some((_, sender)) = senders_2.remove(&frame.id) else {
                     continue;
@@ -136,16 +123,23 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
 
         tokio::select! {
             _ = write_fut => Ok(()),
-            res = read_fut => res
+            res = read_fut => res,
+            _ = self.cancellation_token.cancelled() => Ok(())
         }
     }
 }
 
+/// A connection to a Kafka broker
+///
+/// This connection supports multiplexed async io.
+/// The connection will be closed on drop.
 pub struct KafkaConnection {
     state: ConnectionState,
     sender: mpsc::Sender<(EncodableRequest, ResponseSender)>,
     client_id: Option<Arc<str>>,
-    background_task_handle: JoinHandle<Result<(), ShutdownError>>,
+    task_tracker: TaskTracker,
+    cancellation_token: CancellationToken,
+    _cancel_on_drop: DropGuard,
 }
 
 impl KafkaConnection {
@@ -155,15 +149,22 @@ impl KafkaConnection {
     ) -> io::Result<Self> {
         let client_id = config.client_id.clone();
 
+        let cancellation_token = CancellationToken::new();
+
         let (tx, rx) = mpsc::channel::<(EncodableRequest, ResponseSender)>(config.send_buffer_size);
 
         let task_runner = KafkaConnectionBackgroundTaskRunner {
             io,
             rx,
             max_frame_length: config.max_frame_length,
+            cancellation_token: cancellation_token.clone(),
         };
 
-        let background_task_handle = tokio::spawn(task_runner.run());
+        let task_tracker = TaskTracker::new();
+
+        task_tracker.spawn(task_runner.run());
+
+        task_tracker.close();
 
         let state = ConnectionState::default();
 
@@ -171,7 +172,9 @@ impl KafkaConnection {
             state,
             sender: tx,
             client_id,
-            background_task_handle,
+            task_tracker,
+            cancellation_token: cancellation_token.clone(),
+            _cancel_on_drop: cancellation_token.drop_guard(),
         };
 
         Ok(client)
@@ -216,10 +219,12 @@ impl KafkaConnection {
 
         Ok(R::decode_frame(frame, record)?)
     }
-}
 
-impl Drop for KafkaConnection {
-    fn drop(&mut self) {
-        self.background_task_handle.abort();
+    /// Shut down the connection. This is the preferred method to close a connection gracefully.
+    ///
+    /// Returns a future that can be awaited to wait for shutdown to complete.
+    pub fn shutdown(&self) -> TaskTrackerWaitFuture<'_> {
+        self.cancellation_token.cancel();
+        self.task_tracker.wait()
     }
 }

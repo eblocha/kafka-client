@@ -16,7 +16,7 @@ kafka-protocol = "0.10.0"
 pin-project-lite = "0.2.14"
 thiserror = "1.0.63"
 tokio = { version = "1.39.2", features = ["full"] }
-tokio-util = { version = "0.7.11", features = ["codec"] }
+tokio-util = { version = "0.7.11", features = ["codec", "rt"] }
 tower = { version = "0.4.13", features = ["util"] }
 uuid = { version = "1.10.0", features = ["v4"] }
 want = "0.3.1"

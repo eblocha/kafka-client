@@ -4,6 +4,7 @@ use kafka_protocol::{
 };
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_util::task::task_tracker::TaskTrackerWaitFuture;
 
 use crate::{
     conn::{KafkaConnection, KafkaConnectionConfig, KafkaConnectionError, Sendable},
@@ -34,27 +35,6 @@ pub enum VersionedConnectionError {
     /// The server does not support any version in the request range
     #[error("the server does not support any version in the request range")]
     Version,
-}
-
-fn determine_version(
-    range: &VersionRange,
-    api_key: i16,
-    response: &ApiVersionsResponse,
-) -> Option<i16> {
-    let Some(broker_versions) = response.api_keys.get(&api_key) else {
-        return None;
-    };
-
-    let intersection = range.intersect(&VersionRange {
-        min: broker_versions.min_version,
-        max: broker_versions.max_version,
-    });
-
-    if intersection.is_empty() {
-        return None;
-    }
-
-    Some(intersection.max)
 }
 
 fn create_version_request() -> ApiVersionsRequest {
@@ -91,6 +71,7 @@ async fn negotiate(
 }
 
 impl VersionedConnection {
+    /// Wrap an io stream with a Kafka connection, and negotiate api version information
     pub async fn connect<IO: AsyncRead + AsyncWrite + Send + 'static>(
         io: IO,
         config: &KafkaConnectionConfig,
@@ -107,16 +88,44 @@ impl VersionedConnection {
         })
     }
 
+    /// Send a response using the highest common version
     pub async fn send<R: Sendable>(
         &mut self,
         req: R,
     ) -> Result<R::Response, VersionedConnectionError> {
-        let version = determine_version(&R::VERSIONS, R::KEY, &self.api_versions);
+        let version = self.determine_version(R::KEY, &R::VERSIONS);
 
         let Some(version) = version else {
             return Err(VersionedConnectionError::Version);
         };
 
         Ok(self.conn.send(req, version).await?)
+    }
+
+    /// Determine the maximum supported version for an api key.
+    ///
+    /// Returns None if there is no version overlap or the server does not support the request type
+    pub fn determine_version(&self, api_key: i16, range: &VersionRange) -> Option<i16> {
+        let Some(broker_versions) = self.api_versions.api_keys.get(&api_key) else {
+            return None;
+        };
+
+        let intersection = range.intersect(&VersionRange {
+            min: broker_versions.min_version,
+            max: broker_versions.max_version,
+        });
+
+        if intersection.is_empty() {
+            return None;
+        }
+
+        Some(intersection.max)
+    }
+
+    /// Shut down the connection
+    /// 
+    /// Returns a future that can be awaited to wait for shutdown to complete.
+    pub fn shutdown(&self) -> TaskTrackerWaitFuture<'_> {
+        self.conn.shutdown()
     }
 }
