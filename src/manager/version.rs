@@ -90,7 +90,7 @@ impl VersionedConnection {
 
     /// Send a response using the highest common version
     pub async fn send<R: Sendable>(
-        &mut self,
+        &self,
         req: R,
     ) -> Result<R::Response, VersionedConnectionError> {
         let version = self.determine_version(R::KEY, &R::VERSIONS);

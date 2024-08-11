@@ -15,7 +15,7 @@ use tokio::net::TcpStream;
 pub async fn main() -> anyhow::Result<()> {
     let tcp = TcpStream::connect("127.0.0.1:9092").await?;
 
-    let mut conn = VersionedConnection::connect(tcp, &KafkaConnectionConfig::default()).await?;
+    let conn = VersionedConnection::connect(tcp, &KafkaConnectionConfig::default()).await?;
 
     let topic = {
         let mut mrt = MetadataRequestTopic::default();
