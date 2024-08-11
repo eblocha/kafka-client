@@ -109,10 +109,13 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                             // ok to ignore since it just means the request was abandoned
                             let _ = sender.send(Ok(frame.frame));
                         }
-
                     },
-                    // TODO can we expose this error?
-                    Some(Err(_e)) => break,
+                    Some(Err(e)) => {
+                        for (_, sender) in senders {
+                            let _ = sender.send(Err(KafkaConnectionError::Io(e.kind().into())));
+                        }
+                        break
+                    },
                     None => break
                 },
                 _ = self.cancellation_token.cancelled() => break
