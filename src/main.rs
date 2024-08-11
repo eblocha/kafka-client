@@ -1,44 +1,36 @@
 mod conn;
+mod manager;
+mod proto;
 
-use conn::{KafkaConnection, KafkaConnectionConfig};
+use conn::KafkaConnectionConfig;
 
 use kafka_protocol::{
-    messages::{
-        fetch_request::{FetchPartition, FetchTopic},
-        FetchRequest, TopicName,
-    },
-    protocol::{Builder, StrBytes},
+    messages::{metadata_request::MetadataRequestTopic, MetadataRequest, TopicName},
+    protocol::StrBytes,
 };
+use manager::version::VersionedConnection;
 use tokio::net::TcpStream;
 
 #[tokio::main]
 pub async fn main() -> anyhow::Result<()> {
     let tcp = TcpStream::connect("127.0.0.1:9092").await?;
 
-    let conn = KafkaConnection::connect(tcp, &KafkaConnectionConfig::default()).await?;
+    let mut conn = VersionedConnection::connect(tcp, &KafkaConnectionConfig::default()).await?;
+
+    let topic = {
+        let mut mrt = MetadataRequestTopic::default();
+        mrt.name = Some(TopicName(StrBytes::from_static_str("test-topic")));
+        mrt
+    };
 
     let res = conn
-        .send(
-            FetchRequest::builder()
-                .cluster_id(Some(StrBytes::from_static_str("CvtEUt71RdKpIueT-oot1Q")))
-                .isolation_level(0)
-                .min_bytes(1)
-                .max_wait_ms(200)
-                .max_bytes(1024)
-                .topics(vec![FetchTopic::builder()
-                    .topic(TopicName(StrBytes::from_static_str("test-topic")))
-                    .partitions(vec![FetchPartition::builder()
-                        .partition(0)
-                        .current_leader_epoch(4)
-                        .partition_max_bytes(1024)
-                        .fetch_offset(2)
-                        .last_fetched_epoch(-1)
-                        .build()
-                        .unwrap()])
-                    .build()?])
-                .build()?,
-            12,
-        )
+        .send({
+            let mut r = MetadataRequest::default();
+            r.include_topic_authorized_operations = true;
+            r.allow_auto_topic_creation = false;
+            r.topics = Some(vec![topic]);
+            r
+        })
         .await
         .unwrap();
 

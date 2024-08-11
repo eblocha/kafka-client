@@ -8,8 +8,8 @@ use std::{
 
 use bytes::BytesMut;
 use dashmap::DashMap;
-use derive_more::derive::From;
 use futures::{SinkExt, StreamExt};
+use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::{mpsc, oneshot},
@@ -23,28 +23,32 @@ use super::codec::{
     sendable::Sendable, CorrelationId, EncodableRequest, KafkaCodec, VersionedRequest,
 };
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 struct ConnectionState {
-    next_correlation_id: Arc<AtomicI32>,
+    next_correlation_id: AtomicI32,
 }
 
 #[allow(unused)]
-#[derive(Debug, From)]
-pub enum KafkaClientError {
+#[derive(Debug, Error)]
+pub enum KafkaConnectionError {
     /// Indicates an IO problem. This could be a bad socket or an encoding problem.
+    #[error(transparent)]
     Io(#[from] io::Error),
     /// The client has stopped processing requests
-    Stopped,
+    #[error("the connection is closed")]
+    Closed,
 }
 
 #[allow(unused)]
-#[derive(Debug, From)]
+#[derive(Debug, Error)]
 pub enum ShutdownError {
+    #[error(transparent)]
     Io(#[from] io::Error),
+    #[error("the background task panicked")]
     Panic,
 }
 
-type ResponseSender = oneshot::Sender<Result<BytesMut, KafkaClientError>>;
+type ResponseSender = oneshot::Sender<Result<BytesMut, KafkaConnectionError>>;
 
 /// Configuration for the Kafka client
 #[derive(Debug, Clone)]
@@ -90,7 +94,7 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
             while let Some((req, mut sender)) = self.rx.recv().await {
                 let correlation_id = req.correlation_id();
 
-                // send is cancel-safe for FramedWrite
+                // send is cancel-safe for Framed
                 let result = tokio::select! {
                     res = sink.send(req) => res,
                     _ = sender.closed() => Ok(())
@@ -178,7 +182,7 @@ impl KafkaConnection {
         &self,
         req: R,
         api_version: i16,
-    ) -> Result<R::Response, KafkaClientError> {
+    ) -> Result<R::Response, KafkaConnectionError> {
         let (tx, rx) = oneshot::channel();
 
         let versioned = VersionedRequest {
@@ -198,7 +202,6 @@ impl KafkaConnection {
         let api_version = encodable_request.api_version();
 
         let record = RequestRecord {
-            api_key,
             api_version,
             response_header_version: api_key.response_header_version(api_version),
         };
@@ -206,10 +209,10 @@ impl KafkaConnection {
         self.sender
             .send((encodable_request, tx))
             .await
-            .map_err(|_| KafkaClientError::Stopped)?;
+            .map_err(|_| KafkaConnectionError::Closed)?;
 
         // error happens when the client dropped our sender before sending anything.
-        let frame = rx.await.map_err(|_| KafkaClientError::Stopped)??;
+        let frame = rx.await.map_err(|_| KafkaConnectionError::Closed)??;
 
         Ok(R::decode_frame(frame, record)?)
     }

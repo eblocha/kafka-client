@@ -1,6 +1,7 @@
 mod codec;
+mod conn;
 mod request;
 mod response;
-mod conn;
 
+pub use codec::sendable::Sendable;
 pub use conn::*;
