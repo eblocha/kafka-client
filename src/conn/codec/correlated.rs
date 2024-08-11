@@ -7,7 +7,7 @@ use tokio_util::codec;
 
 use super::LENGTH_FIELD_LENGTH;
 
-#[derive(Debug, Clone, Copy, From, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, From, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CorrelationId(#[from] pub(crate) i32);
 
 #[derive(Debug, Clone, PartialEq, Eq)]

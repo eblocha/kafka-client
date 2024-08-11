@@ -7,7 +7,7 @@ use std::{
 };
 
 use bytes::BytesMut;
-use dashmap::DashMap;
+use fnv::FnvHashMap;
 use futures::{SinkExt, StreamExt};
 use thiserror::Error;
 use tokio::{
@@ -72,59 +72,51 @@ struct KafkaConnectionBackgroundTaskRunner<IO> {
 }
 
 impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
-    async fn run(mut self) -> io::Result<()>
+    async fn run(mut self)
     where
         IO: AsyncRead + AsyncWrite,
     {
         let (mut sink, mut stream) =
             Framed::new(self.io, KafkaCodec::new(self.max_frame_length)).split();
 
-        // TODO is there a more efficient data structure?
-        // We know the keys are created sequentially with an atomic i32
-        let senders: Arc<DashMap<CorrelationId, ResponseSender>> = Arc::new(DashMap::new());
+        let mut senders: FnvHashMap<CorrelationId, ResponseSender> = FnvHashMap::default();
 
-        let senders_1 = senders.clone();
-        let write_fut = async move {
-            while let Some((req, mut sender)) = self.rx.recv().await {
-                let correlation_id = req.correlation_id();
+        loop {
+            tokio::select! {
+                next_req = self.rx.recv() => match next_req {
+                    Some((req, mut sender)) => {
+                        let correlation_id = req.correlation_id();
 
-                // send is cancel-safe for Framed
-                let result = tokio::select! {
-                    res = sink.send(req) => res,
-                    _ = sender.closed() => Ok(())
-                };
+                        // send is cancel-safe for Framed
+                        let result = tokio::select! {
+                            res = sink.send(req) => res,
+                            _ = sender.closed() => Ok(())
+                        };
 
-                if let Err(e) = result {
-                    // failed to push message to tcp stream.
-                    // if this send fails, the request was abandoned.
-                    let _ = sender.send(Err(e.into()));
-                    continue;
-                }
+                        if let Err(e) = result {
+                            // failed to push message to tcp stream.
+                            // if this send fails, the request was abandoned.
+                            let _ = sender.send(Err(e.into()));
+                        } else {
+                            senders.insert(correlation_id, sender);
+                        }
+                    },
+                    None => break
+                },
+                next_res = stream.next() => match next_res {
+                    Some(Ok(frame)) => {
+                        if let Some(sender) = senders.remove(&frame.id) {
+                            // ok to ignore since it just means the request was abandoned
+                            let _ = sender.send(Ok(frame.frame));
+                        }
 
-                senders_1.insert(correlation_id, sender);
+                    },
+                    // TODO can we expose this error?
+                    Some(Err(_e)) => break,
+                    None => break
+                },
+                _ = self.cancellation_token.cancelled() => break
             }
-        };
-
-        let senders_2 = senders.clone();
-        let read_fut = async move {
-            while let Some(read_result) = stream.next().await {
-                let frame = read_result?;
-
-                let Some((_, sender)) = senders_2.remove(&frame.id) else {
-                    continue;
-                };
-
-                // ok to ignore since it just means the request was abandoned
-                let _ = sender.send(Ok(frame.frame));
-            }
-
-            Ok(())
-        };
-
-        tokio::select! {
-            _ = write_fut => Ok(()),
-            res = read_fut => res,
-            _ = self.cancellation_token.cancelled() => Ok(())
         }
     }
 }
