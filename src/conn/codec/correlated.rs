@@ -10,8 +10,8 @@ use super::LENGTH_FIELD_LENGTH;
 #[derive(Debug, Clone, Copy, From, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CorrelationId(#[from] pub(crate) i32);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 /// A frame with a correlation id to map it to a request
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorrelatedFrame {
     /// The correlation id
     pub id: CorrelationId,

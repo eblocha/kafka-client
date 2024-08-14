@@ -24,3 +24,6 @@ tokio-util = { version = "0.7.11", features = ["codec", "rt"] }
 tower = { version = "0.4.13", features = ["util"] }
 uuid = { version = "1.10.0", features = ["v4"] }
 want = "0.3.1"
+
+[dev-dependencies]
+tokio-test = "0.4.4"

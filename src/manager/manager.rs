@@ -42,9 +42,18 @@ impl ConnectionManager {
     ) -> Result<Arc<PreparedConnection>, ConnectionError> {
         let rx = {
             match self.connections.get_mut(broker) {
+                // no connection was ever created for the broker
                 None => None,
                 Some(mut value) => match value.value_mut() {
-                    ConnectionStatus::Connected(conn) => return Ok(conn.clone()),
+                    // there is a connection for the broker
+                    ConnectionStatus::Connected(conn) => {
+                        if conn.is_closed() {
+                            // it's closed, so get a new one.
+                            None
+                        } else {
+                            return Ok(conn.clone());
+                        }
+                    }
                     ConnectionStatus::Connecting(ref mut v) => {
                         let (tx, rx) = oneshot::channel();
                         v.push(tx);
@@ -55,6 +64,7 @@ impl ConnectionManager {
         };
 
         match rx {
+            // we need a new connection
             None => self.connect(broker).await,
             Some(rx) => match rx.await {
                 Ok(res) => res,
