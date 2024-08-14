@@ -1,9 +1,9 @@
-use crate::manager::version::VersionedConnection;
+use crate::conn::PreparedConnection;
 
 pub mod admin;
 
 pub trait Run {
     type Response;
 
-    async fn run(self, conn: &VersionedConnection) -> anyhow::Result<Self::Response>;
+    async fn run(self, conn: &PreparedConnection) -> anyhow::Result<Self::Response>;
 }

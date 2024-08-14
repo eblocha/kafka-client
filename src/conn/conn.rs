@@ -241,4 +241,9 @@ impl KafkaConnection {
         self.cancellation_token.cancel();
         self.task_tracker.wait()
     }
+
+    /// Returns true if the connection is closed and will no longer process requests
+    pub fn is_closed(&self) -> bool {
+        self.cancellation_token.is_cancelled()
+    }
 }

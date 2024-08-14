@@ -6,10 +6,8 @@ mod proto;
 
 use clap::{Parser, Subcommand};
 use cmd::{admin::AdminCommands, Run};
-use conn::KafkaConnectionConfig;
 
-use manager::version::VersionedConnection;
-use tokio::net::TcpStream;
+use manager::manager::ConnectionManager;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -32,12 +30,12 @@ enum Client {
 pub async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let tcp = TcpStream::connect(&cli.broker).await?;
+    let manager = ConnectionManager::new();
 
-    let conn = VersionedConnection::connect(tcp, &KafkaConnectionConfig::default()).await?;
+    let conn = manager.get_connection(&cli.broker).await?;
 
     match cli.client {
-        Client::Admin(cmd) => cmd.run(&conn).await?,
+        Client::Admin(cmd) => cmd.run(conn.as_ref()).await?,
     }
 
     conn.shutdown().await;

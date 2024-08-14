@@ -1,6 +1,9 @@
 use clap::Subcommand;
 
-use crate::{clients::admin::list_topics::ListTopics, manager::version::VersionedConnection};
+use crate::{
+    clients::admin::{describe_cluster::DescribeCluster, list_topics::ListTopics},
+    conn::PreparedConnection,
+};
 
 use super::Run;
 
@@ -10,18 +13,44 @@ pub enum AdminCommands {
         #[arg(long, default_value_t = false)]
         exclude_internal: bool,
     },
+    DescribeCluster {},
 }
 
 impl Run for AdminCommands {
     type Response = ();
 
-    async fn run(self, conn: &VersionedConnection) -> anyhow::Result<Self::Response> {
+    async fn run(self, conn: &PreparedConnection) -> anyhow::Result<Self::Response> {
         match self {
             AdminCommands::ListTopics { exclude_internal } => {
-                for topic in conn.list_topics().await? {
-                    if !topic.internal || !exclude_internal {
-                        println!("{topic}");
+                let res = conn.list_topics().await?;
+
+                for (name, topic) in res.topics {
+                    if !topic.is_internal || !exclude_internal {
+                        println!(
+                            "{}{}",
+                            name.to_string(),
+                            if topic.is_internal { " (internal)" } else { "" }
+                        );
                     }
+                }
+            }
+            AdminCommands::DescribeCluster {} => {
+                let res = conn.describe_cluster().await?;
+
+                println!("Cluster ID: {}", res.cluster_id.to_string());
+
+                for (broker_id, broker) in res.brokers {
+                    println!(
+                        "Broker {}: {}:{}{}",
+                        broker_id.to_string(),
+                        broker.host.to_string(),
+                        broker.port,
+                        if broker_id == res.controller_id {
+                            " (controller)"
+                        } else {
+                            ""
+                        }
+                    );
                 }
             }
         }

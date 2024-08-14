@@ -11,6 +11,7 @@ bytes = "1.7.1"
 clap = { version = "4.5.15", features = ["derive"] }
 dashmap = "6.0.1"
 derive_more = { version = "1.0.0", features = ["from"] }
+extend = "1.2.0"
 fnv = "1.0.7"
 futures = "0.3.30"
 futures-util = "0.3.30"

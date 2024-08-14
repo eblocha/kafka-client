@@ -29,22 +29,22 @@ impl<T: Request> VersionedRequest for T {
 }
 
 /// A connection that will lazily negotiate api request versions with the server
-pub struct VersionedConnection {
+pub struct PreparedConnection {
     api_versions: ApiVersionsResponse,
     conn: KafkaConnection,
 }
 
 #[derive(Debug, Error)]
-pub enum VersionedConnectionInitializationError {
+pub enum PreparedConnectionInitializationError {
     #[error(transparent)]
     Client(#[from] KafkaConnectionError),
 
-    #[error("negotiation returned an error code: {0:?}")]
+    #[error("version negotiation returned an error code: {0:?}")]
     NegotiationFailed(i16),
 }
 
 #[derive(Debug, Error)]
-pub enum VersionedConnectionError {
+pub enum PreparedConnectionError {
     /// There was an error from the kafka connection
     #[error(transparent)]
     Client(#[from] KafkaConnectionError),
@@ -64,7 +64,7 @@ fn create_version_request() -> ApiVersionsRequest {
 
 async fn negotiate(
     conn: &KafkaConnection,
-) -> Result<ApiVersionsResponse, VersionedConnectionInitializationError> {
+) -> Result<ApiVersionsResponse, PreparedConnectionInitializationError> {
     let api_versions_response = conn
         .send(
             create_version_request(),
@@ -87,20 +87,20 @@ async fn negotiate(
     if api_versions_response.error_code == ErrorCode::None as i16 {
         Ok(api_versions_response)
     } else {
-        Err(VersionedConnectionInitializationError::NegotiationFailed(
+        Err(PreparedConnectionInitializationError::NegotiationFailed(
             api_versions_response.error_code,
         ))
     }
 }
 
-impl VersionedConnection {
+impl PreparedConnection {
     /// Wrap an io stream with a Kafka connection, and negotiate api version information
     pub async fn connect<IO: AsyncRead + AsyncWrite + Send + 'static>(
         io: IO,
         config: &KafkaConnectionConfig,
-    ) -> Result<Self, VersionedConnectionInitializationError> {
+    ) -> Result<Self, PreparedConnectionInitializationError> {
         let conn = KafkaConnection::connect(io, config).await.map_err(|e| {
-            VersionedConnectionInitializationError::Client(KafkaConnectionError::Io(e))
+            PreparedConnectionInitializationError::Client(KafkaConnectionError::Io(e))
         })?;
 
         let api_versions_response = negotiate(&conn).await?;
@@ -115,11 +115,11 @@ impl VersionedConnection {
     pub async fn send<R: Sendable + VersionedRequest>(
         &self,
         req: R,
-    ) -> Result<R::Response, VersionedConnectionError> {
+    ) -> Result<R::Response, PreparedConnectionError> {
         let version = self.determine_version(req.key(), &req.versions());
 
         let Some(version) = version else {
-            return Err(VersionedConnectionError::Version);
+            return Err(PreparedConnectionError::Version);
         };
 
         Ok(self.conn.send(req, version).await?)
@@ -150,5 +150,10 @@ impl VersionedConnection {
     /// Returns a future that can be awaited to wait for shutdown to complete.
     pub fn shutdown(&self) -> TaskTrackerWaitFuture<'_> {
         self.conn.shutdown()
+    }
+
+    /// Returns true if the connection is closed and will no longer process requests
+    pub fn is_closed(&self) -> bool {
+        self.conn.is_closed()
     }
 }
