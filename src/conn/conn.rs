@@ -68,6 +68,7 @@ struct KafkaConnectionBackgroundTaskRunner<IO> {
     io: IO,
     rx: mpsc::Receiver<(EncodableRequest, ResponseSender)>,
     max_frame_length: usize,
+    send_buffer_size: usize,
     cancellation_token: CancellationToken,
 }
 
@@ -79,32 +80,46 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
         let (mut sink, mut stream) =
             Framed::new(self.io, KafkaCodec::new(self.max_frame_length)).split();
 
-        let mut senders: FnvHashMap<CorrelationId, ResponseSender> = FnvHashMap::default();
+        let mut senders: FnvHashMap<CorrelationId, ResponseSender> =
+            FnvHashMap::with_capacity_and_hasher(self.send_buffer_size, Default::default());
+
+        let mut request_buffer = Vec::with_capacity(self.send_buffer_size);
 
         loop {
             tokio::select! {
-                next_req = self.rx.recv() => match next_req {
-                    Some((req, mut sender)) => {
-                        let correlation_id = req.correlation_id();
+                count = self.rx.recv_many(&mut request_buffer, self.send_buffer_size) => match count {
+                    // 0 means all senders dropped, and no remaining messages. This happens only when the connection is dropped.
+                    0 => break,
+                    _ => {
+                        let mut sender_batch = Vec::with_capacity(count);
 
-                        // send is cancel-safe for Framed
-                        let result = tokio::select! {
-                            res = sink.send(req) => res,
-                            _ = sender.closed() => continue
-                        };
+                        for (req, sender) in request_buffer.drain(..) {
+                            let correlation_id = req.correlation_id();
 
-                        match result {
-                            Err(e) => {
-                                // failed to push message to tcp stream.
-                                // if this send fails, the request was abandoned.
-                                let _ = sender.send(Err(e.into()));
-                            },
-                            Ok(_) => {
-                                senders.insert(correlation_id, sender);
+                            // While feed is not cancel-safe, it does still guarantee that partial frames are not written to the io buffer.
+                            // We are trading cancel-safety for performance here, because some requests may be sent even when they are cancelled.
+                            match sink.feed(req).await {
+                                Ok(_) => sender_batch.push((correlation_id, sender)),
+                                Err(e) => {
+                                    let _ = sender.send(Err(e.into()));
+                                },
                             }
                         }
+
+                        match sink.flush().await {
+                            Err(e) => {
+                                // if the flush fails, notify all requests that they failed to send
+                                for (_, sender) in sender_batch.drain(..) {
+                                    let _ = sender.send(Err(KafkaConnectionError::Io(e.kind().into())));
+                                }
+                            },
+                            Ok(_) => {
+                                for (correlation_id, sender) in sender_batch {
+                                    senders.insert(correlation_id, sender);
+                                }
+                            },
+                        }
                     },
-                    None => break
                 },
                 next_res = stream.next() => match next_res {
                     Some(Ok(frame)) => {
@@ -155,6 +170,7 @@ impl KafkaConnection {
             io,
             rx,
             max_frame_length: config.max_frame_length,
+            send_buffer_size: config.send_buffer_size,
             cancellation_token: cancellation_token.clone(),
         };
 

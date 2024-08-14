@@ -1,6 +1,6 @@
 use kafka_protocol::{
     messages::{ApiVersionsRequest, ApiVersionsResponse},
-    protocol::{Message, StrBytes, VersionRange},
+    protocol::{Message, Request, StrBytes, VersionRange},
 };
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -10,6 +10,23 @@ use crate::{
     conn::{KafkaConnection, KafkaConnectionConfig, KafkaConnectionError, Sendable},
     proto::error_codes::ErrorCode,
 };
+
+pub trait VersionedRequest {
+    fn key(&self) -> i16;
+    fn versions(&self) -> VersionRange;
+}
+
+impl<T: Request> VersionedRequest for T {
+    #[inline]
+    fn key(&self) -> i16 {
+        T::KEY
+    }
+
+    #[inline]
+    fn versions(&self) -> VersionRange {
+        T::VERSIONS
+    }
+}
 
 /// A connection that will lazily negotiate api request versions with the server
 pub struct VersionedConnection {
@@ -49,14 +66,20 @@ async fn negotiate(
     conn: &KafkaConnection,
 ) -> Result<ApiVersionsResponse, VersionedConnectionInitializationError> {
     let api_versions_response = conn
-        .send(create_version_request(), ApiVersionsRequest::VERSIONS.max)
+        .send(
+            create_version_request(),
+            <ApiVersionsRequest as Message>::VERSIONS.max,
+        )
         .await?;
 
     let api_versions_response =
         if api_versions_response.error_code == ErrorCode::UnsupportedVersion as i16 {
             // fall back to min version if version request version is unsupported
-            conn.send(create_version_request(), ApiVersionsRequest::VERSIONS.min)
-                .await?
+            conn.send(
+                create_version_request(),
+                <ApiVersionsRequest as Message>::VERSIONS.min,
+            )
+            .await?
         } else {
             api_versions_response
         };
@@ -89,11 +112,11 @@ impl VersionedConnection {
     }
 
     /// Send a request using the highest common version
-    pub async fn send<R: Sendable>(
+    pub async fn send<R: Sendable + VersionedRequest>(
         &self,
         req: R,
     ) -> Result<R::Response, VersionedConnectionError> {
-        let version = self.determine_version(R::KEY, &R::VERSIONS);
+        let version = self.determine_version(req.key(), &req.versions());
 
         let Some(version) = version else {
             return Err(VersionedConnectionError::Version);
@@ -123,7 +146,7 @@ impl VersionedConnection {
     }
 
     /// Shut down the connection
-    /// 
+    ///
     /// Returns a future that can be awaited to wait for shutdown to complete.
     pub fn shutdown(&self) -> TaskTrackerWaitFuture<'_> {
         self.conn.shutdown()

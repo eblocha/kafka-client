@@ -19,11 +19,15 @@ pub struct RequestRecord {
     pub response_header_version: i16,
 }
 
-pub trait Sendable: Into<KafkaRequest> + Request {
+pub trait Sendable: Into<KafkaRequest> {
+    type Response;
+
     fn decode_frame(frame: BytesMut, record: RequestRecord) -> Result<Self::Response, io::Error>;
 }
 
 impl<T: Request + Into<KafkaRequest>> Sendable for T {
+    type Response = <T as Request>::Response;
+
     fn decode_frame(
         mut frame: BytesMut,
         record: RequestRecord,
@@ -32,5 +36,13 @@ impl<T: Request + Into<KafkaRequest>> Sendable for T {
             .map_err(into_invalid_data)?;
 
         Self::Response::decode(&mut frame, record.api_version).map_err(into_invalid_data)
+    }
+}
+
+impl Sendable for KafkaRequest {
+    type Response = (BytesMut, RequestRecord);
+
+    fn decode_frame(frame: BytesMut, record: RequestRecord) -> Result<Self::Response, io::Error> {
+        Ok((frame, record))
     }
 }
