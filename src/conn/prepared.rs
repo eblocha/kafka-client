@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use kafka_protocol::{
     messages::{ApiVersionsRequest, ApiVersionsResponse},
     protocol::{Message, Request, StrBytes, VersionRange},
@@ -32,6 +34,7 @@ impl<T: Request> VersionedRequest for T {
 pub struct PreparedConnection {
     api_versions: ApiVersionsResponse,
     conn: KafkaConnection,
+    pub(crate) in_flight_requests: AtomicU64
 }
 
 #[derive(Debug, Error)]
@@ -108,6 +111,7 @@ impl PreparedConnection {
         Ok(Self {
             api_versions: api_versions_response,
             conn,
+            in_flight_requests: AtomicU64::new(0)
         })
     }
 
@@ -122,7 +126,13 @@ impl PreparedConnection {
             return Err(PreparedConnectionError::Version);
         };
 
-        Ok(self.conn.send(req, version).await?)
+        self.in_flight_requests.fetch_add(1, Ordering::SeqCst);
+
+        let res = self.conn.send(req, version).await;
+
+        self.in_flight_requests.fetch_sub(1, Ordering::SeqCst);
+
+        Ok(res?)
     }
 
     /// Determine the maximum supported version for an api key.
@@ -155,5 +165,10 @@ impl PreparedConnection {
     /// Returns true if the connection is closed and will no longer process requests
     pub fn is_closed(&self) -> bool {
         self.conn.is_closed()
+    }
+
+    /// Waits until the connection is closed
+    pub fn closed(&self) -> TaskTrackerWaitFuture<'_> {
+        self.conn.closed()
     }
 }

@@ -247,6 +247,11 @@ impl KafkaConnection {
     pub fn is_closed(&self) -> bool {
         self.task_handle.is_finished()
     }
+
+    /// Waits until the connection is closed
+    pub fn closed(&self) -> TaskTrackerWaitFuture<'_> {
+        self.task_tracker.wait()
+    }
 }
 
 #[cfg(test)]
