@@ -252,6 +252,16 @@ impl KafkaConnection {
     pub fn closed(&self) -> TaskTrackerWaitFuture<'_> {
         self.task_tracker.wait()
     }
+
+    /// Returns the number of empty slots in the connection's send buffer
+    pub fn capacity(&self) -> usize {
+        self.sender.capacity()
+    }
+
+    /// Returns the maximum number of slots in the connection's send buffer
+    pub fn max_capacity(&self) -> usize {
+        self.sender.max_capacity()
+    }
 }
 
 #[cfg(test)]

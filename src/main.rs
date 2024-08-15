@@ -4,10 +4,10 @@ mod conn;
 mod manager;
 mod proto;
 
+use anyhow::anyhow;
 use clap::{Parser, Subcommand};
 use cmd::{admin::AdminCommands, Run};
-
-use manager::manager::ConnectionManager;
+use conn::manager::ConnectionManager;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -30,9 +30,9 @@ enum Client {
 pub async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let manager = ConnectionManager::new();
+    let manager = ConnectionManager::new(vec![cli.broker.clone()]);
 
-    let conn = manager.get_connection(&cli.broker).await?;
+    let conn = manager.get_connection(&cli.broker).await.ok_or(anyhow!("connection manager is closed"))?;
 
     match cli.client {
         Client::Admin(cmd) => cmd.run(conn.as_ref()).await?,
