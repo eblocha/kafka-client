@@ -1,9 +1,9 @@
 mod codec;
 mod conn;
+pub mod manager;
+mod prepared;
 mod request;
 mod response;
-mod prepared;
-pub mod manager;
 
 pub use codec::sendable::Sendable;
 pub use conn::*;

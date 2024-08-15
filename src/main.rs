@@ -32,7 +32,10 @@ pub async fn main() -> anyhow::Result<()> {
 
     let manager = ConnectionManager::new(vec![cli.broker.clone()]);
 
-    let conn = manager.get_connection(&cli.broker).await.ok_or(anyhow!("connection manager is closed"))?;
+    let conn = manager
+        .get_connection(&cli.broker)
+        .await
+        .ok_or(anyhow!("connection manager is closed"))?;
 
     match cli.client {
         Client::Admin(cmd) => cmd.run(conn.as_ref()).await?,

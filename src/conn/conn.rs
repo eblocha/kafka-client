@@ -422,8 +422,8 @@ mod test {
         assert_err!(&response);
 
         match response.unwrap_err() {
-            KafkaConnectionError::Closed => {},
-            e => panic!("expected closed error but got {e:?}")
+            KafkaConnectionError::Closed => {}
+            e => panic!("expected closed error but got {e:?}"),
         };
     }
 
@@ -446,8 +446,8 @@ mod test {
         assert_err!(&response);
 
         match response.unwrap_err() {
-            KafkaConnectionError::Closed => {},
-            e => panic!("expected closed error but got {e:?}")
+            KafkaConnectionError::Closed => {}
+            e => panic!("expected closed error but got {e:?}"),
         };
     }
 }
