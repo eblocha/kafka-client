@@ -8,7 +8,7 @@ use std::{
 
 use bytes::BytesMut;
 use fnv::FnvHashMap;
-use futures::{SinkExt, StreamExt};
+use futures::{future::Either, SinkExt, StreamExt};
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -89,8 +89,14 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
         let mut sender_batch = Vec::with_capacity(self.send_buffer_size);
 
         loop {
-            tokio::select! {
-                count = self.rx.recv_many(&mut request_buffer, self.send_buffer_size) => match count {
+            let either = tokio::select! {
+                count = self.rx.recv_many(&mut request_buffer, self.send_buffer_size) => Either::Left(count),
+                next_res = stream.next() => Either::Right(next_res),
+                _ = self.cancellation_token.cancelled() => break
+            };
+
+            match either {
+                Either::Left(count) => match count {
                     // 0 means all senders dropped, and no remaining messages. This happens only when the connection is dropped.
                     0 => break,
                     _ => {
@@ -101,7 +107,7 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                                 Ok(_) => sender_batch.push((correlation_id, sender)),
                                 Err(e) => {
                                     let _ = sender.send(Err(e.into()));
-                                },
+                                }
                             }
                         }
 
@@ -109,33 +115,33 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                             Err(e) => {
                                 // if the flush fails, notify all requests that they failed to send
                                 for (_, sender) in sender_batch.drain(..) {
-                                    let _ = sender.send(Err(KafkaConnectionError::Io(e.kind().into())));
+                                    let _ =
+                                        sender.send(Err(KafkaConnectionError::Io(e.kind().into())));
                                 }
-                            },
+                            }
                             Ok(_) => {
                                 for (correlation_id, sender) in sender_batch.drain(..) {
                                     senders.insert(correlation_id, sender);
                                 }
-                            },
+                            }
                         }
-                    },
+                    }
                 },
-                next_res = stream.next() => match next_res {
+                Either::Right(next_res) => match next_res {
                     Some(Ok(frame)) => {
                         if let Some(sender) = senders.remove(&frame.id) {
                             // ok to ignore since it just means the request was abandoned
                             let _ = sender.send(Ok(frame.frame));
                         }
-                    },
+                    }
                     Some(Err(e)) => {
                         for (_, sender) in senders {
                             let _ = sender.send(Err(KafkaConnectionError::Io(e.kind().into())));
                         }
-                        break
-                    },
-                    None => break
+                        break;
+                    }
+                    None => break,
                 },
-                _ = self.cancellation_token.cancelled() => break
             }
         }
     }

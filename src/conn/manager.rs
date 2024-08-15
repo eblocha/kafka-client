@@ -2,7 +2,11 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use futures::{channel::oneshot, TryFutureExt};
 use rand::Rng;
-use tokio::{net::TcpStream, sync::mpsc};
+use tokio::{net::TcpStream, sync::mpsc, task::JoinHandle};
+use tokio_util::{
+    sync::{CancellationToken, DropGuard},
+    task::{task_tracker::TaskTrackerWaitFuture, TaskTracker},
+};
 
 use super::{KafkaConnectionError, PreparedConnection, PreparedConnectionInitializationError};
 
@@ -60,13 +64,23 @@ struct NodeBackgroundTask {
     rx: mpsc::Receiver<oneshot::Sender<Arc<PreparedConnection>>>,
     broker: Arc<str>,
     connection: Option<Arc<PreparedConnection>>,
+    cancellation_token: CancellationToken,
 }
 
 impl NodeBackgroundTask {
     async fn run(mut self) {
         let mut recv_buf = Vec::with_capacity(10);
 
-        while self.rx.recv_many(&mut recv_buf, 10).await != 0 {
+        'outer: loop {
+            let count = tokio::select! {
+                count = self.rx.recv_many(&mut recv_buf, 10) => count,
+                _ = self.cancellation_token.cancelled() => break
+            };
+
+            if count == 0 {
+                break;
+            }
+
             if let Some(ref conn) = self.connection {
                 if !conn.is_closed() {
                     for sender in recv_buf.drain(..) {
@@ -81,12 +95,14 @@ impl NodeBackgroundTask {
             let conn = loop {
                 let config = super::KafkaConnectionConfig::default();
 
-                let res = TcpStream::connect(self.broker.as_ref())
+                let res = tokio::select! {
+                    res = TcpStream::connect(self.broker.as_ref())
                     .map_err(|e| {
                         PreparedConnectionInitializationError::Client(KafkaConnectionError::Io(e))
                     })
-                    .and_then(|io| PreparedConnection::connect(io, &config))
-                    .await;
+                    .and_then(|io| PreparedConnection::connect(io, &config)) => res,
+                    _ = self.cancellation_token.cancelled() => break 'outer
+                };
 
                 match res {
                     Ok(conn) => break Arc::new(conn),
@@ -118,21 +134,38 @@ impl NodeBackgroundTask {
 
 struct NodeTaskHandle {
     tx: mpsc::Sender<oneshot::Sender<Arc<PreparedConnection>>>,
+    task_tracker: TaskTracker,
+    task_handle: JoinHandle<()>,
+    cancellation_token: CancellationToken,
+    _cancel_on_drop: DropGuard,
 }
 
 impl NodeTaskHandle {
     pub fn new(broker: Arc<str>) -> Self {
         let (tx, rx) = mpsc::channel(10);
 
+        let cancellation_token = CancellationToken::new();
+
         let task = NodeBackgroundTask {
             broker,
             rx,
             connection: Default::default(),
+            cancellation_token: cancellation_token.clone(),
         };
 
-        let _join_handle = tokio::spawn(task.run());
+        let task_tracker = TaskTracker::new();
 
-        Self { tx }
+        let task_handle = task_tracker.spawn(task.run());
+
+        task_tracker.close();
+
+        Self {
+            tx,
+            task_tracker,
+            task_handle,
+            cancellation_token: cancellation_token.clone(),
+            _cancel_on_drop: cancellation_token.drop_guard(),
+        }
     }
 
     pub async fn get_connection(&self) -> Option<Arc<PreparedConnection>> {
@@ -141,6 +174,21 @@ impl NodeTaskHandle {
         self.tx.send(tx).await.ok()?;
 
         rx.await.ok()
+    }
+
+    pub fn shutdown(&self) -> TaskTrackerWaitFuture<'_> {
+        self.cancellation_token.cancel();
+        self.task_tracker.wait()
+    }
+
+    /// Returns true if the connection is closed and will no longer process requests
+    pub fn is_closed(&self) -> bool {
+        self.task_handle.is_finished()
+    }
+
+    /// Waits until the connection is closed
+    pub fn closed(&self) -> TaskTrackerWaitFuture<'_> {
+        self.task_tracker.wait()
     }
 }
 
