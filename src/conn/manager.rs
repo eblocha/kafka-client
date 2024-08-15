@@ -78,7 +78,7 @@ impl NodeBackgroundTask {
             let mut current_backoff;
             let mut current_retries = 0u32;
 
-            let c = loop {
+            let conn = loop {
                 let config = super::KafkaConnectionConfig::default();
 
                 let res = TcpStream::connect(self.broker.as_ref())
@@ -104,10 +104,10 @@ impl NodeBackgroundTask {
             };
 
             for sender in recv_buf.drain(..) {
-                let _ = sender.send(c.clone());
+                let _ = sender.send(conn.clone());
             }
 
-            self.connection.replace(c);
+            self.connection.replace(conn);
         }
 
         if let Some(conn) = self.connection.take() {
