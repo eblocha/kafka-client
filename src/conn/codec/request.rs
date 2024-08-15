@@ -105,3 +105,41 @@ impl codec::Encoder<EncodableRequest> for RequestEncoder {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod test {
+    use codec::Encoder;
+    use kafka_protocol::messages::MetadataRequest;
+
+    use super::*;
+
+    #[test]
+    fn metadata_request() {
+        let request = {
+            let mut r = MetadataRequest::default();
+            r.allow_auto_topic_creation = true;
+            r.topics = None;
+            r
+        };
+
+        let versioned = VersionedRequest {
+            api_version: 12,
+            client_id: None,
+            correlation_id: 1.into(),
+            request: KafkaRequest::Metadata(request),
+        };
+
+        let mut bytes = BytesMut::new();
+
+        let expected = [
+            //--length---|-key-|-ver--|----id-----|----message-------------|
+            0u8, 0, 0, 15, 0, 3, 0, 12, 0, 0, 0, 1, 255, 255, 0, 0, 1, 0, 0,
+        ];
+
+        RequestEncoder::new(8 * 1024 * 1024)
+            .encode(versioned.into(), &mut bytes)
+            .unwrap();
+
+        assert_eq!(bytes.into_iter().collect::<Vec<u8>>(), expected);
+    }
+}
