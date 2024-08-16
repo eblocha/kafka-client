@@ -1,6 +1,6 @@
 use std::{collections::HashMap, io, sync::Arc, time::Duration};
 
-use futures::{channel::oneshot, TryFutureExt};
+use futures::{channel::oneshot, stream::FuturesUnordered, StreamExt, TryFutureExt};
 use rand::Rng;
 use tokio::{net::TcpStream, sync::mpsc};
 use tokio_util::{
@@ -8,7 +8,7 @@ use tokio_util::{
     task::{task_tracker::TaskTrackerWaitFuture, TaskTracker},
 };
 
-use super::{KafkaConnectionError, PreparedConnection, PreparedConnectionInitializationError};
+use super::{PreparedConnection, PreparedConnectionInitializationError};
 
 // recv request for connection
 // if bound for specific broker, choose that broker for connection
@@ -101,16 +101,27 @@ impl NodeBackgroundTask {
 
                 tracing::info!("attempting to connect to broker {}", self.broker);
 
+                let mut senders_dropped = FuturesUnordered::new();
+                senders_dropped.extend(recv_buf.iter_mut().map(|s| s.cancellation()));
+
                 let timeout = tokio::time::sleep(Duration::from_secs(5));
+
+                macro_rules! abandon {
+                    () => {{
+                        tracing::info!("abandoning connection attempts to broker {} because all clients aborted", self.broker);
+                        break None
+                    }};
+                }
 
                 let res = tokio::select! {
                     res = TcpStream::connect(self.broker.as_ref())
                     .map_err(|e| {
-                        PreparedConnectionInitializationError::Client(KafkaConnectionError::Io(e))
+                        PreparedConnectionInitializationError::Io(e)
                     })
                     .and_then(|io| PreparedConnection::connect(io, &config)) => res,
                     _ = self.cancellation_token.cancelled() => break 'outer,
-                    _ = timeout => Err(PreparedConnectionInitializationError::Client(KafkaConnectionError::Io(io::Error::from(io::ErrorKind::TimedOut))))
+                    _ = senders_dropped.count() => abandon!(),
+                    _ = timeout => Err(PreparedConnectionInitializationError::Io(io::Error::from(io::ErrorKind::TimedOut)))
                 };
 
                 match res {
@@ -131,14 +142,14 @@ impl NodeBackgroundTask {
                             current_retries,
                         );
 
-                        tokio::time::sleep(Duration::from_secs(current_backoff.into())).await;
+                        let mut senders_dropped = FuturesUnordered::new();
+                        senders_dropped.extend(recv_buf.iter_mut().map(|s| s.cancellation()));
 
-                        // remove cancelled
-                        recv_buf.retain(|sender| !sender.is_canceled());
+                        let sleep = tokio::time::sleep(Duration::from_secs(current_backoff.into()));
 
-                        if recv_buf.is_empty() {
-                            tracing::info!("abandoning connection attempts to broker {} due to all clients aborting", self.broker);
-                            break None;
+                        tokio::select! {
+                            _ = sleep => {},
+                            _ = senders_dropped.count() => abandon!(),
                         }
                     }
                 }
@@ -150,6 +161,8 @@ impl NodeBackgroundTask {
                 for sender in recv_buf.drain(..) {
                     let _ = sender.send(conn.clone());
                 }
+            } else {
+                recv_buf.clear();
             }
 
             self.connection = conn;

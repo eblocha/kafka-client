@@ -1,3 +1,5 @@
+use std::io;
+
 use kafka_protocol::{
     messages::{ApiVersionsRequest, ApiVersionsResponse},
     protocol::{Message, Request, StrBytes, VersionRange},
@@ -36,22 +38,49 @@ pub struct PreparedConnection {
 
 #[derive(Debug, Error)]
 pub enum PreparedConnectionInitializationError {
+    /// Indicates an IO problem. This could be a bad socket or an encoding problem.
     #[error(transparent)]
-    Client(#[from] KafkaConnectionError),
+    Io(#[from] io::Error),
+
+    /// The client has stopped processing requests
+    #[error("the connection is closed")]
+    Closed,
 
     #[error("version negotiation returned an error code: {0:?}")]
     NegotiationFailed(i16),
 }
 
+impl From<KafkaConnectionError> for PreparedConnectionInitializationError {
+    fn from(value: KafkaConnectionError) -> Self {
+        match value {
+            KafkaConnectionError::Io(e) => Self::Io(e),
+            KafkaConnectionError::Closed => Self::Closed,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum PreparedConnectionError {
-    /// There was an error from the kafka connection
+    /// Indicates an IO problem. This could be a bad socket or an encoding problem.
     #[error(transparent)]
-    Client(#[from] KafkaConnectionError),
+    Io(#[from] io::Error),
+
+    /// The client has stopped processing requests
+    #[error("the connection is closed")]
+    Closed,
 
     /// The server does not support any version in the request range
     #[error("the server does not support any version in the request range")]
     Version,
+}
+
+impl From<KafkaConnectionError> for PreparedConnectionError {
+    fn from(value: KafkaConnectionError) -> Self {
+        match value {
+            KafkaConnectionError::Io(e) => Self::Io(e),
+            KafkaConnectionError::Closed => Self::Closed,
+        }
+    }
 }
 
 fn create_version_request() -> ApiVersionsRequest {
@@ -99,9 +128,9 @@ impl PreparedConnection {
         io: IO,
         config: &KafkaConnectionConfig,
     ) -> Result<Self, PreparedConnectionInitializationError> {
-        let conn = KafkaConnection::connect(io, config).await.map_err(|e| {
-            PreparedConnectionInitializationError::Client(KafkaConnectionError::Io(e))
-        })?;
+        let conn = KafkaConnection::connect(io, config)
+            .await
+            .map_err(|e| PreparedConnectionInitializationError::Io(e))?;
 
         let api_versions_response = negotiate(&conn).await?;
 

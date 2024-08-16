@@ -1,7 +1,6 @@
 pub mod clients;
 mod cmd;
 mod conn;
-mod manager;
 mod proto;
 
 use anyhow::anyhow;
