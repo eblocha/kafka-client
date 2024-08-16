@@ -27,8 +27,14 @@ impl Run for AdminCommands {
                 for (name, topic) in res.topics {
                     if !topic.is_internal || !exclude_internal {
                         println!(
-                            "{}{}",
+                            "{}: {} {} {}",
                             name.to_string(),
+                            topic.partitions.len(),
+                            if topic.partitions.len() == 1 {
+                                "partition"
+                            } else {
+                                "partitions"
+                            },
                             if topic.is_internal { " (internal)" } else { "" }
                         );
                     }

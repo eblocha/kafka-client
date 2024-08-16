@@ -1,8 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, io, sync::Arc, time::Duration};
 
 use futures::{channel::oneshot, TryFutureExt};
 use rand::Rng;
-use tokio::{net::TcpStream, sync::mpsc, task::JoinHandle};
+use tokio::{net::TcpStream, sync::mpsc};
 use tokio_util::{
     sync::{CancellationToken, DropGuard},
     task::{task_tracker::TaskTrackerWaitFuture, TaskTracker},
@@ -60,6 +60,9 @@ use super::{KafkaConnectionError, PreparedConnection, PreparedConnectionInitiali
 //     // least_loaded_disconnected.map(|(node, _)| node.as_str())
 // }
 
+/// Number of requests for a connection to batch at the same time
+const CONNECTION_REQ_BUFFER_SIZE: usize = 10;
+
 struct NodeBackgroundTask {
     rx: mpsc::Receiver<oneshot::Sender<Arc<PreparedConnection>>>,
     broker: Arc<str>,
@@ -69,11 +72,11 @@ struct NodeBackgroundTask {
 
 impl NodeBackgroundTask {
     async fn run(mut self) {
-        let mut recv_buf = Vec::with_capacity(10);
+        let mut recv_buf = Vec::with_capacity(CONNECTION_REQ_BUFFER_SIZE);
 
         'outer: loop {
             let count = tokio::select! {
-                count = self.rx.recv_many(&mut recv_buf, 10) => count,
+                count = self.rx.recv_many(&mut recv_buf, CONNECTION_REQ_BUFFER_SIZE) => count,
                 _ = self.cancellation_token.cancelled() => break
             };
 
@@ -86,6 +89,7 @@ impl NodeBackgroundTask {
                     for sender in recv_buf.drain(..) {
                         let _ = sender.send(conn.clone());
                     }
+                    continue;
                 }
             }
 
@@ -95,18 +99,23 @@ impl NodeBackgroundTask {
             let conn = loop {
                 let config = super::KafkaConnectionConfig::default();
 
+                tracing::info!("attempting to connect to broker {}", self.broker);
+
+                let timeout = tokio::time::sleep(Duration::from_secs(5));
+
                 let res = tokio::select! {
                     res = TcpStream::connect(self.broker.as_ref())
                     .map_err(|e| {
                         PreparedConnectionInitializationError::Client(KafkaConnectionError::Io(e))
                     })
                     .and_then(|io| PreparedConnection::connect(io, &config)) => res,
-                    _ = self.cancellation_token.cancelled() => break 'outer
+                    _ = self.cancellation_token.cancelled() => break 'outer,
+                    _ = timeout => Err(PreparedConnectionInitializationError::Client(KafkaConnectionError::Io(io::Error::from(io::ErrorKind::TimedOut))))
                 };
 
                 match res {
-                    Ok(conn) => break Arc::new(conn),
-                    Err(_) => {
+                    Ok(conn) => break Some(Arc::new(conn)),
+                    Err(e) => {
                         let jitter = rand::thread_rng().gen_range(0..10);
 
                         current_backoff =
@@ -114,16 +123,36 @@ impl NodeBackgroundTask {
                                 + 2 * jitter;
                         current_retries += 1;
 
+                        tracing::warn!(
+                            "failed to connect to broker at {}: {}, backing off for {}s with current retries: {}",
+                            self.broker,
+                            e,
+                            current_backoff,
+                            current_retries,
+                        );
+
                         tokio::time::sleep(Duration::from_secs(current_backoff.into())).await;
+
+                        // remove cancelled
+                        recv_buf.retain(|sender| !sender.is_canceled());
+
+                        if recv_buf.is_empty() {
+                            tracing::info!("abandoning connection attempts to broker {} due to all clients aborting", self.broker);
+                            break None;
+                        }
                     }
                 }
             };
 
-            for sender in recv_buf.drain(..) {
-                let _ = sender.send(conn.clone());
+            tracing::info!("connected to broker {}", self.broker);
+
+            if let Some(ref conn) = conn {
+                for sender in recv_buf.drain(..) {
+                    let _ = sender.send(conn.clone());
+                }
             }
 
-            self.connection.replace(conn);
+            self.connection = conn;
         }
 
         if let Some(conn) = self.connection.take() {
@@ -132,22 +161,23 @@ impl NodeBackgroundTask {
     }
 }
 
-struct NodeTaskHandle {
+pub struct NodeTaskHandle {
     tx: mpsc::Sender<oneshot::Sender<Arc<PreparedConnection>>>,
+    broker: Arc<str>,
     task_tracker: TaskTracker,
-    task_handle: JoinHandle<()>,
+    // task_handle: JoinHandle<()>,
     cancellation_token: CancellationToken,
     _cancel_on_drop: DropGuard,
 }
 
 impl NodeTaskHandle {
     pub fn new(broker: Arc<str>) -> Self {
-        let (tx, rx) = mpsc::channel(10);
+        let (tx, rx) = mpsc::channel(CONNECTION_REQ_BUFFER_SIZE);
 
         let cancellation_token = CancellationToken::new();
 
         let task = NodeBackgroundTask {
-            broker,
+            broker: broker.clone(),
             rx,
             connection: Default::default(),
             cancellation_token: cancellation_token.clone(),
@@ -155,14 +185,15 @@ impl NodeTaskHandle {
 
         let task_tracker = TaskTracker::new();
 
-        let task_handle = task_tracker.spawn(task.run());
+        let _task_handle = task_tracker.spawn(task.run());
 
         task_tracker.close();
 
         Self {
             tx,
+            broker,
             task_tracker,
-            task_handle,
+            // task_handle,
             cancellation_token: cancellation_token.clone(),
             _cancel_on_drop: cancellation_token.drop_guard(),
         }
@@ -177,17 +208,8 @@ impl NodeTaskHandle {
     }
 
     pub fn shutdown(&self) -> TaskTrackerWaitFuture<'_> {
+        tracing::info!("shutting down connection handle for broker {}", self.broker);
         self.cancellation_token.cancel();
-        self.task_tracker.wait()
-    }
-
-    /// Returns true if the connection is closed and will no longer process requests
-    pub fn is_closed(&self) -> bool {
-        self.task_handle.is_finished()
-    }
-
-    /// Waits until the connection is closed
-    pub fn closed(&self) -> TaskTrackerWaitFuture<'_> {
         self.task_tracker.wait()
     }
 }
@@ -204,6 +226,10 @@ impl ConnectionManager {
                 .map(|broker| (broker.clone(), NodeTaskHandle::new(Arc::from(broker))))
                 .collect(),
         }
+    }
+
+    pub fn handle(&self, node: &str) -> Option<&NodeTaskHandle> {
+        self.connections.get(node)
     }
 
     pub async fn get_connection(&self, node: &str) -> Option<Arc<PreparedConnection>> {

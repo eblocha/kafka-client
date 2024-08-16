@@ -28,12 +28,17 @@ enum Client {
 
 #[tokio::main]
 pub async fn main() -> anyhow::Result<()> {
+    let subscriber = tracing_subscriber::fmt().compact().finish();
+    tracing::subscriber::set_global_default(subscriber)?;
+
     let cli = Cli::parse();
 
     let manager = ConnectionManager::new(vec![cli.broker.clone()]);
 
-    let conn = manager
-        .get_connection(&cli.broker)
+    let handle = manager.handle(&cli.broker).unwrap();
+
+    let conn = handle
+        .get_connection()
         .await
         .ok_or(anyhow!("connection manager is closed"))?;
 
@@ -41,7 +46,7 @@ pub async fn main() -> anyhow::Result<()> {
         Client::Admin(cmd) => cmd.run(conn.as_ref()).await?,
     }
 
-    conn.shutdown().await;
+    handle.shutdown().await;
 
     Ok(())
 }
