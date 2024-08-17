@@ -90,9 +90,10 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
 
         loop {
             let either = tokio::select! {
-                count = self.rx.recv_many(&mut request_buffer, self.send_buffer_size) => Either::Left(count),
+                biased;
+                _ = self.cancellation_token.cancelled() => break,
                 next_res = stream.next() => Either::Right(next_res),
-                _ = self.cancellation_token.cancelled() => break
+                count = self.rx.recv_many(&mut request_buffer, self.send_buffer_size) => Either::Left(count),
             };
 
             match either {
