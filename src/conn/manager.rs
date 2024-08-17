@@ -144,7 +144,7 @@ impl NodeBackgroundTask {
                             broker = ?self.broker,
                             "abandoning connection attempts because all clients aborted"
                         );
-                        break None
+                        continue 'outer
                     }};
                 }
 
@@ -228,7 +228,6 @@ struct NodeTaskHandle {
     tx: mpsc::Sender<oneshot::Sender<Arc<PreparedConnection>>>,
     broker: Arc<str>,
     task_tracker: TaskTracker,
-    // task_handle: JoinHandle<()>,
     cancellation_token: CancellationToken,
     _cancel_on_drop: DropGuard,
 }
@@ -249,8 +248,7 @@ impl NodeTaskHandle {
 
         let task_tracker = TaskTracker::new();
 
-        let _task_handle = task_tracker.spawn(task.run());
-
+        task_tracker.spawn(task.run());
         task_tracker.close();
 
         Self {
@@ -297,6 +295,60 @@ impl GenericRequest {
     }
 }
 
+async fn connection_race(
+    iter: impl IntoIterator<Item = (Arc<str>, Arc<NodeTaskHandle>)>,
+) -> Option<(Arc<str>, Arc<PreparedConnection>)> {
+    let mut all =
+        FuturesUnordered::from_iter(iter.into_iter().map(|(broker, handle)| async move {
+            let conn = handle.get_connection().await;
+            (broker, conn)
+        }));
+
+    while let Some((broker, conn)) = all.next().await {
+        match conn {
+            Some(conn) => return Some((broker, conn)),
+            None => continue,
+        }
+    }
+
+    None
+}
+
+#[derive(Debug, Clone)]
+struct ManagerState {
+    /// Host to connection
+    connections: HashMap<Arc<str>, Arc<NodeTaskHandle>>,
+}
+
+impl ManagerState {
+    /// Get a random connection by racing the connection handles
+    async fn connection_race(&self) -> Option<(Arc<str>, Arc<PreparedConnection>)> {
+        let options = self
+            .connections
+            .iter()
+            .map(|(broker, handle)| (broker.clone(), handle.clone()));
+
+        connection_race(options).await
+    }
+}
+
+impl From<Vec<String>> for ManagerState {
+    fn from(brokers: Vec<String>) -> Self {
+        let connections = brokers
+            .into_iter()
+            .map(|broker| {
+                let broker: Arc<str> = broker.into();
+                (
+                    broker.clone(),
+                    Arc::new(NodeTaskHandle::new(broker.clone(), Default::default())),
+                )
+            })
+            .collect();
+
+        Self { connections }
+    }
+}
+
 /// Manages the cluster metadata and forwards requests to the appropriate broker.
 ///
 /// This is the background task for the NetworkClient.
@@ -304,8 +356,7 @@ impl GenericRequest {
 pub struct ConnectionManager {
     /// Broker ID to host
     metadata: Option<MetadataResponse>,
-    /// Host to connection
-    connections: HashMap<Arc<str>, Arc<NodeTaskHandle>>,
+    state: ManagerState,
     config: ConnectionConfig,
     rx: mpsc::Receiver<GenericRequest>,
     task_tracker: TaskTracker,
@@ -320,23 +371,12 @@ impl ConnectionManager {
         rx: mpsc::Receiver<GenericRequest>,
         cancellation_token: CancellationToken,
     ) -> Self {
-        let connections = brokers
-            .into_iter()
-            .map(|broker| {
-                let broker: Arc<str> = broker.into();
-                (
-                    broker.clone(),
-                    Arc::new(NodeTaskHandle::new(broker.clone(), Default::default())),
-                )
-            })
-            .collect();
-
         let task_tracker = TaskTracker::new();
         task_tracker.close();
 
         Self {
             metadata: None,
-            connections,
+            state: brokers.into(),
             config,
             rx,
             task_tracker,
@@ -345,27 +385,14 @@ impl ConnectionManager {
         }
     }
 
-    /// Get a random connection handle.
-    fn random_handle(&self) -> Option<(Arc<str>, Arc<NodeTaskHandle>)> {
-        if self.connections.is_empty() {
-            return None;
-        }
-
-        let index = rand::thread_rng().gen_range(0..self.connections.len());
-
-        self.connections
-            .iter()
-            .nth(index)
-            .map(|(broker, handle)| (broker.to_owned(), handle.clone()))
-    }
-
     /// Get the connection handle for a broker id
     fn get_handle(&self, broker_id: &BrokerId) -> Option<Arc<NodeTaskHandle>> {
         self.metadata
             .as_ref()
             .and_then(|m| {
                 m.brokers.get(broker_id).and_then(|broker| {
-                    self.connections
+                    self.state
+                        .connections
                         .get(format!("{}:{}", broker.host.as_str(), broker.port).as_str())
                 })
             })
@@ -373,29 +400,17 @@ impl ConnectionManager {
     }
 
     /// Refresh the metadata and update internal state
+    ///
+    /// Returns None if there are no brokers in the cluster metadata
     async fn refresh_metadata(&mut self) -> Option<()> {
         // TODO load balancing?
-        // get a random handle
-        let Some((broker, handle)) = self.random_handle() else {
-            // our connections map is empty
+        // try to get a connection
+        let Some((broker, conn)) = self.state.connection_race().await else {
             tracing::error!("no connections available for metadata refresh!");
             return None;
         };
 
         tracing::debug!(broker = ?broker, "attempting to refresh metadata");
-
-        // try to get a connection
-        let Some(conn) = handle.get_connection().await else {
-            // ran out of retries or the handle is closed.
-            // either way, shut down the handle and try again next time
-            tracing::warn!(broker = ?broker, "restarting connection task");
-            handle.shutdown().await;
-            self.connections.insert(
-                broker.clone(),
-                Arc::new(NodeTaskHandle::new(broker, self.config.clone())),
-            );
-            return Some(());
-        };
 
         let request = {
             let mut r = MetadataRequest::default();
@@ -412,6 +427,11 @@ impl ConnectionManager {
             }
         };
 
+        if metadata.brokers.len() == 0 {
+            tracing::warn!("metadata request returned no brokers, ignoring");
+            return Some(());
+        }
+
         let hosts: Vec<_> = metadata
             .brokers
             .values()
@@ -422,7 +442,7 @@ impl ConnectionManager {
             .into_iter()
             .map(|host| {
                 let broker: Arc<str> = Arc::from(host);
-                let handle = self.connections.remove(&broker).unwrap_or_else(|| {
+                let handle = self.state.connections.remove(&broker).unwrap_or_else(|| {
                     tracing::info!("discovered broker {}", broker);
                     Arc::new(NodeTaskHandle::new(broker.clone(), self.config.clone()))
                 });
@@ -431,7 +451,7 @@ impl ConnectionManager {
             })
             .collect();
 
-        for (host, handle) in self.connections.drain() {
+        for (host, handle) in self.state.connections.drain() {
             tracing::info!(
                 "closing connection to broker {} because it is no longer part of the cluster",
                 host
@@ -439,12 +459,12 @@ impl ConnectionManager {
             handle.shutdown().await;
         }
 
-        self.connections = new_connections;
+        self.state.connections = new_connections;
         self.metadata.replace(metadata);
 
         tracing::debug!("successfully updated metadata using broker {}", broker);
 
-        return Some(());
+        Some(())
     }
 
     pub async fn run(mut self) {
@@ -461,80 +481,71 @@ impl ConnectionManager {
 
             match either {
                 Either::Left(_) => {
-                    if matches!(self.refresh_metadata().await, None) {
+                    // metadata refresh returns None when there are no brokers in the cluster
+                    // in this case, there is no way to recover
+                    if self.refresh_metadata().await.is_none() {
+                        tracing::error!("no brokers in cluster!");
                         return;
                     }
                 }
-                Either::Right(req) => match req {
-                    Some(mut req) => {
-                        macro_rules! abort_no_connections {
-                            () => {{
-                                abort_no_connections!("no connections available for request!")
-                            }};
-                            ($msg:expr) => {{
-                                tracing::error!($msg);
-                                let _ = req.tx.send(Err(PreparedConnectionError::Closed));
-                                continue;
-                            }};
-                        }
+                Either::Right(Some(mut req)) => {
+                    macro_rules! or_cancel {
+                        ($fut:expr) => {
+                            tokio::select! {
+                                biased;
+                                _ = req.tx.closed() => return,
+                                _ = self.cancellation_token.cancelled() => return,
+                                v = $fut => v
+                            }
+                        };
+                    }
 
-                        let handle = match req.broker_id(self.metadata.as_ref().expect(
+                    let conn = match req.broker_id(self.metadata.as_ref().expect(
                             "Requests should not be processed until metadata is fetched. This is a bug.",
                         )) {
                             // request needs specific broker
                             Ok(Some(broker_id)) => {
-                                if let Some(handle) = self.get_handle(&broker_id) {
-                                    handle
-                                } else {
-                                    abort_no_connections!()
-                                }
-                            }
-                            // request can use any broker
-                            Ok(None) => {
-                                // TODO load balancing, work-stealing?
-                                let Some((_, handle)) = self.random_handle() else {
-                                    // our connections map is empty
-                                    abort_no_connections!()
+                                let Some(handle) = self.get_handle(&broker_id) else {
+                                    tracing::error!("no connections available for request!");
+                                    let _ = req.tx.send(Err(PreparedConnectionError::Closed));
+                                    continue;
                                 };
 
-                                handle
-                            }
-                            // request couldn't determine broker based on metadata
-                            _ => abort_no_connections!("could not determine broker for request!"),
+                                or_cancel!(handle.get_connection())
+                            },
+                            // any broker will do, race them
+                            Ok(None) => or_cancel!(self.state.connection_race()).map(|(_, c)| c),
+                            _ => {
+                                tracing::error!("could not determine broker for request!");
+                                let _ = req.tx.send(Err(PreparedConnectionError::Closed));
+                                continue;
+                            },
                         };
 
-                        let cancellation_token = self.cancellation_token.child_token();
+                    let Some(conn) = conn else {
+                        tracing::error!("no connections available for request!");
+                        let _ = req.tx.send(Err(PreparedConnectionError::Closed));
+                        continue;
+                    };
 
-                        self.task_tracker.spawn(async move {
-                            macro_rules! or_cancel {
-                                ($fut:expr) => {
-                                    tokio::select! {
-                                        biased;
-                                        _ = req.tx.closed() => return,
-                                        _ = cancellation_token.cancelled() => return,
-                                        v = $fut => v
-                                    }
-                                };
-                            }
+                    let tracker = self.task_tracker.clone();
 
-                            let Some(conn) = or_cancel!(handle.get_connection()) else {
-                                // failed to connect (retries exhausted)
-                                let _ = req.tx.send(Err(PreparedConnectionError::Closed));
-                                return;
-                            };
-
-                            let res = or_cancel!(conn.send(req.request));
-
-                            let _ = req.tx.send(res);
-                        });
-                    }
-                    None => break, // NetworkClient dropped
-                },
+                    tracker.spawn(async move {
+                        let res = conn.send(req.request).await;
+                        let _ = req.tx.send(res);
+                    });
+                }
+                Either::Right(None) => break, // NetworkClient dropped
             }
         }
 
+        tracing::info!("connection manager is shutting down");
+
         let mut all = FuturesUnordered::from_iter(
-            self.connections.iter().map(|(_, handle)| handle.shutdown()),
+            self.state
+                .connections
+                .values()
+                .map(|handle| handle.shutdown()),
         );
 
         while let Some(()) = all.next().await {}

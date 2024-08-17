@@ -18,6 +18,7 @@ pub struct NetworkClient {
 
 impl NetworkClient {
     pub fn new(brokers: Vec<String>, config: ConnectionConfig) -> Self {
+        // sends are handled in a spawned task, meaning new requests won't need to wait.
         let (tx, rx) = mpsc::channel(1);
 
         let cancellation_token = CancellationToken::new();
@@ -25,8 +26,7 @@ impl NetworkClient {
 
         let mgr = ConnectionManager::new(brokers, config, rx, cancellation_token.clone());
 
-        // TODO cancellation token, etc.
-        let _ = task_tracker.spawn(mgr.run());
+        task_tracker.spawn(mgr.run());
         task_tracker.close();
 
         Self {
