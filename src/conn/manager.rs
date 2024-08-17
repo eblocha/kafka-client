@@ -368,13 +368,13 @@ impl ConnectionManager {
     }
 
     /// Refresh the metadata and update internal state
-    async fn refresh_metadata(&mut self) {
+    async fn refresh_metadata(&mut self) -> Option<()> {
         // TODO load balancing?
         // get a random handle
         let Some((broker, handle)) = self.random_handle() else {
             // our connections map is empty
             tracing::error!("no connections available for metadata refresh!");
-            return;
+            return None;
         };
 
         tracing::debug!(broker = ?broker, "attempting to refresh metadata");
@@ -389,7 +389,7 @@ impl ConnectionManager {
                 broker.clone(),
                 Arc::new(NodeTaskHandle::new(broker, self.config.clone())),
             );
-            return;
+            return Some(());
         };
 
         let request = {
@@ -403,7 +403,7 @@ impl ConnectionManager {
             Ok(m) => m,
             Err(e) => {
                 tracing::error!(broker = ?broker, "failed to get metadata: {}", e);
-                return;
+                return Some(());
             }
         };
 
@@ -438,6 +438,8 @@ impl ConnectionManager {
         self.metadata.replace(metadata);
 
         tracing::debug!("successfully updated metadata using broker {}", broker);
+
+        return Some(());
     }
 
     pub async fn run(mut self) {
@@ -453,7 +455,11 @@ impl ConnectionManager {
             };
 
             match either {
-                Either::Left(_) => self.refresh_metadata().await,
+                Either::Left(_) => {
+                    if matches!(self.refresh_metadata().await, None) {
+                        return;
+                    }
+                }
                 Either::Right(req) => match req {
                     Some(mut req) => {
                         macro_rules! abort_no_connections {
@@ -468,7 +474,7 @@ impl ConnectionManager {
                         }
 
                         let handle = match req.broker_id(self.metadata.as_ref().expect(
-                            "Requests are not processed until metadata is fetched. This is a bug.",
+                            "Requests should not be processed until metadata is fetched. This is a bug.",
                         )) {
                             // request needs specific broker
                             Ok(Some(broker_id)) => {

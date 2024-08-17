@@ -17,8 +17,8 @@ struct Cli {
     #[command(subcommand)]
     client: Client,
 
-    #[arg(short, long, value_delimiter = ',', num_args = 1..)]
-    brokers: Vec<String>,
+    #[arg(short, long, value_delimiter = ',', num_args = 1.., required = true, help = "bootstrap servers (required)")]
+    bootstrap_servers: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -31,7 +31,7 @@ enum Client {
 pub async fn main() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::fmt()
         .with_writer(io::stderr)
-        .with_max_level(Level::TRACE)
+        .with_max_level(Level::DEBUG)
         .compact()
         .finish();
 
@@ -39,7 +39,7 @@ pub async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    let manager = NetworkClient::new(cli.brokers, Default::default());
+    let manager = NetworkClient::new(cli.bootstrap_servers, Default::default());
 
     match cli.client {
         Client::Admin(cmd) => cmd.run(&manager).await?,
