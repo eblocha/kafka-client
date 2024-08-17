@@ -1,5 +1,6 @@
 pub mod clients;
 mod cmd;
+pub mod config;
 mod conn;
 mod proto;
 
@@ -8,6 +9,7 @@ use std::io;
 use clap::{Parser, Subcommand};
 use clients::network::NetworkClient;
 use cmd::{admin::AdminCommands, Run};
+use config::KafkaConfig;
 use tracing::Level;
 
 #[derive(Parser)]
@@ -39,7 +41,9 @@ pub async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    let manager = NetworkClient::new(cli.bootstrap_servers, Default::default());
+    let cfg = KafkaConfig::default();
+
+    let manager = NetworkClient::new(cli.bootstrap_servers, (&cfg).into());
 
     match cli.client {
         Client::Admin(cmd) => cmd.run(&manager).await?,

@@ -5,7 +5,7 @@ use tokio_util::{
 };
 
 use crate::conn::{
-    manager::{ConnectionConfig, ConnectionManager, GenericRequest},
+    manager::{ConnectionManager, ConnectionManagerConfig, GenericRequest},
     PreparedConnectionError, Sendable,
 };
 
@@ -17,7 +17,7 @@ pub struct NetworkClient {
 }
 
 impl NetworkClient {
-    pub fn new(brokers: Vec<String>, config: ConnectionConfig) -> Self {
+    pub fn new(brokers: Vec<String>, config: ConnectionManagerConfig) -> Self {
         // sends are handled in a spawned task, meaning new requests won't need to wait.
         let (tx, rx) = mpsc::channel(1);
 

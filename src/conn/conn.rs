@@ -21,7 +21,7 @@ use tokio_util::{
     task::{task_tracker::TaskTrackerWaitFuture, TaskTracker},
 };
 
-use crate::conn::codec::sendable::RequestRecord;
+use crate::{config::KafkaConfig, conn::codec::sendable::RequestRecord};
 
 use super::codec::{
     sendable::Sendable, CorrelationId, EncodableRequest, KafkaCodec, VersionedRequest,
@@ -47,12 +47,12 @@ type ResponseSender = oneshot::Sender<Result<BytesMut, KafkaConnectionError>>;
 /// Configuration for the Kafka client
 #[derive(Debug, Clone)]
 pub struct KafkaConnectionConfig {
+    /// Client id to include with every request.
+    pub client_id: Option<Arc<str>>,
     /// Size of the request send buffer. Further requests will experience backpressure.
     pub send_buffer_size: usize,
     /// Maximum frame length allowed in the transport layer. If a request is larger than this, an error is returned.
     pub max_frame_length: usize,
-    /// Client id to include with every request.
-    pub client_id: Option<Arc<str>>,
 }
 
 impl Default for KafkaConnectionConfig {
@@ -61,6 +61,16 @@ impl Default for KafkaConnectionConfig {
             send_buffer_size: 512,
             max_frame_length: 8 * 1024 * 1024,
             client_id: None,
+        }
+    }
+}
+
+impl From<&KafkaConfig> for KafkaConnectionConfig {
+    fn from(value: &KafkaConfig) -> Self {
+        Self {
+            client_id: value.client_id.clone(),
+            send_buffer_size: value.send_buffer_size,
+            max_frame_length: value.max_frame_length,
         }
     }
 }

@@ -15,9 +15,11 @@ use tokio_util::{
     task::{task_tracker::TaskTrackerWaitFuture, TaskTracker},
 };
 
+use crate::config::KafkaConfig;
+
 use super::{
-    codec::sendable::RequestRecord, request::KafkaRequest, PreparedConnection,
-    PreparedConnectionError, PreparedConnectionInitializationError,
+    codec::sendable::RequestRecord, request::KafkaRequest, KafkaConnectionConfig,
+    PreparedConnection, PreparedConnectionError, PreparedConnectionInitializationError,
 };
 
 // recv request for connection
@@ -78,10 +80,33 @@ impl Default for ConnectionRetryConfig {
     }
 }
 
+impl From<&KafkaConfig> for ConnectionRetryConfig {
+    fn from(value: &KafkaConfig) -> Self {
+        Self {
+            max_retries: value.connection_max_retries,
+            min_backoff: value.connection_min_backoff,
+            max_backoff: value.connection_max_backoff,
+            jitter: value.connection_jitter,
+            connection_timeout: value.connection_timeout,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionConfig {
     /// Connection retry configuration
     pub retry: ConnectionRetryConfig,
+    /// IO stream configuration
+    pub io: KafkaConnectionConfig,
+}
+
+impl From<&KafkaConfig> for ConnectionConfig {
+    fn from(value: &KafkaConfig) -> Self {
+        Self {
+            retry: value.into(),
+            io: value.into(),
+        }
+    }
 }
 
 // TODO config?
@@ -130,8 +155,6 @@ impl NodeBackgroundTask {
             let mut current_retries = 0u32;
 
             let conn = loop {
-                let config = super::KafkaConnectionConfig::default();
-
                 tracing::info!(broker = ?self.broker, "attempting to connect");
 
                 let senders_dropped =
@@ -151,7 +174,7 @@ impl NodeBackgroundTask {
 
                 let connect_fut = TcpStream::connect(self.broker.as_ref())
                     .map_err(PreparedConnectionInitializationError::Io)
-                    .and_then(|io| PreparedConnection::connect(io, &config));
+                    .and_then(|io| PreparedConnection::connect(io, &self.config.io));
 
                 let res = tokio::select! {
                     biased;
@@ -350,6 +373,30 @@ impl From<Vec<String>> for ManagerState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ConnectionManagerConfig {
+    pub conn: ConnectionConfig,
+    pub metadata_refresh_interval: Duration,
+}
+
+impl From<&KafkaConfig> for ConnectionManagerConfig {
+    fn from(value: &KafkaConfig) -> Self {
+        Self {
+            conn: value.into(),
+            metadata_refresh_interval: value.metadata_refresh_interval,
+        }
+    }
+}
+
+impl Default for ConnectionManagerConfig {
+    fn default() -> Self {
+        Self {
+            conn: Default::default(),
+            metadata_refresh_interval: Duration::from_secs(5 * 60),
+        }
+    }
+}
+
 /// Manages the cluster metadata and forwards requests to the appropriate broker.
 ///
 /// This is the background task for the NetworkClient.
@@ -358,7 +405,7 @@ pub struct ConnectionManager {
     /// Broker ID to host
     metadata: Option<MetadataResponse>,
     state: ManagerState,
-    config: ConnectionConfig,
+    config: ConnectionManagerConfig,
     rx: mpsc::Receiver<GenericRequest>,
     task_tracker: TaskTracker,
     cancellation_token: CancellationToken,
@@ -368,7 +415,7 @@ pub struct ConnectionManager {
 impl ConnectionManager {
     pub fn new(
         brokers: Vec<String>,
-        config: ConnectionConfig,
+        config: ConnectionManagerConfig,
         rx: mpsc::Receiver<GenericRequest>,
         cancellation_token: CancellationToken,
     ) -> Self {
@@ -445,7 +492,10 @@ impl ConnectionManager {
                 let broker: Arc<str> = Arc::from(host);
                 let handle = self.state.connections.remove(&broker).unwrap_or_else(|| {
                     tracing::info!("discovered broker {}", broker);
-                    Arc::new(NodeTaskHandle::new(broker.clone(), self.config.clone()))
+                    Arc::new(NodeTaskHandle::new(
+                        broker.clone(),
+                        self.config.conn.clone(),
+                    ))
                 });
 
                 (broker.clone(), handle)
