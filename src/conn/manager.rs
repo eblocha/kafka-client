@@ -8,6 +8,7 @@ use rand::Rng;
 use tokio::{
     net::TcpStream,
     sync::{mpsc, oneshot},
+    time::MissedTickBehavior,
 };
 use tokio_util::{
     sync::{CancellationToken, DropGuard},
@@ -177,7 +178,7 @@ impl NodeBackgroundTask {
 
                         tracing::error!(
                             broker = ?self.broker,
-                            "failed to connect: {}, backing off for {}ms with retries: {} of {}",
+                            "failed to connect: {}, backing off for {}ms: {} of {} attempts",
                             e,
                             current_backoff.as_millis(),
                             current_retries,
@@ -469,6 +470,9 @@ impl ConnectionManager {
 
     pub async fn run(mut self) {
         let mut metadata_interval = tokio::time::interval(Duration::from_millis(500));
+
+        // skip missed metadata refreshes in case initial connection backs off
+        metadata_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
             let either = tokio::select! {
