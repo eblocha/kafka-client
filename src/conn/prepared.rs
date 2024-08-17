@@ -86,9 +86,8 @@ impl From<KafkaConnectionError> for PreparedConnectionError {
 
 fn create_version_request() -> ApiVersionsRequest {
     let mut r = ApiVersionsRequest::default();
-    // TODO client software name and version
-    r.client_software_name = StrBytes::from_static_str("eblocha-kafka");
-    r.client_software_version = StrBytes::from_static_str("1.0");
+    r.client_software_name = StrBytes::from_static_str(env!("CARGO_PKG_NAME"));
+    r.client_software_version = StrBytes::from_static_str(env!("CARGO_PKG_VERSION"));
     r
 }
 
