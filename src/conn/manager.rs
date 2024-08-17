@@ -4,7 +4,7 @@ use bytes::BytesMut;
 use crossbeam::sync::{ShardedLock, ShardedLockWriteGuard};
 use futures::{future::Either, stream::FuturesUnordered, FutureExt, StreamExt, TryFutureExt};
 use kafka_protocol::messages::{BrokerId, MetadataRequest, MetadataResponse};
-use rand::Rng;
+use rand::{seq::SliceRandom, Rng};
 
 use thiserror::Error;
 use tokio::{
@@ -366,18 +366,16 @@ struct ManagerState {
 impl ManagerState {
     /// Get a random connection by racing the connection handles
     async fn connection_race(&self) -> Option<(BrokerHost, Arc<PreparedConnection>)> {
-        let offset = rand::thread_rng().gen_range(0..self.connections.len());
-
-        let mut futures = Vec::with_capacity(self.connections.len());
-
-        for i in 0..self.connections.len() {
-            let (broker, handle) = &self.connections[(offset + i) % self.connections.len()];
-
-            futures.push(async move {
+        let mut futures: Vec<_> = self
+            .connections
+            .iter()
+            .map(|(broker, handle)| async move {
                 let conn = handle.get_connection().await;
                 (broker.clone(), conn)
             })
-        }
+            .collect();
+
+        futures.shuffle(&mut rand::thread_rng());
 
         let mut all = FuturesUnordered::from_iter(futures);
 
