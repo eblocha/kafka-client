@@ -3,7 +3,7 @@ use std::future::Future;
 use extend::ext;
 use kafka_protocol::messages::{MetadataRequest, MetadataResponse};
 
-use crate::conn::PreparedConnection;
+use crate::clients::network::NetworkClient;
 
 pub fn list_topics_request() -> MetadataRequest {
     let mut req = MetadataRequest::default();
@@ -13,8 +13,8 @@ pub fn list_topics_request() -> MetadataRequest {
 }
 
 #[ext(pub, name = ListTopics)]
-impl &PreparedConnection {
+impl &NetworkClient {
     fn list_topics(self) -> impl Future<Output = anyhow::Result<MetadataResponse>> {
-        async { Ok(self.send(list_topics_request()).await?) }
+        async { Ok(self.send(list_topics_request(), None).await?) }
     }
 }

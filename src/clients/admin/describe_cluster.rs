@@ -3,7 +3,7 @@ use std::future::Future;
 use extend::ext;
 use kafka_protocol::messages::{DescribeClusterRequest, DescribeClusterResponse};
 
-use crate::conn::PreparedConnection;
+use crate::clients::network::NetworkClient;
 
 pub fn describe_cluster_request() -> DescribeClusterRequest {
     let mut req = DescribeClusterRequest::default();
@@ -15,8 +15,8 @@ pub fn describe_cluster_request() -> DescribeClusterRequest {
 }
 
 #[ext(pub, name = DescribeCluster)]
-impl &PreparedConnection {
+impl &NetworkClient {
     fn describe_cluster(self) -> impl Future<Output = anyhow::Result<DescribeClusterResponse>> {
-        async { Ok(self.send(describe_cluster_request()).await?) }
+        async { Ok(self.send(describe_cluster_request(), None).await?) }
     }
 }

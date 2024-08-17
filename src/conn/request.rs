@@ -25,8 +25,10 @@ use kafka_protocol::{
         UnregisterBrokerRequest, UpdateFeaturesRequest, UpdateMetadataRequest, VoteRequest,
         WriteTxnMarkersRequest,
     },
-    protocol::{buf::ByteBufMut, Encodable},
+    protocol::{buf::ByteBufMut, Encodable, Message},
 };
+
+use super::VersionedRequest;
 
 #[non_exhaustive]
 #[allow(unused)]
@@ -267,6 +269,103 @@ impl KafkaRequest {
             KafkaRequest::UpdateMetadata(_) => ApiKey::UpdateMetadataKey,
             KafkaRequest::Vote(_) => ApiKey::VoteKey,
             KafkaRequest::WriteTxnMarkers(_) => ApiKey::WriteTxnMarkersKey,
+        }
+    }
+}
+
+impl VersionedRequest for KafkaRequest {
+    fn key(&self) -> i16 {
+        self.as_api_key() as i16
+    }
+
+    fn versions(&self) -> kafka_protocol::protocol::VersionRange {
+        match self {
+            KafkaRequest::AddOffsetsToTxn(_) => AddOffsetsToTxnRequest::VERSIONS,
+            KafkaRequest::AddPartitionsToTxn(_) => AddPartitionsToTxnRequest::VERSIONS,
+            KafkaRequest::AllocateProducerIds(_) => AllocateProducerIdsRequest::VERSIONS,
+            KafkaRequest::AlterClientQuotas(_) => AlterClientQuotasRequest::VERSIONS,
+            KafkaRequest::AlterConfigs(_) => AlterConfigsRequest::VERSIONS,
+            KafkaRequest::AlterPartitionReassignments(_) => {
+                AlterPartitionReassignmentsRequest::VERSIONS
+            }
+            KafkaRequest::AlterPartition(_) => AlterPartitionRequest::VERSIONS,
+            KafkaRequest::AlterReplicaLogDirs(_) => AlterReplicaLogDirsRequest::VERSIONS,
+            KafkaRequest::AlterUserScramCredentials(_) => {
+                AlterUserScramCredentialsRequest::VERSIONS
+            }
+            KafkaRequest::ApiVersions(_) => ApiVersionsRequest::VERSIONS,
+            KafkaRequest::AssignReplicasToDirs(_) => AssignReplicasToDirsRequest::VERSIONS,
+            KafkaRequest::BeginQuorumEpoch(_) => BeginQuorumEpochRequest::VERSIONS,
+            KafkaRequest::BrokerHeartbeat(_) => BrokerHeartbeatRequest::VERSIONS,
+            KafkaRequest::BrokerRegistration(_) => BrokerRegistrationRequest::VERSIONS,
+            KafkaRequest::ConsumerGroupHeartbeat(_) => ConsumerGroupHeartbeatRequest::VERSIONS,
+            KafkaRequest::ControlledShutdown(_) => ControlledShutdownRequest::VERSIONS,
+            KafkaRequest::ControllerRegistration(_) => ControllerRegistrationRequest::VERSIONS,
+            KafkaRequest::CreateAcls(_) => CreateAclsRequest::VERSIONS,
+            KafkaRequest::CreateDelegationToken(_) => CreateDelegationTokenRequest::VERSIONS,
+            KafkaRequest::CreatePartitions(_) => CreatePartitionsRequest::VERSIONS,
+            KafkaRequest::CreateTopics(_) => CreateTopicsRequest::VERSIONS,
+            KafkaRequest::DeleteAcls(_) => DeleteAclsRequest::VERSIONS,
+            KafkaRequest::DeleteGroups(_) => DeleteGroupsRequest::VERSIONS,
+            KafkaRequest::DeleteRecords(_) => DeleteRecordsRequest::VERSIONS,
+            KafkaRequest::DeleteTopics(_) => DeleteTopicsRequest::VERSIONS,
+            KafkaRequest::DescribeAcls(_) => DescribeAclsRequest::VERSIONS,
+            KafkaRequest::DescribeClientQuotas(_) => DescribeClientQuotasRequest::VERSIONS,
+            KafkaRequest::DescribeCluster(_) => DescribeClusterRequest::VERSIONS,
+            KafkaRequest::DescribeConfigs(_) => DescribeConfigsRequest::VERSIONS,
+            KafkaRequest::DescribeDelegationToken(_) => DescribeDelegationTokenRequest::VERSIONS,
+            KafkaRequest::DescribeGroups(_) => DescribeGroupsRequest::VERSIONS,
+            KafkaRequest::DescribeLogDirs(_) => DescribeLogDirsRequest::VERSIONS,
+            KafkaRequest::DescribeProducers(_) => DescribeProducersRequest::VERSIONS,
+            KafkaRequest::DescribeQuorum(_) => DescribeQuorumRequest::VERSIONS,
+            KafkaRequest::DescribeTransactions(_) => DescribeTransactionsRequest::VERSIONS,
+            KafkaRequest::DescribeUserScramCredentials(_) => {
+                DescribeUserScramCredentialsRequest::VERSIONS
+            }
+            KafkaRequest::ElectLeaders(_) => ElectLeadersRequest::VERSIONS,
+            KafkaRequest::EndQuorumEpoch(_) => EndQuorumEpochRequest::VERSIONS,
+            KafkaRequest::EndTxn(_) => EndTxnRequest::VERSIONS,
+            KafkaRequest::Envelope(_) => EnvelopeRequest::VERSIONS,
+            KafkaRequest::ExpireDelegationToken(_) => ExpireDelegationTokenRequest::VERSIONS,
+            KafkaRequest::Fetch(_) => FetchRequest::VERSIONS,
+            KafkaRequest::FetchSnapshot(_) => FetchSnapshotRequest::VERSIONS,
+            KafkaRequest::FindCoordinator(_) => FindCoordinatorRequest::VERSIONS,
+            KafkaRequest::GetTelemetrySubscriptions(_) => {
+                GetTelemetrySubscriptionsRequest::VERSIONS
+            }
+            KafkaRequest::Heartbeat(_) => HeartbeatRequest::VERSIONS,
+            KafkaRequest::IncrementalAlterConfigs(_) => IncrementalAlterConfigsRequest::VERSIONS,
+            KafkaRequest::InitProducerId(_) => InitProducerIdRequest::VERSIONS,
+            KafkaRequest::JoinGroup(_) => JoinGroupRequest::VERSIONS,
+            KafkaRequest::LeaderAndIsr(_) => LeaderAndIsrRequest::VERSIONS,
+            KafkaRequest::LeaveGroup(_) => LeaveGroupRequest::VERSIONS,
+            KafkaRequest::ListClientMetricsResources(_) => {
+                ListClientMetricsResourcesRequest::VERSIONS
+            }
+            KafkaRequest::ListGroups(_) => ListGroupsRequest::VERSIONS,
+            KafkaRequest::ListOffsets(_) => ListOffsetsRequest::VERSIONS,
+            KafkaRequest::ListPartitionReassignments(_) => {
+                ListPartitionReassignmentsRequest::VERSIONS
+            }
+            KafkaRequest::ListTransactions(_) => ListTransactionsRequest::VERSIONS,
+            KafkaRequest::Metadata(_) => MetadataRequest::VERSIONS,
+            KafkaRequest::OffsetCommit(_) => OffsetCommitRequest::VERSIONS,
+            KafkaRequest::OffsetDelete(_) => OffsetDeleteRequest::VERSIONS,
+            KafkaRequest::OffsetFetch(_) => OffsetFetchRequest::VERSIONS,
+            KafkaRequest::OffsetForLeaderEpoch(_) => OffsetForLeaderEpochRequest::VERSIONS,
+            KafkaRequest::Produce(_) => ProduceRequest::VERSIONS,
+            KafkaRequest::PushTelemetry(_) => PushTelemetryRequest::VERSIONS,
+            KafkaRequest::RenewDelegationToken(_) => RenewDelegationTokenRequest::VERSIONS,
+            KafkaRequest::SaslAuthenticate(_) => SaslAuthenticateRequest::VERSIONS,
+            KafkaRequest::SaslHandshake(_) => SaslHandshakeRequest::VERSIONS,
+            KafkaRequest::StopReplica(_) => StopReplicaRequest::VERSIONS,
+            KafkaRequest::SyncGroup(_) => SyncGroupRequest::VERSIONS,
+            KafkaRequest::TxnOffsetCommit(_) => TxnOffsetCommitRequest::VERSIONS,
+            KafkaRequest::UnregisterBroker(_) => UnregisterBrokerRequest::VERSIONS,
+            KafkaRequest::UpdateFeatures(_) => UpdateFeaturesRequest::VERSIONS,
+            KafkaRequest::UpdateMetadata(_) => UpdateMetadataRequest::VERSIONS,
+            KafkaRequest::Vote(_) => VoteRequest::VERSIONS,
+            KafkaRequest::WriteTxnMarkers(_) => WriteTxnMarkersRequest::VERSIONS,
         }
     }
 }

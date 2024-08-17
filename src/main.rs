@@ -3,10 +3,11 @@ mod cmd;
 mod conn;
 mod proto;
 
-use anyhow::anyhow;
+use std::io;
+
 use clap::{Parser, Subcommand};
+use clients::network::NetworkClient;
 use cmd::{admin::AdminCommands, Run};
-use conn::manager::ConnectionManager;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -27,25 +28,20 @@ enum Client {
 
 #[tokio::main]
 pub async fn main() -> anyhow::Result<()> {
-    let subscriber = tracing_subscriber::fmt().compact().finish();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(io::stderr)
+        .compact()
+        .finish();
+
     tracing::subscriber::set_global_default(subscriber)?;
 
     let cli = Cli::parse();
 
-    let manager = ConnectionManager::new(vec![cli.broker.clone()]);
-
-    let handle = manager.handle(&cli.broker).unwrap();
-
-    let conn = handle
-        .get_connection()
-        .await
-        .ok_or(anyhow!("connection manager is closed"))?;
+    let manager = NetworkClient::new(vec![cli.broker.clone()], Default::default());
 
     match cli.client {
-        Client::Admin(cmd) => cmd.run(conn.as_ref()).await?,
+        Client::Admin(cmd) => cmd.run(&manager).await?,
     }
-
-    handle.shutdown().await;
 
     Ok(())
 }

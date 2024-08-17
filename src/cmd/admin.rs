@@ -1,8 +1,8 @@
 use clap::Subcommand;
 
-use crate::{
-    clients::admin::{describe_cluster::DescribeCluster, list_topics::ListTopics},
-    conn::PreparedConnection,
+use crate::clients::{
+    admin::{describe_cluster::DescribeCluster, list_topics::ListTopics},
+    network::NetworkClient,
 };
 
 use super::Run;
@@ -19,7 +19,7 @@ pub enum AdminCommands {
 impl Run for AdminCommands {
     type Response = ();
 
-    async fn run(self, conn: &PreparedConnection) -> anyhow::Result<Self::Response> {
+    async fn run(self, conn: &NetworkClient) -> anyhow::Result<Self::Response> {
         match self {
             AdminCommands::ListTopics { exclude_internal } => {
                 let res = conn.list_topics().await?;
