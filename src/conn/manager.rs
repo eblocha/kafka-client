@@ -1,8 +1,10 @@
-use std::{fmt::Debug, io, sync::Arc, time::Duration};
+use std::{fmt::Debug, io, sync::Arc, time::Duration, usize};
 
 use crossbeam::sync::{ShardedLock, ShardedLockWriteGuard};
-use futures::{future::Either, stream::FuturesUnordered, FutureExt, StreamExt, TryFutureExt};
-use kafka_protocol::messages::{BrokerId, MetadataRequest, MetadataResponse};
+use futures::{future::Either, stream::FuturesUnordered, StreamExt, TryFutureExt};
+use kafka_protocol::messages::{
+    metadata_response::MetadataResponseBroker, BrokerId, MetadataRequest, MetadataResponse,
+};
 use rand::{seq::SliceRandom, Rng};
 
 use thiserror::Error;
@@ -21,27 +23,8 @@ use crate::{config::KafkaConfig, proto::request::KafkaRequest};
 
 use super::{
     codec::sendable::DecodableResponse, KafkaConnectionConfig, PreparedConnection,
-    PreparedConnectionError, PreparedConnectionInitializationError,
+    PreparedConnectionError, PreparedConnectionInitError,
 };
-
-// recv request for connection
-// if bound for specific broker, choose that broker for connection
-
-// otherwise: https://github.com/apache/kafka/blob/0f7cd4dcdeb2c705c01743927e36b66b06010f20/clients/src/main/java/org/apache/kafka/clients/NetworkClient.java#L709
-// chose a random number 0..nodes, this is where we start iteration (and wrap around)
-// for each node:
-// if the node is connected and isn't due for metadata refresh , we have at least one "ready".
-// if it also has no in-flight requests, select it as the best node
-// otherwise, choose the node that meets the above with the lowest in-flight requests
-
-// if no nodes meet the above, get any connecting node (kafka chooses the last one?)
-
-// if no connecting node, then find nodes that:
-// - is disconnected
-// - has not tried to connect within the backoff period
-// and choose the one that has been the longest since last connection attempt
-
-// if no nodes left after the above, error
 
 /// Controls how reconnection attempts are handled.
 #[derive(Debug, Clone)]
@@ -115,8 +98,18 @@ impl From<&KafkaConfig> for ConnectionConfig {
 /// Number of requests for a connection to batch at the same time.
 const CONNECTION_REQ_BUFFER_SIZE: usize = 10;
 
+enum ConnectionRequestKind {
+    Connected,
+    Any,
+}
+
+struct ConnectionRequest {
+    kind: ConnectionRequestKind,
+    tx: oneshot::Sender<Arc<PreparedConnection>>,
+}
+
 struct NodeBackgroundTask {
-    rx: mpsc::Receiver<oneshot::Sender<Arc<PreparedConnection>>>,
+    rx: mpsc::Receiver<ConnectionRequest>,
     broker: BrokerHost,
     connection: Option<Arc<PreparedConnection>>,
     cancellation_token: CancellationToken,
@@ -141,16 +134,18 @@ impl NodeBackgroundTask {
             if let Some(ref conn) = self.connection {
                 if !conn.is_closed() {
                     tracing::debug!(broker = ?self.broker, "reusing existing connection");
-                    for sender in recv_buf.drain(..) {
-                        let _ = sender.send(conn.clone());
+                    for connection_request in recv_buf.drain(..) {
+                        let _ = connection_request.tx.send(conn.clone());
                     }
                     continue;
                 }
+            }
 
-                tracing::info!(
-                    broker = ?self.broker,
-                    "existing connection is disconnected, attempting to reconnect",
-                );
+            // drop any senders that require an active connection
+            recv_buf.retain(|req| matches!(req.kind, ConnectionRequestKind::Any));
+
+            if recv_buf.is_empty() {
+                continue;
             }
 
             let mut current_backoff;
@@ -160,7 +155,7 @@ impl NodeBackgroundTask {
                 tracing::info!(broker = ?self.broker, "attempting to connect");
 
                 let senders_dropped =
-                    FuturesUnordered::from_iter(recv_buf.iter_mut().map(|s| s.closed()));
+                    FuturesUnordered::from_iter(recv_buf.iter_mut().map(|req| req.tx.closed()));
 
                 let timeout = tokio::time::sleep(self.config.retry.connection_timeout);
 
@@ -175,7 +170,7 @@ impl NodeBackgroundTask {
                 }
 
                 let connect_fut = TcpStream::connect((self.broker.0.as_ref(), self.broker.1))
-                    .map_err(PreparedConnectionInitializationError::Io)
+                    .map_err(PreparedConnectionInitError::Io)
                     .and_then(|io| PreparedConnection::connect(io, &self.config.io));
 
                 let res = tokio::select! {
@@ -183,7 +178,7 @@ impl NodeBackgroundTask {
                     // cancel reasons
                     _ = self.cancellation_token.cancelled() => break 'outer,
                     _ = senders_dropped.count() => abandon!(),
-                    _ = timeout => Err(PreparedConnectionInitializationError::Io(io::Error::from(io::ErrorKind::TimedOut))),
+                    _ = timeout => Err(PreparedConnectionInitError::Io(io::ErrorKind::TimedOut.into())),
 
                     // connect
                     res = connect_fut => res,
@@ -215,7 +210,7 @@ impl NodeBackgroundTask {
                         );
 
                         let mut senders_dropped = FuturesUnordered::new();
-                        senders_dropped.extend(recv_buf.iter_mut().map(|s| s.closed().fuse()));
+                        senders_dropped.extend(recv_buf.iter_mut().map(|req| req.tx.closed()));
 
                         let sleep = tokio::time::sleep(current_backoff);
 
@@ -230,8 +225,8 @@ impl NodeBackgroundTask {
 
             if let Some(ref conn) = conn {
                 tracing::info!(broker = ?self.broker, "connected successfully");
-                for sender in recv_buf.drain(..) {
-                    let _ = sender.send(conn.clone());
+                for req in recv_buf.drain(..) {
+                    let _ = req.tx.send(conn.clone());
                 }
             } else {
                 tracing::error!(broker = ?self.broker, "ran out of retries while connecting");
@@ -251,7 +246,7 @@ impl NodeBackgroundTask {
 
 #[derive(Debug)]
 struct NodeTaskHandle {
-    tx: mpsc::Sender<oneshot::Sender<Arc<PreparedConnection>>>,
+    tx: mpsc::Sender<ConnectionRequest>,
     broker: BrokerHost,
     task_tracker: TaskTracker,
     cancellation_token: CancellationToken,
@@ -290,7 +285,28 @@ impl NodeTaskHandle {
     pub async fn get_connection(&self) -> Option<Arc<PreparedConnection>> {
         let (tx, rx) = oneshot::channel();
 
-        self.tx.send(tx).await.ok()?;
+        self.tx
+            .send(ConnectionRequest {
+                kind: ConnectionRequestKind::Any,
+                tx,
+            })
+            .await
+            .ok()?;
+
+        rx.await.ok()
+    }
+
+    /// Get a connection if the node is currently connected
+    pub async fn get_if_connected(&self) -> Option<Arc<PreparedConnection>> {
+        let (tx, rx) = oneshot::channel();
+
+        self.tx
+            .send(ConnectionRequest {
+                kind: ConnectionRequestKind::Connected,
+                tx,
+            })
+            .await
+            .ok()?;
 
         rx.await.ok()
     }
@@ -330,6 +346,12 @@ impl Debug for BrokerHost {
     }
 }
 
+impl From<&MetadataResponseBroker> for BrokerHost {
+    fn from(broker: &MetadataResponseBroker) -> Self {
+        BrokerHost(Arc::from(broker.host.as_str()), broker.port as u16)
+    }
+}
+
 impl TryFrom<&str> for BrokerHost {
     type Error = url::ParseError;
 
@@ -363,25 +385,82 @@ struct ManagerState {
 }
 
 impl ManagerState {
-    /// Get a random connection by racing the connection handles
-    async fn connection_race(&self) -> Option<(BrokerHost, Arc<PreparedConnection>)> {
-        let mut futures: Vec<_> = self
+    async fn get_best_connection(&mut self) -> Option<(BrokerHost, Arc<PreparedConnection>)> {
+        let mut active_conn_futures: Vec<_> = self
             .connections
             .iter()
+            .map(|(broker, handle)| async move {
+                let conn = handle.get_if_connected().await;
+                (broker.clone(), conn)
+            })
+            .collect();
+
+        active_conn_futures.shuffle(&mut rand::thread_rng());
+
+        let mut active = FuturesUnordered::from_iter(active_conn_futures);
+
+        let mut best: Option<(BrokerHost, Arc<PreparedConnection>)> = None;
+        let mut connected_hosts = Vec::new();
+
+        while let Some((broker, conn)) = active.next().await {
+            match conn {
+                Some(conn) if conn.capacity() == conn.max_capacity() => {
+                    tracing::info!(broker = ?broker, "found active unused connection");
+                    // the connection is unused
+                    return Some((broker, conn));
+                }
+                Some(conn)
+                    if best
+                        .as_ref()
+                        .map(|best| best.1.capacity() < conn.capacity())
+                        .unwrap_or(true) =>
+                {
+                    // the connection is better than any other we have so far
+                    connected_hosts.push(broker.clone());
+                    best.replace((broker, conn));
+                }
+                Some(_) => {
+                    // it's worse than the best so far
+                    connected_hosts.push(broker.clone());
+                }
+                None => {
+                    // not connected
+                }
+            }
+        }
+
+        if let Some(best) = best {
+            tracing::info!(
+                broker = ?best.0,
+                "reusing active connection with {} in-flight requests",
+                best.1.max_capacity() - best.1.capacity()
+            );
+            return Some(best);
+        }
+
+        // There are no active, unsaturated connections. Race the remaining nodes.
+        // We are choosing at random to give healthier nodes a chance at stealing the work
+
+        let mut inactive_conn_futures: Vec<_> = self
+            .connections
+            .iter()
+            .filter(|(broker, _)| !connected_hosts.contains(broker))
             .map(|(broker, handle)| async move {
                 let conn = handle.get_connection().await;
                 (broker.clone(), conn)
             })
             .collect();
 
-        futures.shuffle(&mut rand::thread_rng());
+        inactive_conn_futures.shuffle(&mut rand::thread_rng());
 
-        let mut all = FuturesUnordered::from_iter(futures);
+        let mut inactive = FuturesUnordered::from_iter(inactive_conn_futures);
 
-        while let Some((broker, conn)) = all.next().await {
+        while let Some((broker, conn)) = inactive.next().await {
             match conn {
                 Some(conn) => return Some((broker, conn)),
-                None => continue,
+                None => {
+                    // failed or not running
+                }
             }
         }
 
@@ -507,7 +586,7 @@ impl ConnectionManager {
             .as_ref()
             .and_then(|m| {
                 m.brokers.get(broker_id).and_then(|broker| {
-                    let broker = BrokerHost(Arc::from(broker.host.as_str()), broker.port as u16);
+                    let broker: BrokerHost = broker.into();
                     self.state.connections.iter().find_map(|(host, handle)| {
                         if &broker == host {
                             Some(handle)
@@ -524,9 +603,7 @@ impl ConnectionManager {
     ///
     /// Returns None if there are no brokers in the cluster metadata
     async fn refresh_metadata(&mut self) -> Option<()> {
-        // TODO load balancing?
-        // try to get a connection
-        let Some((broker, conn)) = self.state.connection_race().await else {
+        let Some((broker, conn)) = self.state.get_best_connection().await else {
             tracing::error!("no connections available for metadata refresh!");
             return None;
         };
@@ -628,7 +705,6 @@ impl ConnectionManager {
                     // metadata refresh returns None when there are no brokers in the cluster
                     // in this case, there is no way to recover
                     if self.refresh_metadata().await.is_none() {
-                        tracing::error!("no brokers in cluster!");
                         return;
                     }
                 }
@@ -658,7 +734,7 @@ impl ConnectionManager {
                                 or_cancel!(handle.get_connection())
                             },
                             // any broker will do, race them
-                            Ok(None) => or_cancel!(self.state.connection_race()).map(|(_, c)| c),
+                            Ok(None) => or_cancel!(self.state.get_best_connection()).map(|(_, c)| c),
                             _ => {
                                 tracing::error!("could not determine broker for request!");
                                 let _ = req.tx.send(Err(PreparedConnectionError::Closed));

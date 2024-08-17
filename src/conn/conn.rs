@@ -26,12 +26,13 @@ pub enum KafkaConnectionError {
     /// Indicates an IO problem. This could be a bad socket or an encoding problem.
     #[error(transparent)]
     Io(#[from] io::Error),
+
     /// The client has stopped processing requests
     #[error("the connection is closed")]
     Closed,
 }
 
-type ResponseSender = oneshot::Sender<Result<DecodableResponse, KafkaConnectionError>>;
+type ResponseSender = oneshot::Sender<Result<DecodableResponse, io::Error>>;
 
 /// Configuration for the Kafka client
 #[derive(Debug, Clone)]
@@ -149,8 +150,7 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                                 tracing::trace!("io sink failed to flush frames: {:?}", e);
                                 // if the flush fails, notify all requests that they failed to send
                                 for (_, sender, _) in sender_batch.drain(..) {
-                                    let _ =
-                                        sender.send(Err(KafkaConnectionError::Io(e.kind().into())));
+                                    let _ = sender.send(Err(e.kind().into()));
                                 }
                             }
                             Ok(_) => {
@@ -179,7 +179,7 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                     Some(Err(e)) => {
                         tracing::error!("got an error from the io stream {:?}", e);
                         for (_, (_, sender)) in in_flight {
-                            let _ = sender.send(Err(KafkaConnectionError::Io(e.kind().into())));
+                            let _ = sender.send(Err(e.kind().into()));
                         }
                         break;
                     }
@@ -212,7 +212,7 @@ impl KafkaConnection {
     ) -> io::Result<Self> {
         let cancellation_token = CancellationToken::new();
 
-        let (tx, rx) = mpsc::channel::<(VersionedRequest, ResponseSender)>(config.send_buffer_size);
+        let (tx, rx) = mpsc::channel(config.send_buffer_size);
 
         let task_runner = KafkaConnectionBackgroundTaskRunner {
             io,

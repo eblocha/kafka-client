@@ -42,7 +42,7 @@ pub struct PreparedConnection {
 
 /// Errors associated with establishing and preparing a Kafka connection.
 #[derive(Debug, Error)]
-pub enum PreparedConnectionInitializationError {
+pub enum PreparedConnectionInitError {
     /// Indicates an IO problem. This could be a bad socket or an encoding problem.
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -55,7 +55,7 @@ pub enum PreparedConnectionInitializationError {
     NegotiationFailed(ErrorCode),
 }
 
-impl From<KafkaConnectionError> for PreparedConnectionInitializationError {
+impl From<KafkaConnectionError> for PreparedConnectionInitError {
     fn from(value: KafkaConnectionError) -> Self {
         match value {
             KafkaConnectionError::Io(e) => Self::Io(e),
@@ -98,7 +98,7 @@ fn create_version_request() -> ApiVersionsRequest {
 
 async fn negotiate(
     conn: &KafkaConnection,
-) -> Result<ApiVersionsResponse, PreparedConnectionInitializationError> {
+) -> Result<ApiVersionsResponse, PreparedConnectionInitError> {
     tracing::debug!("negotiating api versions");
 
     let api_versions_response = conn
@@ -129,7 +129,7 @@ async fn negotiate(
         tracing::debug!("version negotiation completed successfully");
         Ok(api_versions_response)
     } else {
-        let e = PreparedConnectionInitializationError::NegotiationFailed(error_code);
+        let e = PreparedConnectionInitError::NegotiationFailed(error_code);
         tracing::error!("{e}");
         Err(e)
     }
@@ -140,10 +140,10 @@ impl PreparedConnection {
     pub async fn connect<IO: AsyncRead + AsyncWrite + Send + 'static>(
         io: IO,
         config: &KafkaConnectionConfig,
-    ) -> Result<Self, PreparedConnectionInitializationError> {
+    ) -> Result<Self, PreparedConnectionInitError> {
         let conn = KafkaConnection::connect(io, config)
             .await
-            .map_err(PreparedConnectionInitializationError::Io)?;
+            .map_err(PreparedConnectionInitError::Io)?;
 
         let api_versions_response = negotiate(&conn).await?;
 
