@@ -38,12 +38,30 @@ use super::{
 
 // if no nodes left after the above, error
 
+/// Controls how reconnection attempts are handled.
 #[derive(Debug, Clone)]
 pub struct ConnectionRetryConfig {
+    /// Maximum number of connection retry attempts before returning an error.
+    /// If None, the retries are infinite.
+    ///
+    /// Default None
     pub max_retries: Option<u32>,
-    pub jitter: u32,
+    /// Minimum time to wait between connection attempts.
+    ///
+    /// Default 10ms
     pub min_backoff: Duration,
+    /// Maximum time to wait between connection attempts.
+    ///
+    /// Default 30s
     pub max_backoff: Duration,
+    /// Random noise to apply to backoff duration.
+    /// Every backoff adds `min_backoff * 0..jitter` to its wait time.
+    ///
+    /// Default 10
+    pub jitter: u32,
+    /// Timeout to establish a connection before retrying.
+    ///
+    /// Default 10s
     pub connection_timeout: Duration,
 }
 
@@ -61,6 +79,7 @@ impl Default for ConnectionRetryConfig {
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionConfig {
+    /// Connection retry configuration
     pub retry: ConnectionRetryConfig,
 }
 
@@ -82,8 +101,9 @@ impl NodeBackgroundTask {
 
         'outer: loop {
             let count = tokio::select! {
+                biased;
+                _ = self.cancellation_token.cancelled() => break,
                 count = self.rx.recv_many(&mut recv_buf, CONNECTION_REQ_BUFFER_SIZE) => count,
-                _ = self.cancellation_token.cancelled() => break
             };
 
             if count == 0 {
@@ -126,14 +146,18 @@ impl NodeBackgroundTask {
                 }
 
                 let res = tokio::select! {
+                    biased;
+                    // cancel reasons
+                    _ = self.cancellation_token.cancelled() => break 'outer,
+                    _ = senders_dropped.count() => abandon!(),
+                    _ = timeout => Err(PreparedConnectionInitializationError::Io(io::Error::from(io::ErrorKind::TimedOut))),
+
+                    // connect
                     res = TcpStream::connect(self.broker.as_ref())
                     .map_err(|e| {
                         PreparedConnectionInitializationError::Io(e)
                     })
                     .and_then(|io| PreparedConnection::connect(io, &config)) => res,
-                    _ = self.cancellation_token.cancelled() => break 'outer,
-                    _ = senders_dropped.count() => abandon!(),
-                    _ = timeout => Err(PreparedConnectionInitializationError::Io(io::Error::from(io::ErrorKind::TimedOut)))
                 };
 
                 match res {
@@ -164,8 +188,9 @@ impl NodeBackgroundTask {
                         let sleep = tokio::time::sleep(current_backoff);
 
                         tokio::select! {
-                            _ = sleep => {},
+                            biased;
                             _ = senders_dropped.count() => abandon!(),
+                            _ = sleep => {},
                         }
                     }
                 }
@@ -191,7 +216,7 @@ impl NodeBackgroundTask {
 }
 
 #[derive(Debug)]
-pub struct NodeTaskHandle {
+struct NodeTaskHandle {
     tx: mpsc::Sender<oneshot::Sender<Arc<PreparedConnection>>>,
     broker: Arc<str>,
     task_tracker: TaskTracker,
@@ -245,11 +270,23 @@ impl NodeTaskHandle {
     }
 }
 
+/// The broker could not be determined from the current metadata.
+pub struct IndeterminateBrokerError;
+
 #[derive(Debug)]
-pub struct BrokerBoundRequest {
-    pub(crate) broker_id: Option<BrokerId>,
-    pub(crate) request: KafkaRequest,
-    pub(crate) tx: oneshot::Sender<Result<(BytesMut, RequestRecord), PreparedConnectionError>>,
+pub(crate) struct GenericRequest {
+    pub request: KafkaRequest,
+    pub tx: oneshot::Sender<Result<(BytesMut, RequestRecord), PreparedConnectionError>>,
+}
+
+impl GenericRequest {
+    /// Determine the broker id to forward the request to, based on the current cluster metadata
+    fn broker_id(
+        &self,
+        _metadata: &MetadataResponse,
+    ) -> Result<Option<BrokerId>, IndeterminateBrokerError> {
+        Ok(None)
+    }
 }
 
 /// Manages the cluster metadata and forwards requests to the appropriate broker.
@@ -258,14 +295,38 @@ pub struct BrokerBoundRequest {
 #[derive(Debug)]
 pub struct ConnectionManager {
     /// Broker ID to host
-    pub(crate) metadata: Option<MetadataResponse>,
+    metadata: Option<MetadataResponse>,
     /// Host to connection
-    pub(crate) connections: HashMap<Arc<str>, Arc<NodeTaskHandle>>,
-    pub(crate) config: ConnectionConfig,
-    pub(crate) rx: mpsc::Receiver<BrokerBoundRequest>,
+    connections: HashMap<Arc<str>, Arc<NodeTaskHandle>>,
+    config: ConnectionConfig,
+    rx: mpsc::Receiver<GenericRequest>,
 }
 
 impl ConnectionManager {
+    pub fn new(
+        brokers: Vec<String>,
+        config: ConnectionConfig,
+        rx: mpsc::Receiver<GenericRequest>,
+    ) -> Self {
+        let connections = brokers
+            .into_iter()
+            .map(|broker| {
+                let broker: Arc<str> = broker.into();
+                (
+                    broker.clone(),
+                    Arc::new(NodeTaskHandle::new(broker.clone(), Default::default())),
+                )
+            })
+            .collect();
+
+        Self {
+            metadata: None,
+            connections,
+            config,
+            rx,
+        }
+    }
+
     /// Get a random connection handle.
     fn random_handle(&self) -> Option<(Arc<str>, Arc<NodeTaskHandle>)> {
         if self.connections.is_empty() {
@@ -390,9 +451,11 @@ impl ConnectionManager {
                             }};
                         }
 
-                        let handle = match req.broker_id {
+                        let handle = match req.broker_id(self.metadata.as_ref().expect(
+                            "Requests are not processed until metadata is fetched. This is a bug.",
+                        )) {
                             // request needs specific broker
-                            Some(broker_id) => {
+                            Ok(Some(broker_id)) => {
                                 if let Some(handle) = self.get_handle(&broker_id) {
                                     handle
                                 } else {
@@ -400,7 +463,7 @@ impl ConnectionManager {
                                 }
                             }
                             // request can use any broker
-                            None => {
+                            Ok(None) => {
                                 // TODO load balancing, work-stealing?
                                 let Some((_, handle)) = self.random_handle() else {
                                     // our connections map is empty
@@ -409,6 +472,7 @@ impl ConnectionManager {
 
                                 handle
                             }
+                            _ => abort_no_connections!(),
                         };
 
                         tokio::spawn(async move {

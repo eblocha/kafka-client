@@ -17,6 +17,6 @@ pub fn describe_cluster_request() -> DescribeClusterRequest {
 #[ext(pub, name = DescribeCluster)]
 impl &NetworkClient {
     fn describe_cluster(self) -> impl Future<Output = anyhow::Result<DescribeClusterResponse>> {
-        async { Ok(self.send(describe_cluster_request(), None).await?) }
+        async { Ok(self.send(describe_cluster_request()).await?) }
     }
 }

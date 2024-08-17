@@ -15,6 +15,6 @@ pub fn list_topics_request() -> MetadataRequest {
 #[ext(pub, name = ListTopics)]
 impl &NetworkClient {
     fn list_topics(self) -> impl Future<Output = anyhow::Result<MetadataResponse>> {
-        async { Ok(self.send(list_topics_request(), None).await?) }
+        async { Ok(self.send(list_topics_request()).await?) }
     }
 }
