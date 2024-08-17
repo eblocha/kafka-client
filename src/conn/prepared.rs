@@ -131,7 +131,7 @@ impl PreparedConnection {
     ) -> Result<Self, PreparedConnectionInitializationError> {
         let conn = KafkaConnection::connect(io, config)
             .await
-            .map_err(|e| PreparedConnectionInitializationError::Io(e))?;
+            .map_err(PreparedConnectionInitializationError::Io)?;
 
         let api_versions_response = negotiate(&conn).await?;
 
@@ -161,9 +161,7 @@ impl PreparedConnection {
     ///
     /// Returns None if there is no version overlap or the server does not support the request type
     pub fn determine_version(&self, api_key: i16, range: &VersionRange) -> Option<i16> {
-        let Some(broker_versions) = self.api_versions.api_keys.get(&api_key) else {
-            return None;
-        };
+        let broker_versions = self.api_versions.api_keys.get(&api_key)?;
 
         let intersection = range.intersect(&VersionRange {
             min: broker_versions.min_version,

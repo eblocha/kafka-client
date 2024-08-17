@@ -16,6 +16,8 @@ pub fn describe_cluster_request() -> DescribeClusterRequest {
 
 #[ext(pub, name = DescribeCluster)]
 impl &NetworkClient {
+    // using async fn will add it to the trait definition
+    #[allow(clippy::manual_async_fn)]
     fn describe_cluster(self) -> impl Future<Output = anyhow::Result<DescribeClusterResponse>> {
         async { Ok(self.send(describe_cluster_request()).await?) }
     }

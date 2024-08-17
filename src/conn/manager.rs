@@ -146,7 +146,7 @@ impl NodeBackgroundTask {
                 }
 
                 let connect_fut = TcpStream::connect(self.broker.as_ref())
-                    .map_err(|e| PreparedConnectionInitializationError::Io(e))
+                    .map_err(PreparedConnectionInitializationError::Io)
                     .and_then(|io| PreparedConnection::connect(io, &config));
 
                 let res = tokio::select! {
@@ -337,8 +337,7 @@ impl ConnectionManager {
 
         self.connections
             .iter()
-            .skip(index)
-            .next()
+            .nth(index)
             .map(|(broker, handle)| (broker.to_owned(), handle.clone()))
     }
 

@@ -28,7 +28,7 @@ impl Run for AdminCommands {
                     if !topic.is_internal || !exclude_internal {
                         println!(
                             "{}: {} {} {}",
-                            name.to_string(),
+                            name.0.as_str(),
                             topic.partitions.len(),
                             if topic.partitions.len() == 1 {
                                 "partition"
@@ -43,13 +43,13 @@ impl Run for AdminCommands {
             AdminCommands::DescribeCluster {} => {
                 let res = conn.describe_cluster().await?;
 
-                println!("Cluster ID: {}", res.cluster_id.to_string());
+                println!("Cluster ID: {}", res.cluster_id.as_str());
 
                 for (broker_id, broker) in res.brokers {
                     println!(
                         "Broker {}: {}:{}{}",
-                        broker_id.to_string(),
-                        broker.host.to_string(),
+                        broker_id.0,
+                        broker.host.as_str(),
                         broker.port,
                         if broker_id == res.controller_id {
                             " (controller)"
