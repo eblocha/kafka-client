@@ -145,6 +145,10 @@ impl NodeBackgroundTask {
                     }};
                 }
 
+                let connect_fut = TcpStream::connect(self.broker.as_ref())
+                    .map_err(|e| PreparedConnectionInitializationError::Io(e))
+                    .and_then(|io| PreparedConnection::connect(io, &config));
+
                 let res = tokio::select! {
                     biased;
                     // cancel reasons
@@ -153,11 +157,7 @@ impl NodeBackgroundTask {
                     _ = timeout => Err(PreparedConnectionInitializationError::Io(io::Error::from(io::ErrorKind::TimedOut))),
 
                     // connect
-                    res = TcpStream::connect(self.broker.as_ref())
-                    .map_err(|e| {
-                        PreparedConnectionInitializationError::Io(e)
-                    })
-                    .and_then(|io| PreparedConnection::connect(io, &config)) => res,
+                    res = connect_fut => res,
                 };
 
                 match res {

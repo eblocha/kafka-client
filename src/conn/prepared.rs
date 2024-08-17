@@ -30,7 +30,8 @@ impl<T: Request> VersionedRequest for T {
     }
 }
 
-/// A connection that will lazily negotiate api request versions with the server
+/// A connection that will negotiate api request versions with the server
+#[derive(Debug)]
 pub struct PreparedConnection {
     api_versions: ApiVersionsResponse,
     conn: KafkaConnection,

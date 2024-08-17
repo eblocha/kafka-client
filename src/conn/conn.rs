@@ -152,6 +152,7 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
 ///
 /// This connection supports multiplexed async io.
 /// The connection will be closed on drop.
+#[derive(Debug)]
 pub struct KafkaConnection {
     state: ConnectionState,
     sender: mpsc::Sender<(EncodableRequest, ResponseSender)>,
