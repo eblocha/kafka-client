@@ -485,17 +485,21 @@ impl ConnectionManager {
     }
 
     fn read_metadata_snapshot(&self) -> Option<Arc<MetadataResponse>> {
-        // metadata is a single atomic pointer, its structure cannot be mutated.
         self.metadata
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                tracing::warn!("detected poisoned metadata lock during read {e:?}");
+                e.into_inner()
+            })
             .as_ref()
             .cloned()
     }
 
     fn write_metadata(&self) -> ShardedLockWriteGuard<'_, Option<Arc<MetadataResponse>>> {
-        // metadata is a single atomic pointer, its structure cannot be mutated.
-        self.metadata.write().unwrap_or_else(|e| e.into_inner())
+        self.metadata.write().unwrap_or_else(|e| {
+            tracing::warn!("detected poisoned metadata lock during write {e:?}");
+            e.into_inner()
+        })
     }
 
     /// Get the connection handle for a broker id
@@ -569,7 +573,7 @@ impl ConnectionManager {
             {
                 new_connections.push(self.state.connections[idx].clone())
             } else {
-                tracing::info!("discovered broker {:?}", broker);
+                tracing::info!("discovered broker {broker:?}");
                 new_connections.push((
                     host.clone(),
                     Arc::new(NodeTaskHandle::new(
@@ -582,10 +586,7 @@ impl ConnectionManager {
 
         for (host, handle) in self.state.connections.drain(..) {
             if hosts.binary_search(&host).is_err() {
-                tracing::info!(
-                    "closing connection to broker {:?} because it is no longer part of the cluster",
-                    host
-                );
+                tracing::info!("closing connection to broker {host:?} because it is no longer part of the cluster");
                 handle.shutdown().await;
             }
         }

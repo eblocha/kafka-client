@@ -90,10 +90,12 @@ impl NetworkClient {
 
     /// Read a snapshot of the current metadata
     pub fn read_metadata(&self) -> Option<Arc<MetadataResponse>> {
-        // metadata is a single atomic pointer, its structure cannot be mutated.
         self.metadata
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                tracing::warn!("detected poisoned metadata lock during read {e:?}");
+                e.into_inner()
+            })
             .as_ref()
             .cloned()
     }
