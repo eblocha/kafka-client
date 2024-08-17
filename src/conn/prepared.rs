@@ -13,12 +13,13 @@ use crate::{
     proto::error_codes::ErrorCode,
 };
 
-pub trait VersionedRequest {
+/// Represents a request that can determine the api versions it supports.
+pub trait Versionable {
     fn key(&self) -> i16;
     fn versions(&self) -> VersionRange;
 }
 
-impl<T: Request> VersionedRequest for T {
+impl<T: Request> Versionable for T {
     #[inline]
     fn key(&self) -> i16 {
         T::KEY
@@ -30,13 +31,16 @@ impl<T: Request> VersionedRequest for T {
     }
 }
 
-/// A connection that will negotiate api request versions with the server
+/// A connection that is ready to send arbitrary requests.
+///
+/// It has completed version negotiation and authentication.
 #[derive(Debug)]
 pub struct PreparedConnection {
     api_versions: ApiVersionsResponse,
     conn: KafkaConnection,
 }
 
+/// Errors associated with establishing and preparing a Kafka connection.
 #[derive(Debug, Error)]
 pub enum PreparedConnectionInitializationError {
     /// Indicates an IO problem. This could be a bad socket or an encoding problem.
@@ -60,6 +64,7 @@ impl From<KafkaConnectionError> for PreparedConnectionInitializationError {
     }
 }
 
+/// Errors associated with using a prepared Kafka connection
 #[derive(Debug, Error)]
 pub enum PreparedConnectionError {
     /// Indicates an IO problem. This could be a bad socket or an encoding problem.
@@ -152,7 +157,7 @@ impl PreparedConnection {
     }
 
     /// Send a request using the highest common version
-    pub async fn send<R: Sendable + VersionedRequest>(
+    pub async fn send<R: Sendable + Versionable>(
         &self,
         req: R,
     ) -> Result<R::Response, PreparedConnectionError> {
@@ -202,10 +207,12 @@ impl PreparedConnection {
         self.conn.closed()
     }
 
+    /// Returns the number of empty slots in the send buffer
     pub fn capacity(&self) -> usize {
         self.conn.capacity()
     }
 
+    /// Returns the total number of slots in the send buffer
     pub fn max_capacity(&self) -> usize {
         self.conn.max_capacity()
     }

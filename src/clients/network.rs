@@ -76,9 +76,7 @@ impl NetworkClient {
 
         rx.await
             .map_err(|_| PreparedConnectionError::Closed)?
-            .and_then(|(frame, record)| {
-                R::decode_frame(frame, record).map_err(PreparedConnectionError::Io)
-            })
+            .and_then(|response| R::decode(response).map_err(PreparedConnectionError::Io))
     }
 
     /// Shut down the network client, closing all connections and cancelling requests

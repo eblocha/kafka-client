@@ -13,6 +13,7 @@ pub mod sendable;
 pub use correlated::CorrelationId;
 pub use request::{EncodableRequest, VersionedRequest};
 
+/// Merged encoder and decoder for a Kafka IO stream
 pub struct KafkaCodec {
     encoder: RequestEncoder,
     decoder: CorrelatedDecoder,

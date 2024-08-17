@@ -28,7 +28,7 @@ use kafka_protocol::{
     protocol::{buf::ByteBufMut, Encodable, Message},
 };
 
-use crate::conn::VersionedRequest;
+use crate::conn::Versionable;
 
 #[non_exhaustive]
 #[allow(unused)]
@@ -273,7 +273,7 @@ impl KafkaRequest {
     }
 }
 
-impl VersionedRequest for KafkaRequest {
+impl Versionable for KafkaRequest {
     fn key(&self) -> i16 {
         self.as_api_key() as i16
     }

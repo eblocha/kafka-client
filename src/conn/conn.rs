@@ -1,6 +1,5 @@
 use std::{io, sync::Arc};
 
-use bytes::BytesMut;
 use fnv::FnvHashMap;
 use futures::{future::Either, SinkExt, StreamExt};
 use thiserror::Error;
@@ -18,7 +17,8 @@ use tokio_util::{
 use crate::{config::KafkaConfig, conn::codec::sendable::RequestRecord};
 
 use super::codec::{
-    sendable::Sendable, CorrelationId, EncodableRequest, KafkaCodec, VersionedRequest,
+    sendable::{DecodableResponse, Sendable},
+    CorrelationId, EncodableRequest, KafkaCodec, VersionedRequest,
 };
 
 #[derive(Debug, Error)]
@@ -31,7 +31,7 @@ pub enum KafkaConnectionError {
     Closed,
 }
 
-type ResponseSender = oneshot::Sender<Result<BytesMut, KafkaConnectionError>>;
+type ResponseSender = oneshot::Sender<Result<DecodableResponse, KafkaConnectionError>>;
 
 /// Configuration for the Kafka client
 #[derive(Debug, Clone)]
@@ -68,9 +68,8 @@ impl From<&KafkaConfig> for KafkaConnectionConfig {
 struct KafkaConnectionBackgroundTaskRunner<IO> {
     io: IO,
     rx: mpsc::Receiver<(VersionedRequest, ResponseSender)>,
-    max_frame_length: usize,
-    send_buffer_size: usize,
     cancellation_token: CancellationToken,
+    config: KafkaConnectionConfig,
 }
 
 impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
@@ -79,13 +78,13 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
         IO: AsyncRead + AsyncWrite,
     {
         let (mut sink, mut stream) =
-            Framed::new(self.io, KafkaCodec::new(self.max_frame_length)).split();
+            Framed::new(self.io, KafkaCodec::new(self.config.max_frame_length)).split();
 
-        let mut senders: FnvHashMap<CorrelationId, ResponseSender> =
-            FnvHashMap::with_capacity_and_hasher(self.send_buffer_size, Default::default());
+        let mut in_flight: FnvHashMap<CorrelationId, (RequestRecord, ResponseSender)> =
+            FnvHashMap::with_capacity_and_hasher(self.config.send_buffer_size, Default::default());
 
-        let mut request_buffer = Vec::with_capacity(self.send_buffer_size);
-        let mut sender_batch = Vec::with_capacity(self.send_buffer_size);
+        let mut request_buffer = Vec::with_capacity(self.config.send_buffer_size);
+        let mut sender_batch = Vec::with_capacity(self.config.send_buffer_size);
 
         let mut correlation_id = 0;
 
@@ -94,7 +93,7 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                 biased;
                 _ = self.cancellation_token.cancelled() => break,
                 next_res = stream.next() => Either::Right(next_res),
-                count = self.rx.recv_many(&mut request_buffer, self.send_buffer_size) => Either::Left(count),
+                count = self.rx.recv_many(&mut request_buffer, self.config.send_buffer_size) => Either::Left(count),
             };
 
             match either {
@@ -106,7 +105,19 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                         for (req, sender) in request_buffer.drain(..) {
                             let id = CorrelationId(correlation_id);
 
-                            let encodable = EncodableRequest::from_versioned(req, id);
+                            let api_key = req.request.as_api_key();
+
+                            let record = RequestRecord {
+                                api_version: req.api_version,
+                                response_header_version: api_key
+                                    .response_header_version(req.api_version),
+                            };
+
+                            let encodable = EncodableRequest::from_versioned(
+                                req,
+                                id,
+                                self.config.client_id.clone(),
+                            );
 
                             let api_key = encodable.api_key();
 
@@ -117,7 +128,7 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                                         api_key = ?api_key,
                                         "io sink fed frame",
                                     );
-                                    sender_batch.push((id, sender))
+                                    sender_batch.push((id, sender, record))
                                 }
                                 Err(e) => {
                                     tracing::trace!(
@@ -137,15 +148,15 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                             Err(e) => {
                                 tracing::trace!("io sink failed to flush frames: {:?}", e);
                                 // if the flush fails, notify all requests that they failed to send
-                                for (_, sender) in sender_batch.drain(..) {
+                                for (_, sender, _) in sender_batch.drain(..) {
                                     let _ =
                                         sender.send(Err(KafkaConnectionError::Io(e.kind().into())));
                                 }
                             }
                             Ok(_) => {
                                 tracing::trace!("io sink flushed frames");
-                                for (correlation_id, sender) in sender_batch.drain(..) {
-                                    senders.insert(correlation_id, sender);
+                                for (correlation_id, sender, record) in sender_batch.drain(..) {
+                                    in_flight.insert(correlation_id, (record, sender));
                                 }
                             }
                         }
@@ -157,14 +168,17 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                             correlation_id = frame.id.0,
                             "read a frame from the io stream"
                         );
-                        if let Some(sender) = senders.remove(&frame.id) {
+                        if let Some((record, sender)) = in_flight.remove(&frame.id) {
                             // ok to ignore since it just means the request was abandoned
-                            let _ = sender.send(Ok(frame.frame));
+                            let _ = sender.send(Ok(DecodableResponse {
+                                record,
+                                frame: frame.frame,
+                            }));
                         }
                     }
                     Some(Err(e)) => {
                         tracing::error!("got an error from the io stream {:?}", e);
-                        for (_, sender) in senders {
+                        for (_, (_, sender)) in in_flight {
                             let _ = sender.send(Err(KafkaConnectionError::Io(e.kind().into())));
                         }
                         break;
@@ -185,7 +199,6 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
 #[derive(Debug)]
 pub struct KafkaConnection {
     sender: mpsc::Sender<(VersionedRequest, ResponseSender)>,
-    client_id: Option<Arc<str>>,
     task_tracker: TaskTracker,
     task_handle: JoinHandle<()>,
     cancellation_token: CancellationToken,
@@ -197,8 +210,6 @@ impl KafkaConnection {
         io: IO,
         config: &KafkaConnectionConfig,
     ) -> io::Result<Self> {
-        let client_id = config.client_id.clone();
-
         let cancellation_token = CancellationToken::new();
 
         let (tx, rx) = mpsc::channel::<(VersionedRequest, ResponseSender)>(config.send_buffer_size);
@@ -206,8 +217,7 @@ impl KafkaConnection {
         let task_runner = KafkaConnectionBackgroundTaskRunner {
             io,
             rx,
-            max_frame_length: config.max_frame_length,
-            send_buffer_size: config.send_buffer_size,
+            config: config.clone(),
             cancellation_token: cancellation_token.clone(),
         };
 
@@ -219,7 +229,6 @@ impl KafkaConnection {
 
         let client = Self {
             sender: tx,
-            client_id,
             task_tracker,
             task_handle,
             cancellation_token: cancellation_token.clone(),
@@ -240,14 +249,6 @@ impl KafkaConnection {
         let versioned = VersionedRequest {
             api_version,
             request: req.into(),
-            client_id: self.client_id.clone(),
-        };
-
-        let api_key = versioned.request.as_api_key();
-
-        let record = RequestRecord {
-            api_version: versioned.api_version,
-            response_header_version: api_key.response_header_version(versioned.api_version),
         };
 
         self.sender
@@ -256,9 +257,14 @@ impl KafkaConnection {
             .map_err(|_| KafkaConnectionError::Closed)?;
 
         // error happens when the client dropped our sender before sending anything.
-        let frame = rx.await.map_err(|_| KafkaConnectionError::Closed)??;
+        let response = rx.await.map_err(|_| KafkaConnectionError::Closed)??;
 
-        Ok(R::decode_frame(frame, record)?)
+        Ok(R::decode(response)?)
+    }
+
+    /// Obtain a new Sender to send and receive messages
+    pub fn sender(&self) -> mpsc::Sender<(VersionedRequest, ResponseSender)> {
+        self.sender.clone()
     }
 
     /// Shut down the connection. This is the preferred method to close a connection gracefully.
@@ -294,7 +300,7 @@ impl KafkaConnection {
 mod test {
     use std::time::Duration;
 
-    use bytes::BufMut;
+    use bytes::{BufMut, BytesMut};
     use kafka_protocol::{
         indexmap::IndexMap,
         messages::{

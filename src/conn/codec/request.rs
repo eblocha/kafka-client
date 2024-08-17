@@ -16,7 +16,6 @@ use super::{correlated::CorrelationId, LENGTH_FIELD_LENGTH};
 pub struct VersionedRequest {
     pub request: KafkaRequest,
     pub api_version: i16,
-    pub client_id: Option<Arc<str>>,
 }
 
 /// A request that is ready to be encoded into a frame
@@ -29,7 +28,11 @@ pub struct EncodableRequest {
 
 impl EncodableRequest {
     /// Create an encodable request from a versioned request and correlation id
-    pub fn from_versioned(value: VersionedRequest, correlation_id: CorrelationId) -> Self {
+    pub fn from_versioned(
+        value: VersionedRequest,
+        correlation_id: CorrelationId,
+        client_id: Option<Arc<str>>,
+    ) -> Self {
         let api_key = value.request.as_api_key();
 
         Self {
@@ -37,8 +40,7 @@ impl EncodableRequest {
             request: value.request,
             header: {
                 let mut h = RequestHeader::default();
-                h.client_id = value
-                    .client_id
+                h.client_id = client_id
                     // FIXME there's no way around this copy until kafka-protocol supports Arc<str> (or better yet AsRef<str>)
                     .map(|id| StrBytes::from_string(id.as_ref().to_owned()));
                 h.correlation_id = correlation_id.0;
@@ -134,7 +136,6 @@ mod test {
 
         let versioned = VersionedRequest {
             api_version: 12,
-            client_id: None,
             request: KafkaRequest::Metadata(request),
         };
 
@@ -147,7 +148,7 @@ mod test {
 
         RequestEncoder::new(8 * 1024 * 1024)
             .encode(
-                EncodableRequest::from_versioned(versioned, 1.into()),
+                EncodableRequest::from_versioned(versioned, 1.into(), None),
                 &mut bytes,
             )
             .unwrap();

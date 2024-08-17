@@ -13,24 +13,32 @@ fn into_invalid_data(error: anyhow::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
+/// Request context for decoding into a response type
 #[derive(Debug, Clone)]
 pub struct RequestRecord {
     pub api_version: i16,
     pub response_header_version: i16,
 }
 
+/// A frame that can be decoded, includes the request context.
+#[derive(Debug, Clone)]
+pub struct DecodableResponse {
+    pub record: RequestRecord,
+    pub frame: BytesMut,
+}
+
+/// Represents a request that expects a specific response type, and defines how to decode the response into the type.
 pub trait Sendable: Into<KafkaRequest> {
     type Response;
 
-    fn decode_frame(frame: BytesMut, record: RequestRecord) -> Result<Self::Response, io::Error>;
+    fn decode(response: DecodableResponse) -> Result<Self::Response, io::Error>;
 }
 
 impl<T: Request + Into<KafkaRequest>> Sendable for T {
     type Response = <T as Request>::Response;
 
-    fn decode_frame(
-        mut frame: BytesMut,
-        record: RequestRecord,
+    fn decode(
+        DecodableResponse { record, mut frame }: DecodableResponse,
     ) -> Result<Self::Response, io::Error> {
         tracing::trace!(
             version = record.api_version,
@@ -53,9 +61,9 @@ impl<T: Request + Into<KafkaRequest>> Sendable for T {
 }
 
 impl Sendable for KafkaRequest {
-    type Response = (BytesMut, RequestRecord);
+    type Response = DecodableResponse;
 
-    fn decode_frame(frame: BytesMut, record: RequestRecord) -> Result<Self::Response, io::Error> {
-        Ok((frame, record))
+    fn decode(response: DecodableResponse) -> Result<Self::Response, io::Error> {
+        Ok(response)
     }
 }

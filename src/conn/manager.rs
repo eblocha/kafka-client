@@ -1,6 +1,5 @@
 use std::{fmt::Debug, io, sync::Arc, time::Duration};
 
-use bytes::BytesMut;
 use crossbeam::sync::{ShardedLock, ShardedLockWriteGuard};
 use futures::{future::Either, stream::FuturesUnordered, FutureExt, StreamExt, TryFutureExt};
 use kafka_protocol::messages::{BrokerId, MetadataRequest, MetadataResponse};
@@ -21,7 +20,7 @@ use url::Url;
 use crate::{config::KafkaConfig, proto::request::KafkaRequest};
 
 use super::{
-    codec::sendable::RequestRecord, KafkaConnectionConfig, PreparedConnection,
+    codec::sendable::DecodableResponse, KafkaConnectionConfig, PreparedConnection,
     PreparedConnectionError, PreparedConnectionInitializationError,
 };
 
@@ -309,7 +308,7 @@ pub struct IndeterminateBrokerError;
 #[derive(Debug)]
 pub(crate) struct GenericRequest {
     pub request: KafkaRequest,
-    pub tx: oneshot::Sender<Result<(BytesMut, RequestRecord), PreparedConnectionError>>,
+    pub tx: oneshot::Sender<Result<DecodableResponse, PreparedConnectionError>>,
 }
 
 impl GenericRequest {
