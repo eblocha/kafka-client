@@ -1,6 +1,7 @@
 use std::{fmt::Debug, io, sync::Arc, time::Duration};
 
 use bytes::BytesMut;
+use crossbeam::sync::{ShardedLock, ShardedLockWriteGuard};
 use futures::{future::Either, stream::FuturesUnordered, FutureExt, StreamExt, TryFutureExt};
 use kafka_protocol::messages::{BrokerId, MetadataRequest, MetadataResponse};
 use rand::Rng;
@@ -452,7 +453,7 @@ impl Default for ConnectionManagerConfig {
 #[derive(Debug)]
 pub struct ConnectionManager {
     /// Broker ID to host
-    metadata: Option<MetadataResponse>,
+    metadata: Arc<ShardedLock<Option<Arc<MetadataResponse>>>>,
     state: ManagerState,
     config: ConnectionManagerConfig,
     rx: mpsc::Receiver<GenericRequest>,
@@ -466,6 +467,7 @@ impl ConnectionManager {
         brokers: Vec<BrokerHost>,
         config: ConnectionManagerConfig,
         rx: mpsc::Receiver<GenericRequest>,
+        metadata: Arc<ShardedLock<Option<Arc<MetadataResponse>>>>,
         cancellation_token: CancellationToken,
     ) -> Result<Self, InitializationError> {
         let task_tracker = TaskTracker::new();
@@ -474,7 +476,7 @@ impl ConnectionManager {
         let state = ManagerState::try_new(brokers, &config.conn)?;
 
         Ok(Self {
-            metadata: None,
+            metadata,
             state,
             config,
             rx,
@@ -484,9 +486,23 @@ impl ConnectionManager {
         })
     }
 
+    fn read_metadata_snapshot(&self) -> Option<Arc<MetadataResponse>> {
+        // metadata is a single atomic pointer, its structure cannot be mutated.
+        self.metadata
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .cloned()
+    }
+
+    fn write_metadata(&self) -> ShardedLockWriteGuard<'_, Option<Arc<MetadataResponse>>> {
+        // metadata is a single atomic pointer, its structure cannot be mutated.
+        self.metadata.write().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Get the connection handle for a broker id
     fn get_handle(&self, broker_id: &BrokerId) -> Option<Arc<NodeTaskHandle>> {
-        self.metadata
+        self.read_metadata_snapshot()
             .as_ref()
             .and_then(|m| {
                 m.brokers.get(broker_id).and_then(|broker| {
@@ -583,8 +599,11 @@ impl ConnectionManager {
             return Some(());
         }
 
+        let metadata = Arc::new(metadata);
+
         self.state.connections = new_connections;
-        self.metadata.replace(metadata);
+
+        self.write_metadata().replace(metadata);
 
         tracing::debug!("successfully updated metadata using broker {:?}", broker);
 
@@ -603,7 +622,7 @@ impl ConnectionManager {
                 _ = self.cancellation_token.cancelled() => break,
                 left = metadata_interval.tick() => Either::Left(left),
                 // don't process requests until we know the state of the cluster
-                right = self.rx.recv(), if self.metadata.is_some() => Either::Right(right)
+                right = self.rx.recv(), if self.read_metadata_snapshot().is_some() => Either::Right(right)
             };
 
             match either {
@@ -627,7 +646,7 @@ impl ConnectionManager {
                         };
                     }
 
-                    let conn = match req.broker_id(self.metadata.as_ref().expect(
+                    let conn = match req.broker_id(self.read_metadata_snapshot().as_ref().expect(
                             "Requests should not be processed until metadata is fetched. This is a bug.",
                         )) {
                             // request needs specific broker

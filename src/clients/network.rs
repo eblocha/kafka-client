@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use crossbeam::sync::ShardedLock;
+use kafka_protocol::messages::MetadataResponse;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::{
     sync::CancellationToken,
@@ -14,6 +18,7 @@ use crate::conn::{
 
 /// Maintains connections to the entire cluster, and forwards requests to the appropriate broker.
 pub struct NetworkClient {
+    metadata: Arc<ShardedLock<Option<Arc<MetadataResponse>>>>,
     tx: mpsc::Sender<GenericRequest>,
     cancellation_token: CancellationToken,
     task_tracker: TaskTracker,
@@ -34,15 +39,24 @@ impl NetworkClient {
         // sends are handled in a spawned task, meaning new requests won't need to wait.
         let (tx, rx) = mpsc::channel(1);
 
+        let metadata = Arc::new(ShardedLock::new(None));
+
         let cancellation_token = CancellationToken::new();
         let task_tracker = TaskTracker::new();
 
-        let mgr = ConnectionManager::try_new(brokers, config, rx, cancellation_token.clone())?;
+        let mgr = ConnectionManager::try_new(
+            brokers,
+            config,
+            rx,
+            metadata.clone(),
+            cancellation_token.clone(),
+        )?;
 
         task_tracker.spawn(mgr.run());
         task_tracker.close();
 
         Ok(Self {
+            metadata: metadata.clone(),
             tx,
             cancellation_token,
             task_tracker,
@@ -67,9 +81,20 @@ impl NetworkClient {
             })
     }
 
+    /// Shut down the network client, closing all connections and cancelling requests
     pub fn shutdown(&self) -> TaskTrackerWaitFuture<'_> {
         tracing::info!("shutting down network client");
         self.cancellation_token.cancel();
         self.task_tracker.wait()
+    }
+
+    /// Read a snapshot of the current metadata
+    pub fn read_metadata(&self) -> Option<Arc<MetadataResponse>> {
+        // metadata is a single atomic pointer, its structure cannot be mutated.
+        self.metadata
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .cloned()
     }
 }
