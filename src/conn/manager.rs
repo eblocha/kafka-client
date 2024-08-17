@@ -1,10 +1,11 @@
-use std::{collections::HashMap, io, sync::Arc, time::Duration};
+use std::{fmt::Debug, io, sync::Arc, time::Duration};
 
 use bytes::BytesMut;
 use futures::{future::Either, stream::FuturesUnordered, FutureExt, StreamExt, TryFutureExt};
 use kafka_protocol::messages::{BrokerId, MetadataRequest, MetadataResponse};
 use rand::Rng;
 
+use thiserror::Error;
 use tokio::{
     net::TcpStream,
     sync::{mpsc, oneshot},
@@ -14,6 +15,7 @@ use tokio_util::{
     sync::{CancellationToken, DropGuard},
     task::{task_tracker::TaskTrackerWaitFuture, TaskTracker},
 };
+use url::Url;
 
 use crate::config::KafkaConfig;
 
@@ -115,7 +117,7 @@ const CONNECTION_REQ_BUFFER_SIZE: usize = 10;
 
 struct NodeBackgroundTask {
     rx: mpsc::Receiver<oneshot::Sender<Arc<PreparedConnection>>>,
-    broker: Arc<str>,
+    broker: BrokerHost,
     connection: Option<Arc<PreparedConnection>>,
     cancellation_token: CancellationToken,
     config: ConnectionConfig,
@@ -172,7 +174,7 @@ impl NodeBackgroundTask {
                     }};
                 }
 
-                let connect_fut = TcpStream::connect(self.broker.as_ref())
+                let connect_fut = TcpStream::connect((self.broker.0.as_ref(), self.broker.1))
                     .map_err(PreparedConnectionInitializationError::Io)
                     .and_then(|io| PreparedConnection::connect(io, &self.config.io));
 
@@ -250,14 +252,14 @@ impl NodeBackgroundTask {
 #[derive(Debug)]
 struct NodeTaskHandle {
     tx: mpsc::Sender<oneshot::Sender<Arc<PreparedConnection>>>,
-    broker: Arc<str>,
+    broker: BrokerHost,
     task_tracker: TaskTracker,
     cancellation_token: CancellationToken,
     _cancel_on_drop: DropGuard,
 }
 
 impl NodeTaskHandle {
-    pub fn new(broker: Arc<str>, config: ConnectionConfig) -> Self {
+    pub fn new(broker: BrokerHost, config: ConnectionConfig) -> Self {
         let (tx, rx) = mpsc::channel(CONNECTION_REQ_BUFFER_SIZE);
 
         let cancellation_token = CancellationToken::new();
@@ -319,57 +321,94 @@ impl GenericRequest {
     }
 }
 
-async fn connection_race(
-    iter: impl IntoIterator<Item = (Arc<str>, Arc<NodeTaskHandle>)>,
-) -> Option<(Arc<str>, Arc<PreparedConnection>)> {
-    let mut all =
-        FuturesUnordered::from_iter(iter.into_iter().map(|(broker, handle)| async move {
-            let conn = handle.get_connection().await;
-            (broker, conn)
-        }));
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BrokerHost(Arc<str>, u16);
 
-    while let Some((broker, conn)) = all.next().await {
-        match conn {
-            Some(conn) => return Some((broker, conn)),
-            None => continue,
-        }
+impl Debug for BrokerHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.0, self.1)
     }
+}
 
-    None
+impl TryFrom<&str> for BrokerHost {
+    type Error = url::ParseError;
+
+    fn try_from(broker: &str) -> Result<Self, Self::Error> {
+        let mut url = Url::parse(broker)?;
+
+        if !url.has_host() {
+            url = Url::parse(&format!("kafka://{}", broker))?;
+        }
+
+        Ok(Self(
+            Arc::from(url.host_str().ok_or(url::ParseError::EmptyHost)?),
+            url.port().ok_or(url::ParseError::InvalidPort)?,
+        ))
+    }
+}
+
+pub fn try_parse_hosts<S: AsRef<str>>(brokers: &[S]) -> Result<Vec<BrokerHost>, url::ParseError> {
+    brokers
+        .iter()
+        .map(|h| BrokerHost::try_from(h.as_ref()))
+        .collect::<Result<Vec<_>, _>>()
 }
 
 #[derive(Debug, Clone)]
 struct ManagerState {
     /// Host to connection
-    connections: HashMap<Arc<str>, Arc<NodeTaskHandle>>,
+    connections: Vec<(BrokerHost, Arc<NodeTaskHandle>)>,
 }
 
 impl ManagerState {
     /// Get a random connection by racing the connection handles
-    async fn connection_race(&self) -> Option<(Arc<str>, Arc<PreparedConnection>)> {
-        let options = self
-            .connections
-            .iter()
-            .map(|(broker, handle)| (broker.clone(), handle.clone()));
+    async fn connection_race(&self) -> Option<(BrokerHost, Arc<PreparedConnection>)> {
+        let mut all = FuturesUnordered::from_iter(self.connections.iter().map(
+            |(broker, handle)| async move {
+                let conn = handle.get_connection().await;
+                (broker.clone(), conn)
+            },
+        ));
 
-        connection_race(options).await
+        while let Some((broker, conn)) = all.next().await {
+            match conn {
+                Some(conn) => return Some((broker, conn)),
+                None => continue,
+            }
+        }
+
+        None
     }
 }
 
-impl From<Vec<String>> for ManagerState {
-    fn from(brokers: Vec<String>) -> Self {
-        let connections = brokers
-            .into_iter()
-            .map(|broker| {
-                let broker: Arc<str> = broker.into();
-                (
-                    broker.clone(),
-                    Arc::new(NodeTaskHandle::new(broker.clone(), Default::default())),
-                )
-            })
-            .collect();
+#[derive(Debug, Error)]
+pub enum InitializationError {
+    #[error(transparent)]
+    ParseError(#[from] url::ParseError),
+    #[error("at least 1 host must be specified")]
+    NoHosts,
+}
 
-        Self { connections }
+impl ManagerState {
+    fn try_new(
+        brokers: Vec<BrokerHost>,
+        config: &ConnectionConfig,
+    ) -> Result<Self, InitializationError> {
+        if brokers.is_empty() {
+            return Err(InitializationError::NoHosts);
+        }
+
+        Ok(Self {
+            connections: brokers
+                .into_iter()
+                .map(|host| {
+                    (
+                        host.clone(),
+                        Arc::new(NodeTaskHandle::new(host.clone(), config.clone())),
+                    )
+                })
+                .collect(),
+        })
     }
 }
 
@@ -413,24 +452,26 @@ pub struct ConnectionManager {
 }
 
 impl ConnectionManager {
-    pub fn new(
-        brokers: Vec<String>,
+    pub fn try_new(
+        brokers: Vec<BrokerHost>,
         config: ConnectionManagerConfig,
         rx: mpsc::Receiver<GenericRequest>,
         cancellation_token: CancellationToken,
-    ) -> Self {
+    ) -> Result<Self, InitializationError> {
         let task_tracker = TaskTracker::new();
         task_tracker.close();
 
-        Self {
+        let state = ManagerState::try_new(brokers, &config.conn)?;
+
+        Ok(Self {
             metadata: None,
-            state: brokers.into(),
+            state,
             config,
             rx,
             task_tracker,
             cancellation_token: cancellation_token.clone(),
             _cancel_on_drop: cancellation_token.drop_guard(),
-        }
+        })
     }
 
     /// Get the connection handle for a broker id
@@ -439,9 +480,14 @@ impl ConnectionManager {
             .as_ref()
             .and_then(|m| {
                 m.brokers.get(broker_id).and_then(|broker| {
-                    self.state
-                        .connections
-                        .get(format!("{}:{}", broker.host.as_str(), broker.port).as_str())
+                    let broker = BrokerHost(Arc::from(broker.host.as_str()), broker.port as u16);
+                    self.state.connections.iter().find_map(|(host, handle)| {
+                        if &broker == host {
+                            Some(handle)
+                        } else {
+                            None
+                        }
+                    })
                 })
             })
             .cloned()
@@ -480,40 +526,44 @@ impl ConnectionManager {
             return Some(());
         }
 
-        let hosts: Vec<_> = metadata
+        let hosts: Vec<BrokerHost> = metadata
             .brokers
             .values()
-            .map(|broker| format!("{}:{}", broker.host.as_str(), broker.port))
+            .map(|broker| BrokerHost(Arc::from(broker.host.as_str()), broker.port as u16))
             .collect();
 
-        let new_connections: HashMap<Arc<str>, Arc<NodeTaskHandle>> = hosts
-            .into_iter()
-            .map(|host| {
-                let broker: Arc<str> = Arc::from(host);
-                let handle = self.state.connections.remove(&broker).unwrap_or_else(|| {
-                    tracing::info!("discovered broker {}", broker);
+        let mut new_connections: Vec<(BrokerHost, Arc<NodeTaskHandle>)> =
+            Vec::with_capacity(hosts.len());
+
+        for host in hosts.iter() {
+            if let Some((h, handle)) = self.state.connections.iter().find(|(h, _)| h == host) {
+                new_connections.push((h.clone(), handle.clone()))
+            } else {
+                tracing::info!("discovered broker {:?}", broker);
+                new_connections.push((
+                    host.clone(),
                     Arc::new(NodeTaskHandle::new(
                         broker.clone(),
                         self.config.conn.clone(),
-                    ))
-                });
+                    )),
+                ));
+            }
+        }
 
-                (broker.clone(), handle)
-            })
-            .collect();
-
-        for (host, handle) in self.state.connections.drain() {
-            tracing::info!(
-                "closing connection to broker {} because it is no longer part of the cluster",
-                host
-            );
-            handle.shutdown().await;
+        for (host, handle) in self.state.connections.drain(..) {
+            if hosts.iter().find(|h| **h == host).is_none() {
+                tracing::info!(
+                    "closing connection to broker {:?} because it is no longer part of the cluster",
+                    host
+                );
+                handle.shutdown().await;
+            }
         }
 
         self.state.connections = new_connections;
         self.metadata.replace(metadata);
 
-        tracing::debug!("successfully updated metadata using broker {}", broker);
+        tracing::debug!("successfully updated metadata using broker {:?}", broker);
 
         Some(())
     }
@@ -598,8 +648,8 @@ impl ConnectionManager {
         let mut all = FuturesUnordered::from_iter(
             self.state
                 .connections
-                .values()
-                .map(|handle| handle.shutdown()),
+                .iter()
+                .map(|(_, handle)| handle.shutdown()),
         );
 
         while let Some(()) = all.next().await {}

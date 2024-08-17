@@ -43,7 +43,7 @@ pub async fn main() -> anyhow::Result<()> {
 
     let cfg = KafkaConfig::default();
 
-    let manager = NetworkClient::new(cli.bootstrap_servers, (&cfg).into());
+    let manager = NetworkClient::try_new(cli.bootstrap_servers, (&cfg).into())?;
 
     match cli.client {
         Client::Admin(cmd) => cmd.run(&manager).await?,

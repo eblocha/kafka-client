@@ -5,7 +5,10 @@ use tokio_util::{
 };
 
 use crate::conn::{
-    manager::{ConnectionManager, ConnectionManagerConfig, GenericRequest},
+    manager::{
+        try_parse_hosts, BrokerHost, ConnectionManager, ConnectionManagerConfig, GenericRequest,
+        InitializationError,
+    },
     PreparedConnectionError, Sendable,
 };
 
@@ -17,23 +20,33 @@ pub struct NetworkClient {
 }
 
 impl NetworkClient {
-    pub fn new(brokers: Vec<String>, config: ConnectionManagerConfig) -> Self {
+    pub fn try_new(
+        brokers: Vec<String>,
+        config: ConnectionManagerConfig,
+    ) -> Result<Self, InitializationError> {
+        Self::try_new_with_hosts(try_parse_hosts(&brokers)?, config)
+    }
+
+    pub fn try_new_with_hosts(
+        brokers: Vec<BrokerHost>,
+        config: ConnectionManagerConfig,
+    ) -> Result<Self, InitializationError> {
         // sends are handled in a spawned task, meaning new requests won't need to wait.
         let (tx, rx) = mpsc::channel(1);
 
         let cancellation_token = CancellationToken::new();
         let task_tracker = TaskTracker::new();
 
-        let mgr = ConnectionManager::new(brokers, config, rx, cancellation_token.clone());
+        let mgr = ConnectionManager::try_new(brokers, config, rx, cancellation_token.clone())?;
 
         task_tracker.spawn(mgr.run());
         task_tracker.close();
 
-        Self {
+        Ok(Self {
             tx,
             cancellation_token,
             task_tracker,
-        }
+        })
     }
 
     pub async fn send<R: Sendable>(&self, req: R) -> Result<R::Response, PreparedConnectionError> {
