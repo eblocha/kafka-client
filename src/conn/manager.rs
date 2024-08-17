@@ -308,6 +308,7 @@ pub struct ConnectionManager {
     connections: HashMap<Arc<str>, Arc<NodeTaskHandle>>,
     config: ConnectionConfig,
     rx: mpsc::Receiver<GenericRequest>,
+    task_tracker: TaskTracker,
     cancellation_token: CancellationToken,
     _cancel_on_drop: DropGuard,
 }
@@ -330,11 +331,15 @@ impl ConnectionManager {
             })
             .collect();
 
+        let task_tracker = TaskTracker::new();
+        task_tracker.close();
+
         Self {
             metadata: None,
             connections,
             config,
             rx,
+            task_tracker,
             cancellation_token: cancellation_token.clone(),
             _cancel_on_drop: cancellation_token.drop_guard(),
         }
@@ -498,12 +503,15 @@ impl ConnectionManager {
                             _ => abort_no_connections!("could not determine broker for request!"),
                         };
 
-                        tokio::spawn(async move {
+                        let cancellation_token = self.cancellation_token.child_token();
+
+                        self.task_tracker.spawn(async move {
                             macro_rules! or_cancel {
                                 ($fut:expr) => {
                                     tokio::select! {
                                         biased;
                                         _ = req.tx.closed() => return,
+                                        _ = cancellation_token.cancelled() => return,
                                         v = $fut => v
                                     }
                                 };
@@ -530,5 +538,6 @@ impl ConnectionManager {
         );
 
         while let Some(()) = all.next().await {}
+        self.task_tracker.wait().await;
     }
 }
