@@ -11,14 +11,15 @@ use crate::proto::request::KafkaRequest;
 
 use super::{correlated::CorrelationId, LENGTH_FIELD_LENGTH};
 
+/// A request with version information
 #[derive(Debug, Clone)]
 pub struct VersionedRequest {
     pub request: KafkaRequest,
-    pub correlation_id: CorrelationId,
     pub api_version: i16,
     pub client_id: Option<Arc<str>>,
 }
 
+/// A request that is ready to be encoded into a frame
 #[derive(Debug, Clone)]
 pub struct EncodableRequest {
     request: KafkaRequest,
@@ -27,21 +28,8 @@ pub struct EncodableRequest {
 }
 
 impl EncodableRequest {
-    pub fn api_version(&self) -> i16 {
-        self.header.request_api_version
-    }
-
-    pub fn api_key(&self) -> ApiKey {
-        self.api_key
-    }
-
-    pub fn correlation_id(&self) -> CorrelationId {
-        CorrelationId(self.header.correlation_id)
-    }
-}
-
-impl From<VersionedRequest> for EncodableRequest {
-    fn from(value: VersionedRequest) -> Self {
+    /// Create an encodable request from a versioned request and correlation id
+    pub fn from_versioned(value: VersionedRequest, correlation_id: CorrelationId) -> Self {
         let api_key = value.request.as_api_key();
 
         Self {
@@ -53,12 +41,24 @@ impl From<VersionedRequest> for EncodableRequest {
                     .client_id
                     // FIXME there's no way around this copy until kafka-protocol supports Arc<str> (or better yet AsRef<str>)
                     .map(|id| StrBytes::from_string(id.as_ref().to_owned()));
-                h.correlation_id = value.correlation_id.0;
+                h.correlation_id = correlation_id.0;
                 h.request_api_key = api_key as i16;
                 h.request_api_version = value.api_version;
                 h
             },
         }
+    }
+
+    pub fn api_version(&self) -> i16 {
+        self.header.request_api_version
+    }
+
+    pub fn api_key(&self) -> ApiKey {
+        self.api_key
+    }
+
+    pub fn correlation_id(&self) -> CorrelationId {
+        CorrelationId(self.header.correlation_id)
     }
 }
 
@@ -135,7 +135,6 @@ mod test {
         let versioned = VersionedRequest {
             api_version: 12,
             client_id: None,
-            correlation_id: 1.into(),
             request: KafkaRequest::Metadata(request),
         };
 
@@ -147,7 +146,10 @@ mod test {
         ];
 
         RequestEncoder::new(8 * 1024 * 1024)
-            .encode(versioned.into(), &mut bytes)
+            .encode(
+                EncodableRequest::from_versioned(versioned, 1.into()),
+                &mut bytes,
+            )
             .unwrap();
 
         assert_eq!(bytes.into_iter().collect::<Vec<u8>>(), expected);

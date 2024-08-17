@@ -1,10 +1,4 @@
-use std::{
-    io,
-    sync::{
-        atomic::{AtomicI32, Ordering},
-        Arc,
-    },
-};
+use std::{io, sync::Arc};
 
 use bytes::BytesMut;
 use fnv::FnvHashMap;
@@ -26,11 +20,6 @@ use crate::{config::KafkaConfig, conn::codec::sendable::RequestRecord};
 use super::codec::{
     sendable::Sendable, CorrelationId, EncodableRequest, KafkaCodec, VersionedRequest,
 };
-
-#[derive(Debug, Default)]
-struct ConnectionState {
-    next_correlation_id: AtomicI32,
-}
 
 #[derive(Debug, Error)]
 pub enum KafkaConnectionError {
@@ -78,7 +67,7 @@ impl From<&KafkaConfig> for KafkaConnectionConfig {
 #[must_use]
 struct KafkaConnectionBackgroundTaskRunner<IO> {
     io: IO,
-    rx: mpsc::Receiver<(EncodableRequest, ResponseSender)>,
+    rx: mpsc::Receiver<(VersionedRequest, ResponseSender)>,
     max_frame_length: usize,
     send_buffer_size: usize,
     cancellation_token: CancellationToken,
@@ -98,6 +87,8 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
         let mut request_buffer = Vec::with_capacity(self.send_buffer_size);
         let mut sender_batch = Vec::with_capacity(self.send_buffer_size);
 
+        let mut correlation_id = 0;
+
         loop {
             let either = tokio::select! {
                 biased;
@@ -113,21 +104,24 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                     _ => {
                         tracing::trace!("sending {} frame(s)", request_buffer.len());
                         for (req, sender) in request_buffer.drain(..) {
-                            let correlation_id = req.correlation_id();
-                            let api_key = req.api_key();
+                            let id = CorrelationId(correlation_id);
 
-                            match sink.feed(req).await {
+                            let encodable = EncodableRequest::from_versioned(req, id);
+
+                            let api_key = encodable.api_key();
+
+                            match sink.feed(encodable).await {
                                 Ok(_) => {
                                     tracing::trace!(
-                                        correlation_id = correlation_id.0,
+                                        correlation_id = id.0,
                                         api_key = ?api_key,
                                         "io sink fed frame",
                                     );
-                                    sender_batch.push((correlation_id, sender))
+                                    sender_batch.push((id, sender))
                                 }
                                 Err(e) => {
                                     tracing::trace!(
-                                        correlation_id = correlation_id.0,
+                                        correlation_id = id.0,
                                         api_key = ?api_key,
                                         "io sink failed to feed frame: {:?}",
                                         e
@@ -135,6 +129,8 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                                     let _ = sender.send(Err(e.into()));
                                 }
                             }
+
+                            correlation_id += 1;
                         }
 
                         match sink.flush().await {
@@ -188,8 +184,7 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
 /// The connection will be closed on drop.
 #[derive(Debug)]
 pub struct KafkaConnection {
-    state: ConnectionState,
-    sender: mpsc::Sender<(EncodableRequest, ResponseSender)>,
+    sender: mpsc::Sender<(VersionedRequest, ResponseSender)>,
     client_id: Option<Arc<str>>,
     task_tracker: TaskTracker,
     task_handle: JoinHandle<()>,
@@ -206,7 +201,7 @@ impl KafkaConnection {
 
         let cancellation_token = CancellationToken::new();
 
-        let (tx, rx) = mpsc::channel::<(EncodableRequest, ResponseSender)>(config.send_buffer_size);
+        let (tx, rx) = mpsc::channel::<(VersionedRequest, ResponseSender)>(config.send_buffer_size);
 
         let task_runner = KafkaConnectionBackgroundTaskRunner {
             io,
@@ -222,10 +217,7 @@ impl KafkaConnection {
 
         task_tracker.close();
 
-        let state = ConnectionState::default();
-
         let client = Self {
-            state,
             sender: tx,
             client_id,
             task_tracker,
@@ -247,27 +239,19 @@ impl KafkaConnection {
 
         let versioned = VersionedRequest {
             api_version,
-            correlation_id: self
-                .state
-                .next_correlation_id
-                .fetch_add(1, Ordering::Relaxed)
-                .into(),
             request: req.into(),
             client_id: self.client_id.clone(),
         };
 
-        let encodable_request: EncodableRequest = versioned.into();
-
-        let api_key = encodable_request.api_key();
-        let api_version = encodable_request.api_version();
+        let api_key = versioned.request.as_api_key();
 
         let record = RequestRecord {
-            api_version,
-            response_header_version: api_key.response_header_version(api_version),
+            api_version: versioned.api_version,
+            response_header_version: api_key.response_header_version(versioned.api_version),
         };
 
         self.sender
-            .send((encodable_request, tx))
+            .send((versioned, tx))
             .await
             .map_err(|_| KafkaConnectionError::Closed)?;
 
