@@ -95,6 +95,8 @@ fn create_version_request() -> ApiVersionsRequest {
 async fn negotiate(
     conn: &KafkaConnection,
 ) -> Result<ApiVersionsResponse, PreparedConnectionInitializationError> {
+    tracing::debug!("negotiating api versions");
+
     let api_versions_response = conn
         .send(
             create_version_request(),
@@ -104,6 +106,9 @@ async fn negotiate(
 
     let api_versions_response =
         if api_versions_response.error_code == ErrorCode::UnsupportedVersion as i16 {
+            tracing::debug!(
+                "latest api versions request version is unsupported, falling back to version 0"
+            );
             // fall back to min version if version request version is unsupported
             conn.send(
                 create_version_request(),
@@ -115,8 +120,14 @@ async fn negotiate(
         };
 
     if api_versions_response.error_code == ErrorCode::None as i16 {
+        tracing::debug!("version negotiation completed successfully");
         Ok(api_versions_response)
     } else {
+        tracing::error!(
+            "version negotiation failed with error code {}",
+            api_versions_response.error_code
+        );
+
         Err(PreparedConnectionInitializationError::NegotiationFailed(
             api_versions_response.error_code,
         ))

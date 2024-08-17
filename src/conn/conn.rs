@@ -101,12 +101,27 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                     // 0 means all senders dropped, and no remaining messages. This happens only when the connection is dropped.
                     0 => break,
                     _ => {
+                        tracing::trace!("sending {} frame(s)", request_buffer.len());
                         for (req, sender) in request_buffer.drain(..) {
                             let correlation_id = req.correlation_id();
+                            let api_key = req.api_key();
 
                             match sink.feed(req).await {
-                                Ok(_) => sender_batch.push((correlation_id, sender)),
+                                Ok(_) => {
+                                    tracing::trace!(
+                                        correlation_id = correlation_id.0,
+                                        api_key = ?api_key,
+                                        "io sink fed frame",
+                                    );
+                                    sender_batch.push((correlation_id, sender))
+                                }
                                 Err(e) => {
+                                    tracing::trace!(
+                                        correlation_id = correlation_id.0,
+                                        api_key = ?api_key,
+                                        "io sink failed to feed frame: {:?}",
+                                        e
+                                    );
                                     let _ = sender.send(Err(e.into()));
                                 }
                             }
@@ -114,6 +129,7 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
 
                         match sink.flush().await {
                             Err(e) => {
+                                tracing::trace!("io sink failed to flush frames: {:?}", e);
                                 // if the flush fails, notify all requests that they failed to send
                                 for (_, sender) in sender_batch.drain(..) {
                                     let _ =
@@ -121,6 +137,7 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                                 }
                             }
                             Ok(_) => {
+                                tracing::trace!("io sink flushed frames");
                                 for (correlation_id, sender) in sender_batch.drain(..) {
                                     senders.insert(correlation_id, sender);
                                 }
@@ -130,12 +147,17 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                 },
                 Either::Right(next_res) => match next_res {
                     Some(Ok(frame)) => {
+                        tracing::trace!(
+                            correlation_id = frame.id.0,
+                            "read a frame from the io stream"
+                        );
                         if let Some(sender) = senders.remove(&frame.id) {
                             // ok to ignore since it just means the request was abandoned
                             let _ = sender.send(Ok(frame.frame));
                         }
                     }
                     Some(Err(e)) => {
+                        tracing::error!("got an error from the io stream {:?}", e);
                         for (_, sender) in senders {
                             let _ = sender.send(Err(KafkaConnectionError::Io(e.kind().into())));
                         }
@@ -145,6 +167,8 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                 },
             }
         }
+
+        tracing::debug!("closing io stream");
     }
 }
 

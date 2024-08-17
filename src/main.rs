@@ -8,6 +8,7 @@ use std::io;
 use clap::{Parser, Subcommand};
 use clients::network::NetworkClient;
 use cmd::{admin::AdminCommands, Run};
+use tracing::Level;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -16,8 +17,8 @@ struct Cli {
     #[command(subcommand)]
     client: Client,
 
-    #[arg(short, long)]
-    broker: String,
+    #[arg(short, long, value_delimiter = ',', num_args = 1..)]
+    brokers: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -30,6 +31,7 @@ enum Client {
 pub async fn main() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::fmt()
         .with_writer(io::stderr)
+        .with_max_level(Level::TRACE)
         .compact()
         .finish();
 
@@ -37,11 +39,13 @@ pub async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    let manager = NetworkClient::new(vec![cli.broker.clone()], Default::default());
+    let manager = NetworkClient::new(cli.brokers, Default::default());
 
     match cli.client {
         Client::Admin(cmd) => cmd.run(&manager).await?,
     }
+
+    manager.shutdown().await;
 
     Ok(())
 }

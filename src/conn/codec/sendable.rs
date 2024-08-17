@@ -32,8 +32,21 @@ impl<T: Request + Into<KafkaRequest>> Sendable for T {
         mut frame: BytesMut,
         record: RequestRecord,
     ) -> Result<Self::Response, io::Error> {
-        ResponseHeader::decode(&mut frame, record.response_header_version)
+        tracing::trace!(
+            version = record.api_version,
+            header_version = record.response_header_version,
+            "decoding response",
+        );
+
+        let h = ResponseHeader::decode(&mut frame, record.response_header_version)
             .map_err(into_invalid_data)?;
+
+        tracing::trace!(
+            version = record.api_version,
+            header_version = record.response_header_version,
+            correlation_id = h.correlation_id,
+            "recognized response header"
+        );
 
         Self::Response::decode(&mut frame, record.api_version).map_err(into_invalid_data)
     }

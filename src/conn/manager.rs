@@ -1,7 +1,7 @@
 use std::{collections::HashMap, io, sync::Arc, time::Duration};
 
 use bytes::BytesMut;
-use futures::{future::Either, stream::FuturesUnordered, StreamExt, TryFutureExt};
+use futures::{future::Either, stream::FuturesUnordered, FutureExt, StreamExt, TryFutureExt};
 use kafka_protocol::messages::{BrokerId, MetadataRequest, MetadataResponse};
 use rand::Rng;
 
@@ -112,7 +112,7 @@ impl NodeBackgroundTask {
 
             if let Some(ref conn) = self.connection {
                 if !conn.is_closed() {
-                    tracing::debug!("reusing existing connection for broker {}", self.broker);
+                    tracing::debug!(broker = ?self.broker, "reusing existing connection");
                     for sender in recv_buf.drain(..) {
                         let _ = sender.send(conn.clone());
                     }
@@ -120,8 +120,8 @@ impl NodeBackgroundTask {
                 }
 
                 tracing::info!(
-                    "existing connection for broker {} is disconnected, attempting to reconnect",
-                    self.broker
+                    broker = ?self.broker,
+                    "existing connection is disconnected, attempting to reconnect",
                 );
             }
 
@@ -131,16 +131,19 @@ impl NodeBackgroundTask {
             let conn = loop {
                 let config = super::KafkaConnectionConfig::default();
 
-                tracing::info!("attempting to connect to broker {}", self.broker);
+                tracing::info!(broker = ?self.broker, "attempting to connect");
 
-                let mut senders_dropped = FuturesUnordered::new();
-                senders_dropped.extend(recv_buf.iter_mut().map(|s| s.closed()));
+                let senders_dropped =
+                    FuturesUnordered::from_iter(recv_buf.iter_mut().map(|s| s.closed()));
 
                 let timeout = tokio::time::sleep(self.config.retry.connection_timeout);
 
                 macro_rules! abandon {
                     () => {{
-                        tracing::info!("abandoning connection attempts to broker {} because all clients aborted", self.broker);
+                        tracing::info!(
+                            broker = ?self.broker,
+                            "abandoning connection attempts because all clients aborted"
+                        );
                         break None
                     }};
                 }
@@ -172,18 +175,21 @@ impl NodeBackgroundTask {
 
                         current_retries = current_retries.saturating_add(1);
 
-                        tracing::warn!(
-                            "failed to connect to broker at {}: {}, backing off for {}ms with retries: {} of {}",
-                            self.broker,
+                        tracing::error!(
+                            broker = ?self.broker,
+                            "failed to connect: {}, backing off for {}ms with retries: {} of {}",
                             e,
                             current_backoff.as_millis(),
                             current_retries,
-                            // FIXME avoid pre-formatting
-                            if let Some(max_retries) = self.config.retry.max_retries { max_retries.to_string() } else { "Inf".to_string() }
+                            self.config
+                                .retry
+                                .max_retries
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "Inf".to_string())
                         );
 
                         let mut senders_dropped = FuturesUnordered::new();
-                        senders_dropped.extend(recv_buf.iter_mut().map(|s| s.closed()));
+                        senders_dropped.extend(recv_buf.iter_mut().map(|s| s.closed().fuse()));
 
                         let sleep = tokio::time::sleep(current_backoff);
 
@@ -197,12 +203,12 @@ impl NodeBackgroundTask {
             };
 
             if let Some(ref conn) = conn {
-                tracing::info!("connected to broker {}", self.broker);
+                tracing::info!(broker = ?self.broker, "connected successfully");
                 for sender in recv_buf.drain(..) {
                     let _ = sender.send(conn.clone());
                 }
             } else {
-                tracing::error!("ran out of retries connecting to broker {}", self.broker);
+                tracing::error!(broker = ?self.broker, "ran out of retries while connecting");
                 recv_buf.clear();
             }
 
@@ -210,7 +216,9 @@ impl NodeBackgroundTask {
         }
 
         if let Some(conn) = self.connection.take() {
+            tracing::debug!(broker = ?self.broker, "closing active connection");
             conn.shutdown().await;
+            tracing::info!(broker = ?self.broker, "active connection closed");
         }
     }
 }
@@ -264,7 +272,7 @@ impl NodeTaskHandle {
     }
 
     pub fn shutdown(&self) -> TaskTrackerWaitFuture<'_> {
-        tracing::info!("shutting down connection handle for broker {}", self.broker);
+        tracing::info!(broker = ?self.broker, "shutting down connection handle");
         self.cancellation_token.cancel();
         self.task_tracker.wait()
     }
@@ -300,6 +308,8 @@ pub struct ConnectionManager {
     connections: HashMap<Arc<str>, Arc<NodeTaskHandle>>,
     config: ConnectionConfig,
     rx: mpsc::Receiver<GenericRequest>,
+    cancellation_token: CancellationToken,
+    _cancel_on_drop: DropGuard,
 }
 
 impl ConnectionManager {
@@ -307,6 +317,7 @@ impl ConnectionManager {
         brokers: Vec<String>,
         config: ConnectionConfig,
         rx: mpsc::Receiver<GenericRequest>,
+        cancellation_token: CancellationToken,
     ) -> Self {
         let connections = brokers
             .into_iter()
@@ -324,6 +335,8 @@ impl ConnectionManager {
             connections,
             config,
             rx,
+            cancellation_token: cancellation_token.clone(),
+            _cancel_on_drop: cancellation_token.drop_guard(),
         }
     }
 
@@ -364,13 +377,13 @@ impl ConnectionManager {
             return;
         };
 
-        tracing::debug!("attempting to refresh metadata using broker {}", broker);
+        tracing::debug!(broker = ?broker, "attempting to refresh metadata");
 
         // try to get a connection
         let Some(conn) = handle.get_connection().await else {
             // ran out of retries or the handle is closed.
             // either way, shut down the handle and try again next time
-            tracing::warn!("restarting connection task for broker {}", broker);
+            tracing::warn!(broker = ?broker, "restarting connection task");
             handle.shutdown().await;
             self.connections.insert(
                 broker.clone(),
@@ -389,7 +402,7 @@ impl ConnectionManager {
         let metadata = match conn.send(request).await {
             Ok(m) => m,
             Err(e) => {
-                tracing::error!("failed to get metadata from broker {}: {}", broker, e);
+                tracing::error!(broker = ?broker, "failed to get metadata: {}", e);
                 return;
             }
         };
@@ -432,7 +445,8 @@ impl ConnectionManager {
 
         loop {
             let either = tokio::select! {
-                biased; // prefer metadata refresh
+                biased; // prefer cancel, then metadata refresh
+                _ = self.cancellation_token.cancelled() => break,
                 left = metadata_interval.tick() => Either::Left(left),
                 // don't process requests until we know the state of the cluster
                 right = self.rx.recv(), if self.metadata.is_some() => Either::Right(right)
@@ -441,10 +455,13 @@ impl ConnectionManager {
             match either {
                 Either::Left(_) => self.refresh_metadata().await,
                 Either::Right(req) => match req {
-                    Some(req) => {
+                    Some(mut req) => {
                         macro_rules! abort_no_connections {
                             () => {{
-                                tracing::error!("no connections available for request!");
+                                abort_no_connections!("no connections available for request!")
+                            }};
+                            ($msg:expr) => {{
+                                tracing::error!($msg);
                                 let _ = req.tx.send(Err(PreparedConnectionError::Closed));
                                 continue;
                             }};
@@ -471,23 +488,41 @@ impl ConnectionManager {
 
                                 handle
                             }
-                            _ => abort_no_connections!(),
+                            // request couldn't determine broker based on metadata
+                            _ => abort_no_connections!("could not determine broker for request!"),
                         };
 
                         tokio::spawn(async move {
-                            // TODO abort if tx drops
-                            let Some(conn) = handle.get_connection().await else {
+                            macro_rules! or_cancel {
+                                ($fut:expr) => {
+                                    tokio::select! {
+                                        biased;
+                                        _ = req.tx.closed() => return,
+                                        v = $fut => v
+                                    }
+                                };
+                            }
+
+                            let Some(conn) = or_cancel!(handle.get_connection()) else {
                                 // failed to connect (retries exhausted)
                                 let _ = req.tx.send(Err(PreparedConnectionError::Closed));
                                 return;
                             };
 
-                            let _ = req.tx.send(conn.send(req.request).await);
+                            let res = or_cancel!(conn.send(req.request));
+
+                            let _ = req.tx.send(res);
                         });
                     }
                     None => break, // NetworkClient dropped
                 },
             }
         }
+
+        let mut all = FuturesUnordered::from_iter(
+            self.connections.iter().map(|(_, handle)| handle.shutdown()),
+        );
+
+        while let Some(()) = all.next().await {}
     }
 }

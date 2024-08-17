@@ -86,14 +86,22 @@ impl codec::Encoder<EncodableRequest> for RequestEncoder {
     type Error = io::Error;
 
     fn encode(&mut self, item: EncodableRequest, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        let request_header_version = item
+            .api_key
+            .request_header_version(item.header.request_api_version);
+
+        tracing::trace!(
+            version = item.header.request_api_version,
+            header_version = request_header_version,
+            api_key = ?item.api_key,
+            correlation_id = item.header.correlation_id,
+            "encoding request"
+        );
+
         let mut bytes = BytesMut::new();
 
         item.header
-            .encode(
-                &mut bytes,
-                item.api_key
-                    .request_header_version(item.header.request_api_version),
-            )
+            .encode(&mut bytes, request_header_version)
             .map_err(into_invalid_input)?;
 
         item.request
