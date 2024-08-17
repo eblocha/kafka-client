@@ -18,11 +18,11 @@ use tokio_util::{
 };
 use url::Url;
 
-use crate::config::KafkaConfig;
+use crate::{config::KafkaConfig, proto::request::KafkaRequest};
 
 use super::{
-    codec::sendable::RequestRecord, request::KafkaRequest, KafkaConnectionConfig,
-    PreparedConnection, PreparedConnectionError, PreparedConnectionInitializationError,
+    codec::sendable::RequestRecord, KafkaConnectionConfig, PreparedConnection,
+    PreparedConnectionError, PreparedConnectionInitializationError,
 };
 
 // recv request for connection

@@ -7,7 +7,7 @@ use kafka_protocol::{
 };
 use tokio_util::codec;
 
-use crate::conn::request::KafkaRequest;
+use crate::proto::request::KafkaRequest;
 
 use super::{correlated::CorrelationId, LENGTH_FIELD_LENGTH};
 
@@ -118,6 +118,8 @@ impl codec::Encoder<EncodableRequest> for RequestEncoder {
 mod test {
     use codec::Encoder;
     use kafka_protocol::messages::MetadataRequest;
+
+    use crate::proto::request::KafkaRequest;
 
     use super::*;
 

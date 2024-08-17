@@ -28,7 +28,7 @@ use kafka_protocol::{
     protocol::{buf::ByteBufMut, Encodable, Message},
 };
 
-use super::VersionedRequest;
+use crate::conn::VersionedRequest;
 
 #[non_exhaustive]
 #[allow(unused)]

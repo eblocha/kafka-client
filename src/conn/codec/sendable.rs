@@ -6,7 +6,7 @@ use kafka_protocol::{
     protocol::{Decodable, Request},
 };
 
-use crate::conn::request::KafkaRequest;
+use crate::proto::request::KafkaRequest;
 
 #[inline]
 fn into_invalid_data(error: anyhow::Error) -> io::Error {
