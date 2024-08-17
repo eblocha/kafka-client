@@ -356,19 +356,29 @@ pub fn try_parse_hosts<S: AsRef<str>>(brokers: &[S]) -> Result<Vec<BrokerHost>, 
 
 #[derive(Debug, Clone)]
 struct ManagerState {
-    /// Host to connection
+    /// Vec of host and connection handle
+    ///
+    /// It's _critical_ that this remains sorted!
     connections: Vec<(BrokerHost, Arc<NodeTaskHandle>)>,
 }
 
 impl ManagerState {
     /// Get a random connection by racing the connection handles
     async fn connection_race(&self) -> Option<(BrokerHost, Arc<PreparedConnection>)> {
-        let mut all = FuturesUnordered::from_iter(self.connections.iter().map(
-            |(broker, handle)| async move {
+        let offset = rand::thread_rng().gen_range(0..self.connections.len());
+
+        let mut futures = Vec::with_capacity(self.connections.len());
+
+        for i in 0..self.connections.len() {
+            let (broker, handle) = &self.connections[(offset + i) % self.connections.len()];
+
+            futures.push(async move {
                 let conn = handle.get_connection().await;
                 (broker.clone(), conn)
-            },
-        ));
+            })
+        }
+
+        let mut all = FuturesUnordered::from_iter(futures);
 
         while let Some((broker, conn)) = all.next().await {
             match conn {
@@ -521,23 +531,29 @@ impl ConnectionManager {
             }
         };
 
-        if metadata.brokers.len() == 0 {
-            tracing::warn!("metadata request returned no brokers, ignoring");
+        if metadata.brokers.is_empty() {
+            tracing::warn!("metadata response has no brokers, ignoring");
             return Some(());
         }
 
-        let hosts: Vec<BrokerHost> = metadata
+        let mut hosts: Vec<BrokerHost> = metadata
             .brokers
             .values()
             .map(|broker| BrokerHost(Arc::from(broker.host.as_str()), broker.port as u16))
             .collect();
 
+        hosts.sort();
+
         let mut new_connections: Vec<(BrokerHost, Arc<NodeTaskHandle>)> =
             Vec::with_capacity(hosts.len());
 
         for host in hosts.iter() {
-            if let Some((h, handle)) = self.state.connections.iter().find(|(h, _)| h == host) {
-                new_connections.push((h.clone(), handle.clone()))
+            if let Ok(idx) = self
+                .state
+                .connections
+                .binary_search_by(|(h, _)| h.cmp(host))
+            {
+                new_connections.push(self.state.connections[idx].clone())
             } else {
                 tracing::info!("discovered broker {:?}", broker);
                 new_connections.push((
@@ -551,13 +567,20 @@ impl ConnectionManager {
         }
 
         for (host, handle) in self.state.connections.drain(..) {
-            if hosts.iter().find(|h| **h == host).is_none() {
+            if hosts.binary_search(&host).is_err() {
                 tracing::info!(
                     "closing connection to broker {:?} because it is no longer part of the cluster",
                     host
                 );
                 handle.shutdown().await;
             }
+        }
+
+        if new_connections.is_empty() {
+            tracing::error!(
+                "metadata refresh resulted in no brokers in the cluster, this is a bug"
+            );
+            return Some(());
         }
 
         self.state.connections = new_connections;
