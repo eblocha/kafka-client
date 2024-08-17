@@ -1,6 +1,7 @@
 #[non_exhaustive]
 #[allow(unused)]
 #[repr(i16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ErrorCode {
     UnknownServerError = MIN,
     None = 0,

@@ -52,7 +52,7 @@ pub enum PreparedConnectionInitializationError {
     Closed,
 
     #[error("version negotiation returned an error code: {0:?}")]
-    NegotiationFailed(i16),
+    NegotiationFailed(ErrorCode),
 }
 
 impl From<KafkaConnectionError> for PreparedConnectionInitializationError {
@@ -123,18 +123,15 @@ async fn negotiate(
             api_versions_response
         };
 
-    if api_versions_response.error_code == ErrorCode::None as i16 {
+    let error_code: ErrorCode = api_versions_response.error_code.into();
+
+    if error_code == ErrorCode::None {
         tracing::debug!("version negotiation completed successfully");
         Ok(api_versions_response)
     } else {
-        tracing::error!(
-            "version negotiation failed with error code {}",
-            api_versions_response.error_code
-        );
-
-        Err(PreparedConnectionInitializationError::NegotiationFailed(
-            api_versions_response.error_code,
-        ))
+        let e = PreparedConnectionInitializationError::NegotiationFailed(error_code);
+        tracing::error!("{e}");
+        Err(e)
     }
 }
 
