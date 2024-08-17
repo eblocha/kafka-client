@@ -406,7 +406,7 @@ impl ConnectionManager {
             .map(|host| {
                 let broker: Arc<str> = Arc::from(host);
                 let handle = self.connections.remove(&broker).unwrap_or_else(|| {
-                    tracing::info!("adding broker {} to available brokers", broker);
+                    tracing::info!("discovered broker {}", broker);
                     Arc::new(NodeTaskHandle::new(broker.clone(), self.config.clone()))
                 });
 
