@@ -1,6 +1,7 @@
 use crate::clients::network::NetworkClient;
 
 pub mod admin;
+pub mod producer;
 
 pub trait Run {
     type Response;

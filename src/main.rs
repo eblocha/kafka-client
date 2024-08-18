@@ -4,11 +4,11 @@ pub mod config;
 mod conn;
 mod proto;
 
-use std::io;
+use std::{io, path::PathBuf};
 
 use clap::{Parser, Subcommand};
 use clients::network::NetworkClient;
-use cmd::{admin::AdminCommands, Run};
+use cmd::{admin::AdminCommands, producer::produce_from_file, Run};
 use config::KafkaConfig;
 use tracing::Level;
 
@@ -27,6 +27,12 @@ struct Cli {
 enum Client {
     #[command(subcommand)]
     Admin(AdminCommands),
+    Producer {
+        #[arg(short, long)]
+        file: PathBuf,
+        #[arg(short, long)]
+        topic: String,
+    },
 }
 
 #[tokio::main]
@@ -47,6 +53,7 @@ pub async fn main() -> anyhow::Result<()> {
 
     match cli.client {
         Client::Admin(cmd) => cmd.run(&manager).await?,
+        Client::Producer { file, topic } => produce_from_file(&manager, topic, file).await?,
     }
 
     manager.shutdown().await;
