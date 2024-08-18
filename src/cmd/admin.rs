@@ -1,8 +1,16 @@
 use clap::Subcommand;
+use kafka_protocol::{
+    indexmap::IndexMap,
+    messages::{create_topics_request::CreatableTopic, CreateTopicsRequest, TopicName},
+    protocol::StrBytes,
+};
 
-use crate::clients::{
-    admin::{describe_cluster::DescribeCluster, list_topics::ListTopics},
-    network::NetworkClient,
+use crate::{
+    clients::{
+        admin::{describe_cluster::DescribeCluster, list_topics::ListTopics},
+        network::NetworkClient,
+    },
+    proto::error_codes::ErrorCode,
 };
 
 use super::Run;
@@ -14,6 +22,14 @@ pub enum AdminCommands {
         exclude_internal: bool,
     },
     DescribeCluster {},
+    CreateTopic {
+        #[arg(long, required = true)]
+        name: String,
+        #[arg(short, long)]
+        partitions: Option<i32>,
+        #[arg(short, long)]
+        replication_factor: Option<i16>,
+    },
 }
 
 impl Run for AdminCommands {
@@ -56,6 +72,42 @@ impl Run for AdminCommands {
                         } else {
                             ""
                         }
+                    );
+                }
+            }
+            AdminCommands::CreateTopic {
+                name,
+                partitions,
+                replication_factor,
+            } => {
+                let res = conn
+                    .send({
+                        let mut topic = CreatableTopic::default();
+                        topic.num_partitions = partitions.unwrap_or(-1);
+                        topic.replication_factor = replication_factor.unwrap_or(-1);
+
+                        let mut r = CreateTopicsRequest::default();
+                        r.timeout_ms = 5000;
+                        r.topics =
+                            IndexMap::from_iter([(TopicName(StrBytes::from_string(name)), topic)]);
+                        r.validate_only = false;
+                        r
+                    })
+                    .await?;
+
+                for (name, topic_result) in res.topics {
+                    let error_code = ErrorCode::from(topic_result.error_code);
+
+                    if error_code != ErrorCode::None {
+                        println!("topic: {}: creation failed: {error_code:?}", name.as_str());
+                        continue;
+                    }
+
+                    println!(
+                        "Created topic {} with {} partitions and factor {}",
+                        name.as_str(),
+                        topic_result.num_partitions,
+                        topic_result.replication_factor
                     );
                 }
             }
