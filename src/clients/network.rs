@@ -9,9 +9,10 @@ use tokio_util::{
 };
 
 use crate::conn::{
+    config::ConnectionManagerConfig,
     manager::{
-        try_parse_hosts, BrokerHost, ConnectionManager, ConnectionManagerConfig, GenericRequest,
-        InitializationError,
+        host::{try_parse_hosts, BrokerHost},
+        ConnectionManager, GenericRequest, InitializationError,
     },
     PreparedConnectionError, Sendable,
 };

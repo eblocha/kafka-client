@@ -1,3 +1,9 @@
+//! A connection to a Kafka broker that is ready to send arbitrary requests.
+//!
+//! This connection will perform api version negotiation and authentication when created.
+//!
+//! It wraps a [`KafkaConnection`], providing a way to send requests without needing to provide the api version to use.
+
 use std::io;
 
 use kafka_protocol::{
@@ -9,9 +15,11 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::task::task_tracker::TaskTrackerWaitFuture;
 
 use crate::{
-    conn::{KafkaConnection, KafkaConnectionConfig, KafkaConnectionError, Sendable},
+    conn::{KafkaConnection, KafkaConnectionError, Sendable},
     proto::error_codes::ErrorCode,
 };
+
+use super::config::KafkaConnectionConfig;
 
 /// Represents a request that can determine the api versions it supports.
 pub trait Versionable {

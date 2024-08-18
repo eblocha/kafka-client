@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use crate::conn::manager::ConnectionManagerConfig;
+use crate::conn::config::ConnectionManagerConfig;
 
 #[derive(Debug, Clone)]
 pub struct KafkaConfig {

@@ -1,4 +1,6 @@
-use std::{io, sync::Arc};
+//! A low-level IO stream to a Kafka broker.
+
+use std::io;
 
 use fnv::FnvHashMap;
 use futures::{future::Either, SinkExt, StreamExt};
@@ -14,11 +16,14 @@ use tokio_util::{
     task::{task_tracker::TaskTrackerWaitFuture, TaskTracker},
 };
 
-use crate::{config::KafkaConfig, conn::codec::sendable::RequestRecord};
+use crate::conn::codec::sendable::RequestRecord;
 
-use super::codec::{
-    sendable::{DecodableResponse, Sendable},
-    CorrelationId, EncodableRequest, KafkaCodec, VersionedRequest,
+use super::{
+    codec::{
+        sendable::{DecodableResponse, Sendable},
+        CorrelationId, EncodableRequest, KafkaCodec, VersionedRequest,
+    },
+    config::KafkaConnectionConfig,
 };
 
 #[derive(Debug, Error)]
@@ -33,37 +38,6 @@ pub enum KafkaConnectionError {
 }
 
 type ResponseSender = oneshot::Sender<Result<DecodableResponse, io::Error>>;
-
-/// Configuration for the Kafka client
-#[derive(Debug, Clone)]
-pub struct KafkaConnectionConfig {
-    /// Client id to include with every request.
-    pub client_id: Option<Arc<str>>,
-    /// Size of the request send buffer. Further requests will experience backpressure.
-    pub send_buffer_size: usize,
-    /// Maximum frame length allowed in the transport layer. If a request is larger than this, an error is returned.
-    pub max_frame_length: usize,
-}
-
-impl Default for KafkaConnectionConfig {
-    fn default() -> Self {
-        Self {
-            send_buffer_size: 512,
-            max_frame_length: 8 * 1024 * 1024,
-            client_id: None,
-        }
-    }
-}
-
-impl From<&KafkaConfig> for KafkaConnectionConfig {
-    fn from(value: &KafkaConfig) -> Self {
-        Self {
-            client_id: value.client_id.clone(),
-            send_buffer_size: value.send_buffer_size,
-            max_frame_length: value.max_frame_length,
-        }
-    }
-}
 
 #[must_use]
 struct KafkaConnectionBackgroundTaskRunner<IO> {
@@ -298,7 +272,7 @@ impl KafkaConnection {
 
 #[cfg(test)]
 mod test {
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     use bytes::{BufMut, BytesMut};
     use kafka_protocol::{
