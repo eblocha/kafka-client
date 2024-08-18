@@ -43,3 +43,47 @@ pub fn try_parse_hosts<S: AsRef<str>>(brokers: &[S]) -> Result<Vec<BrokerHost>, 
         .map(|h| BrokerHost::try_from(h.as_ref()))
         .collect::<Result<Vec<_>, _>>()
 }
+
+#[cfg(test)]
+mod test {
+
+    use tokio_test::assert_err;
+
+    use super::*;
+
+    #[test]
+    fn parses_typical_host() {
+        let host = "localhost:9092";
+
+        let broker_host = BrokerHost::try_from(host);
+
+        assert_eq!(broker_host, Ok(BrokerHost("localhost".into(), 9092)));
+    }
+
+    #[test]
+    fn parses_with_protocol() {
+        let host = "https://localhost:9092";
+
+        let broker_host = BrokerHost::try_from(host);
+
+        assert_eq!(broker_host, Ok(BrokerHost("localhost".into(), 9092)));
+    }
+
+    #[test]
+    fn fails_without_port() {
+        let host = "localhost";
+
+        let broker_host = BrokerHost::try_from(host);
+
+        assert_err!(broker_host);
+    }
+
+    #[test]
+    fn fails_with_bad_port() {
+        let host = "localhost:abcd";
+
+        let broker_host = BrokerHost::try_from(host);
+
+        assert_err!(broker_host);
+    }
+}
