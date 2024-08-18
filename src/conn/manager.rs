@@ -684,7 +684,7 @@ impl ConnectionManager {
     }
 
     pub async fn run(mut self) {
-        let mut metadata_interval = tokio::time::interval(Duration::from_millis(500));
+        let mut metadata_interval = tokio::time::interval(self.config.metadata_refresh_interval);
 
         // skip missed metadata refreshes in case initial connection backs off
         metadata_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -705,6 +705,7 @@ impl ConnectionManager {
                     if self.refresh_metadata().await.is_none() {
                         return;
                     }
+                    // TODO rerun metadata refresh sooner if it failed the first time
                 }
                 Either::Right(Some(mut req)) => {
                     macro_rules! or_cancel {
