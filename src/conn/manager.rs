@@ -637,6 +637,7 @@ impl ConnectionManager {
             .collect();
 
         hosts.sort();
+        hosts.dedup();
 
         let mut new_connections: Vec<(BrokerHost, Arc<NodeTaskHandle>)> =
             Vec::with_capacity(hosts.len());
@@ -649,13 +650,10 @@ impl ConnectionManager {
             {
                 new_connections.push(self.state.connections[idx].clone())
             } else {
-                tracing::info!("discovered broker {broker:?}");
+                tracing::info!("discovered broker {host:?}");
                 new_connections.push((
                     host.clone(),
-                    Arc::new(NodeTaskHandle::new(
-                        broker.clone(),
-                        self.config.conn.clone(),
-                    )),
+                    Arc::new(NodeTaskHandle::new(host.clone(), self.config.conn.clone())),
                 ));
             }
         }
