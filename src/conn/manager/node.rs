@@ -9,6 +9,7 @@
 
 use std::{future::Future, io, sync::Arc};
 
+use crossbeam::atomic::AtomicCell;
 use futures::{stream::FuturesUnordered, StreamExt, TryFutureExt};
 use rand::Rng;
 use tokio::{
@@ -43,6 +44,20 @@ struct ConnectionRequest {
     tx: oneshot::Sender<Arc<PreparedConnection>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum NodeState {
+    /// The node is trying to connect, or is idle without a connection
+    Connecting,
+    /// The node has a connection, but it may be closed
+    Connected,
+}
+
+impl Default for NodeState {
+    fn default() -> Self {
+        Self::Connecting
+    }
+}
+
 /// Actor that is waiting for connection requests. Holds a connection internally for reuse, or will bootstrap a new
 /// connection if allowed.
 struct NodeBackgroundTask {
@@ -51,6 +66,7 @@ struct NodeBackgroundTask {
     connection: Option<Arc<PreparedConnection>>,
     cancellation_token: CancellationToken,
     config: ConnectionConfig,
+    state: Arc<AtomicCell<NodeState>>,
 }
 
 impl NodeBackgroundTask {
@@ -58,6 +74,8 @@ impl NodeBackgroundTask {
         let mut recv_buf = Vec::with_capacity(CONNECTION_REQ_BUFFER_SIZE);
 
         'outer: loop {
+            self.state.store(NodeState::Connecting);
+
             let count = tokio::select! {
                 biased;
                 _ = self.cancellation_token.cancelled() => break,
@@ -74,6 +92,8 @@ impl NodeBackgroundTask {
                     for connection_request in recv_buf.drain(..) {
                         let _ = connection_request.tx.send(conn.clone());
                     }
+
+                    self.state.store(NodeState::Connected);
                     continue;
                 }
             }
@@ -98,7 +118,7 @@ impl NodeBackgroundTask {
 
                 macro_rules! abandon {
                     () => {{
-                        tracing::info!(
+                        tracing::debug!(
                             broker = ?self.broker,
                             "abandoning connection attempts because all clients aborted"
                         );
@@ -110,7 +130,7 @@ impl NodeBackgroundTask {
                     .map_err(PreparedConnectionInitError::Io)
                     .and_then(|io| PreparedConnection::connect(io, &self.config.io));
 
-                let res = tokio::select! {
+                let connect_result = tokio::select! {
                     biased;
                     // cancel reasons
                     _ = self.cancellation_token.cancelled() => break 'outer,
@@ -121,9 +141,18 @@ impl NodeBackgroundTask {
                     res = connect_fut => res,
                 };
 
-                match res {
+                match connect_result {
                     Ok(conn) => break Some(Arc::new(conn)),
                     Err(e) => {
+                        if self
+                            .config
+                            .retry
+                            .max_retries
+                            .is_some_and(|max| current_retries >= max)
+                        {
+                            break None;
+                        }
+
                         let jitter = rand::thread_rng().gen_range(0..self.config.retry.jitter);
 
                         current_backoff = std::cmp::min(
@@ -165,7 +194,9 @@ impl NodeBackgroundTask {
                 for req in recv_buf.drain(..) {
                     let _ = req.tx.send(conn.clone());
                 }
+                self.state.store(NodeState::Connected);
             } else {
+                self.state.store(NodeState::Connecting);
                 tracing::error!(broker = ?self.broker, "ran out of retries while connecting");
                 recv_buf.clear();
             }
@@ -186,6 +217,7 @@ impl NodeBackgroundTask {
 pub struct NodeTaskHandle {
     tx: mpsc::Sender<ConnectionRequest>,
     broker: BrokerHost,
+    node_state: Arc<AtomicCell<NodeState>>,
     task_tracker: TaskTracker,
     task_handle: JoinHandle<()>,
     cancellation_token: CancellationToken,
@@ -198,12 +230,15 @@ impl NodeTaskHandle {
 
         let cancellation_token = CancellationToken::new();
 
+        let node_state = Arc::new(AtomicCell::new(NodeState::default()));
+
         let task = NodeBackgroundTask {
             broker: broker.clone(),
             rx,
             connection: Default::default(),
             cancellation_token: cancellation_token.clone(),
             config,
+            state: node_state.clone(),
         };
 
         let task_tracker = TaskTracker::new();
@@ -214,6 +249,7 @@ impl NodeTaskHandle {
         Self {
             tx,
             broker,
+            node_state,
             task_tracker,
             task_handle,
             cancellation_token: cancellation_token.clone(),
@@ -235,17 +271,23 @@ impl NodeTaskHandle {
         rx.await.ok()
     }
 
-    /// Get a connection if the node is currently connected
-    pub async fn get_if_connected(&self) -> Option<Arc<PreparedConnection>> {
+    /// Get a connection only if the node is currently connected.
+    ///
+    /// This will bail early if the connection request buffer is full or if the node state is connecting.
+    pub async fn pessimistic_get_if_connected(&self) -> Option<Arc<PreparedConnection>> {
+        // get a permit _first_, because the
+        let permit = self.tx.try_reserve().ok()?;
+
+        if self.node_state.load() != NodeState::Connected {
+            return None;
+        }
+
         let (tx, rx) = oneshot::channel();
 
-        self.tx
-            .send(ConnectionRequest {
-                kind: ConnectionRequestKind::Connected,
-                tx,
-            })
-            .await
-            .ok()?;
+        permit.send(ConnectionRequest {
+            kind: ConnectionRequestKind::Connected,
+            tx,
+        });
 
         rx.await.ok()
     }

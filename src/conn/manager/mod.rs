@@ -68,7 +68,7 @@ impl ManagerState {
             .connections
             .iter()
             .map(|(broker, handle)| async move {
-                let conn = handle.get_if_connected().await;
+                let conn = handle.pessimistic_get_if_connected().await;
                 (broker.clone(), conn)
             })
             .collect();
@@ -83,7 +83,7 @@ impl ManagerState {
         while let Some((broker, conn)) = active.next().await {
             match conn {
                 Some(conn) if conn.capacity() == conn.max_capacity() => {
-                    tracing::info!(broker = ?broker, "found active unused connection");
+                    tracing::debug!(broker = ?broker, "found active unused connection");
                     // the connection is unused
                     return Some((broker, conn));
                 }
@@ -108,7 +108,7 @@ impl ManagerState {
         }
 
         if let Some(best) = best {
-            tracing::info!(
+            tracing::debug!(
                 broker = ?best.0,
                 "reusing active connection with {} in-flight requests",
                 best.1.max_capacity() - best.1.capacity()
