@@ -628,6 +628,7 @@ dependencies = [
  "futures",
  "futures-util",
  "kafka-protocol",
+ "paste",
  "pin-project-lite",
  "rand",
  "thiserror",

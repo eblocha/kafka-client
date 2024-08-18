@@ -133,7 +133,7 @@ const MAX: i16 = 120;
 impl From<i16> for ErrorCode {
     fn from(value: i16) -> Self {
         match value {
-            // SAFEY: ErrorCode is valid in the range provided
+            // SAFETY: ErrorCode is valid in the range provided
             MIN..=MAX => unsafe { std::mem::transmute::<_, ErrorCode>(value) },
             _ => ErrorCode::UnknownServerError,
         }
