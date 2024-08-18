@@ -4,7 +4,7 @@
 //!
 //! It wraps a [`KafkaConnection`], providing a way to send requests without needing to provide the api version to use.
 
-use std::io;
+use std::{future::Future, io};
 
 use kafka_protocol::{
     messages::{ApiVersionsRequest, ApiVersionsResponse},
@@ -12,14 +12,13 @@ use kafka_protocol::{
 };
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_util::task::task_tracker::TaskTrackerWaitFuture;
 
-use crate::{
-    conn::{KafkaConnection, KafkaConnectionError, Sendable},
-    proto::error_codes::ErrorCode,
+use crate::{conn::Sendable, proto::error_codes::ErrorCode};
+
+use super::{
+    config::KafkaConnectionConfig,
+    conn::{KafkaConnection, KafkaConnectionError},
 };
-
-use super::config::KafkaConnectionConfig;
 
 /// Represents a request that can determine the api versions it supports.
 pub trait Versionable {
@@ -198,7 +197,7 @@ impl PreparedConnection {
     /// Shut down the connection
     ///
     /// Returns a future that can be awaited to wait for shutdown to complete.
-    pub fn shutdown(&self) -> TaskTrackerWaitFuture<'_> {
+    pub fn shutdown(&self) -> impl Future<Output = ()> + '_ {
         self.conn.shutdown()
     }
 
@@ -208,7 +207,7 @@ impl PreparedConnection {
     }
 
     /// Waits until the connection is closed
-    pub fn closed(&self) -> TaskTrackerWaitFuture<'_> {
+    pub fn closed(&self) -> impl Future<Output = ()> + '_ {
         self.conn.closed()
     }
 

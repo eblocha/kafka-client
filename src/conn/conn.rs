@@ -1,6 +1,6 @@
 //! A low-level IO stream to a Kafka broker.
 
-use std::io;
+use std::{future::Future, io};
 
 use fnv::FnvHashMap;
 use futures::{future::Either, SinkExt, StreamExt};
@@ -13,7 +13,7 @@ use tokio::{
 use tokio_util::{
     codec::Framed,
     sync::{CancellationToken, DropGuard},
-    task::{task_tracker::TaskTrackerWaitFuture, TaskTracker},
+    task::TaskTracker,
 };
 
 use crate::conn::codec::sendable::RequestRecord;
@@ -244,7 +244,7 @@ impl KafkaConnection {
     /// Shut down the connection. This is the preferred method to close a connection gracefully.
     ///
     /// Returns a future that can be awaited to wait for shutdown to complete.
-    pub fn shutdown(&self) -> TaskTrackerWaitFuture<'_> {
+    pub fn shutdown(&self) -> impl Future<Output = ()> + '_ {
         self.cancellation_token.cancel();
         self.task_tracker.wait()
     }
@@ -255,7 +255,7 @@ impl KafkaConnection {
     }
 
     /// Waits until the connection is closed
-    pub fn closed(&self) -> TaskTrackerWaitFuture<'_> {
+    pub fn closed(&self) -> impl Future<Output = ()> + '_ {
         self.task_tracker.wait()
     }
 

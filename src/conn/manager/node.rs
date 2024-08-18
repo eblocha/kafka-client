@@ -1,14 +1,24 @@
-use std::{io, sync::Arc};
+//! Maintains a connection to a broker node by host
+//!
+//! This spawns a background task which can respond to requests for a connection to the node.
+//!
+//! If the connection is not alive when requested, it will be bootstrapped.
+//!
+//! Clients may also request a connection, then abort the request to cancel connecting, to enable racing connections to
+//! multiple brokers.
+
+use std::{future::Future, io, sync::Arc};
 
 use futures::{stream::FuturesUnordered, StreamExt, TryFutureExt};
 use rand::Rng;
 use tokio::{
     net::TcpStream,
     sync::{mpsc, oneshot},
+    task::JoinHandle,
 };
 use tokio_util::{
     sync::{CancellationToken, DropGuard},
-    task::{task_tracker::TaskTrackerWaitFuture, TaskTracker},
+    task::TaskTracker,
 };
 
 use crate::conn::{config::ConnectionConfig, PreparedConnection, PreparedConnectionInitError};
@@ -19,16 +29,22 @@ use super::host::BrokerHost;
 /// Number of requests for a connection to batch at the same time.
 const CONNECTION_REQ_BUFFER_SIZE: usize = 10;
 
-pub enum ConnectionRequestKind {
+/// Requirement for the connection
+enum ConnectionRequestKind {
+    /// The connection must be alive
     Connected,
+    /// Allows bootstrapping a new connection
     Any,
 }
 
-pub struct ConnectionRequest {
+/// A request for a connection. This may trigger a new connection if the connection is dead and `kind` allows it.
+struct ConnectionRequest {
     kind: ConnectionRequestKind,
     tx: oneshot::Sender<Arc<PreparedConnection>>,
 }
 
+/// Actor that is waiting for connection requests. Holds a connection internally for reuse, or will bootstrap a new
+/// connection if allowed.
 struct NodeBackgroundTask {
     rx: mpsc::Receiver<ConnectionRequest>,
     broker: BrokerHost,
@@ -165,11 +181,13 @@ impl NodeBackgroundTask {
     }
 }
 
+/// A handle to send requests to the [`NodeBackgroundTask`].
 #[derive(Debug)]
 pub struct NodeTaskHandle {
     tx: mpsc::Sender<ConnectionRequest>,
     broker: BrokerHost,
     task_tracker: TaskTracker,
+    task_handle: JoinHandle<()>,
     cancellation_token: CancellationToken,
     _cancel_on_drop: DropGuard,
 }
@@ -190,14 +208,14 @@ impl NodeTaskHandle {
 
         let task_tracker = TaskTracker::new();
 
-        task_tracker.spawn(task.run());
+        let task_handle = task_tracker.spawn(task.run());
         task_tracker.close();
 
         Self {
             tx,
             broker,
             task_tracker,
-            // task_handle,
+            task_handle,
             cancellation_token: cancellation_token.clone(),
             _cancel_on_drop: cancellation_token.drop_guard(),
         }
@@ -232,7 +250,15 @@ impl NodeTaskHandle {
         rx.await.ok()
     }
 
-    pub fn shutdown(&self) -> TaskTrackerWaitFuture<'_> {
+    /// Returns true if this task has stopped
+    pub fn is_closed(&self) -> bool {
+        self.task_handle.is_finished()
+    }
+
+    /// Shut down the connection task, closing the connection if active.
+    ///
+    /// Returns a future to await final shutdown.
+    pub fn shutdown(&self) -> impl Future<Output = ()> + '_ {
         tracing::info!(broker = ?self.broker, "shutting down connection handle");
         self.cancellation_token.cancel();
         self.task_tracker.wait()

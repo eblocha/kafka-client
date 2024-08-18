@@ -55,6 +55,14 @@ struct ManagerState {
 }
 
 impl ManagerState {
+    /// Get the best connection to any broker
+    ///
+    /// This will prefer connections that are alive with the lowest number of in-flight requests.
+    ///
+    /// If all active connections are idle, one is chosen at random.
+    ///
+    /// If all connections are asleep or all active connection send queues are full, it will race inactive connections
+    /// and use the first that completes, aborting the others.
     async fn get_best_connection(&mut self) -> Option<(BrokerHost, Arc<PreparedConnection>)> {
         let mut active_conn_futures: Vec<_> = self
             .connections
@@ -138,10 +146,14 @@ impl ManagerState {
     }
 }
 
+/// Errors when creating a new connection manager.
 #[derive(Debug, Error)]
 pub enum InitializationError {
+    /// Failed to parse the bootstrap server hosts provided.
     #[error(transparent)]
     ParseError(#[from] url::ParseError),
+
+    /// No bootstrap server hosts were provided.
     #[error("at least 1 host must be specified")]
     NoHosts,
 }
@@ -193,7 +205,6 @@ impl ConnectionManager {
         cancellation_token: CancellationToken,
     ) -> Result<Self, InitializationError> {
         let task_tracker = TaskTracker::new();
-        task_tracker.close();
 
         let state = ManagerState::try_new(brokers, &config.conn)?;
 
@@ -227,7 +238,7 @@ impl ConnectionManager {
     }
 
     /// Get the connection handle for a broker id
-    fn get_handle(&self, broker_id: &BrokerId) -> Option<Arc<NodeTaskHandle>> {
+    pub fn get_handle(&self, broker_id: &BrokerId) -> Option<Arc<NodeTaskHandle>> {
         self.read_metadata_snapshot()
             .as_ref()
             .and_then(|m| {
@@ -329,6 +340,7 @@ impl ConnectionManager {
         Some(())
     }
 
+    /// Start the actor
     pub async fn run(mut self) {
         let mut metadata_interval = tokio::time::interval(self.config.metadata_refresh_interval);
 
@@ -393,9 +405,7 @@ impl ConnectionManager {
                         continue;
                     };
 
-                    let tracker = self.task_tracker.clone();
-
-                    tracker.spawn(async move {
+                    self.task_tracker.spawn(async move {
                         let res = conn.send(req.request).await;
                         let _ = req.tx.send(res);
                     });
@@ -414,6 +424,7 @@ impl ConnectionManager {
         );
 
         while let Some(()) = all.next().await {}
+        self.task_tracker.close();
         self.task_tracker.wait().await;
     }
 }
