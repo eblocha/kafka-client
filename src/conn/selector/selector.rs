@@ -1,28 +1,31 @@
-use std::{sync::atomic::Ordering, time::Duration};
+use std::sync::atomic::Ordering;
 
+use derive_more::derive::From;
 use fnv::FnvHashMap;
 use kafka_protocol::messages::{MetadataRequest, MetadataResponse};
 use rand::Rng;
-use tokio::{
-    sync::{mpsc, watch},
-    task::JoinSet,
-};
+use tokio::{sync::watch, task::JoinSet};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::conn::{config::ConnectionConfig, manager::host::BrokerHost};
+use crate::conn::{config::ConnectionManagerConfig, manager::host::BrokerHost};
 
 use super::node_task::{new_pair, NodeTask, NodeTaskHandle};
 
-#[derive(Debug, Clone, Default)]
+/// Mapping of broker id to host and connection handle
+#[derive(Debug, Clone, From, Default)]
+pub struct BrokerMap(#[from] pub FnvHashMap<i32, (BrokerHost, NodeTaskHandle)>);
+
+#[derive(Debug, Default)]
 pub struct Cluster {
-    broker_channels: FnvHashMap<i32, (BrokerHost, NodeTaskHandle)>,
-    metadata: MetadataResponse,
+    pub broker_channels: BrokerMap,
+    pub _metadata: MetadataResponse,
 }
 
-impl Cluster {
+impl BrokerMap {
     pub fn get_best_connection(&self) -> Option<(BrokerHost, NodeTaskHandle)> {
         // prefer connected nodes with least waiting connections
         let least_loaded_connected = self
-            .broker_channels
+            .0
             .iter()
             .filter_map(|(_, (broker, handle))| {
                 if handle.connected.load(Ordering::SeqCst) && handle.tx.capacity() > 0 {
@@ -37,7 +40,7 @@ impl Cluster {
             return Some((host.clone(), handle.clone()));
         }
 
-        self.broker_channels
+        self.0
             .iter()
             .map(|(_, (broker, handle))| (broker, handle))
             .max_by(|left, right| left.1.tx.capacity().cmp(&right.1.tx.capacity()))
@@ -48,10 +51,11 @@ impl Cluster {
 /// Keeps connections to each broker alive
 pub struct SelectorTask {
     /// Mapping of broker id to its host
-    hosts: FnvHashMap<i32, (BrokerHost, NodeTaskHandle)>,
+    hosts: BrokerMap,
     tx: watch::Sender<Cluster>,
     join_set: JoinSet<NodeTask>,
-    config: ConnectionConfig,
+    config: ConnectionManagerConfig,
+    cancellation_token: CancellationToken,
 }
 
 enum Event {
@@ -59,14 +63,17 @@ enum Event {
     Refresh,
     /// A node stopped
     NodeDied(NodeTask),
+    /// Stop all connections and shut down
+    Shutdown,
 }
 
 impl SelectorTask {
     pub async fn run(mut self) {
-        let mut metadata_interval = tokio::time::interval(Duration::from_millis(500));
+        let mut metadata_interval = tokio::time::interval(self.config.metadata_refresh_interval);
 
         loop {
             let event = tokio::select! {
+                _ = self.cancellation_token.cancelled() => Event::Shutdown,
                 _ = metadata_interval.tick() => Event::Refresh,
                 // if a node panics, the task handle will need to request a new node.
                 // we never abort these tasks.
@@ -81,7 +88,18 @@ impl SelectorTask {
                 },
                 Event::NodeDied(mut dead_task) => {
                     // is this node supposed to be running?
-                    if let Some((host, handle)) = self.hosts.remove(&dead_task.broker_id) {
+                    if let Some((host, mut handle)) = self.hosts.0.remove(&dead_task.broker_id) {
+                        tracing::debug!(
+                            "restarting connection handle to broker_id {}",
+                            dead_task.broker_id
+                        );
+
+                        // create new cancellation token to not immediately exit when the task starts
+                        let cancellation_token = CancellationToken::new();
+
+                        dead_task.cancellation_token = cancellation_token.clone();
+                        handle.cancellation_token = cancellation_token;
+
                         // restart it with the host it should be connected to.
                         if dead_task.connected.load(Ordering::SeqCst) || dead_task.host != host {
                             // remove delay if it was connected or changed hosts
@@ -89,9 +107,9 @@ impl SelectorTask {
                             dead_task.delay = None;
                         } else {
                             let (min, max, jitter) = (
-                                self.config.retry.min_backoff,
-                                self.config.retry.max_backoff,
-                                rand::thread_rng().gen_range(0..self.config.retry.jitter),
+                                self.config.conn.retry.min_backoff,
+                                self.config.conn.retry.max_backoff,
+                                rand::thread_rng().gen_range(0..self.config.conn.retry.jitter),
                             );
 
                             let backoff =
@@ -102,17 +120,27 @@ impl SelectorTask {
                             dead_task.delay = Some(backoff);
                         }
 
-                        self.hosts.insert(dead_task.broker_id, (host, handle));
+                        dead_task.host = host.clone();
+
+                        self.hosts.0.insert(dead_task.broker_id, (host, handle));
                         self.join_set.spawn(dead_task.run());
                     }
+                }
+                Event::Shutdown => {
+                    for (_, (_, handle)) in self.hosts.0.drain() {
+                        handle.cancellation_token.cancel();
+                    }
+
+                    let _ = self.tx.send(Default::default());
+
+                    return;
                 }
             }
         }
     }
 
     async fn refresh_metadata(&mut self) -> Option<()> {
-        let Some((host_for_refresh, handle_for_refresh)) = self.tx.borrow().get_best_connection()
-        else {
+        let Some((host_for_refresh, handle_for_refresh)) = self.hosts.get_best_connection() else {
             tracing::error!("no connections available for metadata refresh!");
             return None;
         };
@@ -134,6 +162,14 @@ impl SelectorTask {
             }
         };
 
+        let result = self.update_metadata(metadata);
+
+        tracing::debug!("successfully updated metadata using broker {host_for_refresh:?}");
+
+        result
+    }
+
+    fn update_metadata(&mut self, metadata: MetadataResponse) -> Option<()> {
         if metadata.brokers.is_empty() {
             tracing::warn!("metadata response has no brokers, ignoring");
             return Some(());
@@ -147,7 +183,7 @@ impl SelectorTask {
             .collect();
 
         // remove nodes that are not in the cluster
-        self.hosts.retain(|id, (host, handle)| {
+        self.hosts.0.retain(|id, (host, handle)| {
             let keep = new_broker_ids.contains_key(id);
 
             if !keep {
@@ -162,39 +198,38 @@ impl SelectorTask {
         for (broker_id, broker) in new_broker_ids {
             let new_host = BrokerHost(broker.host.as_str().into(), broker.port as u16);
 
-            if let Some(pair) = self.hosts.get_mut(&broker_id) {
+            if let Some(pair) = self.hosts.0.get_mut(&broker_id) {
                 let host = &pair.0;
 
                 // if the host is different, stop it (it will restart automatically with the new host)
                 if host != &new_host {
-                    handle_for_refresh.cancellation_token.cancel();
+                    tracing::debug!(
+                        "stopping connection to host {host:?} for broker_id {}",
+                        broker_id
+                    );
+                    pair.1.cancellation_token.cancel();
                 }
 
                 pair.0 = new_host;
             } else {
-                tracing::info!("creating connection to broker {new_host:?} with id {broker_id}");
                 // we don't have a handle to the broker - create one
-                let (tx, rx) = mpsc::channel(self.config.io.send_buffer_size);
                 let (handle, task) = new_pair(
                     broker_id,
                     new_host.clone(),
-                    self.config.retry.connection_timeout,
-                    tx,
-                    rx,
+                    self.config.conn.retry.connection_timeout,
+                    self.config.conn.io.clone(),
                 );
 
                 self.join_set.spawn(task.run());
 
-                self.hosts.insert(broker_id, (new_host, handle));
+                self.hosts.0.insert(broker_id, (new_host, handle));
             }
         }
-
-        tracing::debug!("successfully updated metadata using broker {host_for_refresh:?}");
 
         self.tx
             .send(Cluster {
                 broker_channels: self.hosts.clone(),
-                metadata,
+                _metadata: metadata,
             })
             .ok()
     }
@@ -202,27 +237,59 @@ impl SelectorTask {
 
 pub struct SelectorTaskHandle {
     pub cluster: watch::Receiver<Cluster>,
+    cancellation_token: CancellationToken,
+    task_tracker: TaskTracker,
 }
 
 impl SelectorTaskHandle {
-    pub async fn new(bootstrap: &[BrokerHost], config: ConnectionConfig) -> Self {
-        // fetch metadata from one of the bootstrap servers
+    pub async fn new(bootstrap: &[BrokerHost], config: ConnectionManagerConfig) -> Self {
+        let mut hosts: BrokerMap = Default::default();
+        let mut join_set = JoinSet::new();
+
+        for (id, host) in bootstrap.iter().enumerate() {
+            let (handle, task) = new_pair(
+                id as i32,
+                host.clone(),
+                config.conn.retry.connection_timeout,
+                config.conn.io.clone(),
+            );
+
+            join_set.spawn(task.run());
+
+            hosts.0.insert(id as i32, (host.clone(), handle));
+        }
+
+        let cancellation_token = CancellationToken::new();
+        let task_tracker = TaskTracker::new();
 
         // create the watch channel for the metadata
-        let (cluster_tx, cluster_rx) = watch::channel(Default::default());
+        // this is empty to begin with until we bootstrap initial metadata
+        let (cluster_tx, mut cluster_rx) = watch::channel(Default::default());
 
         // start the selector task to manage broker connections
         let selector_task = SelectorTask {
-            hosts: Default::default(),
+            hosts,
             tx: cluster_tx,
-            join_set: JoinSet::new(),
+            join_set,
             config,
+            cancellation_token: cancellation_token.clone(),
         };
 
-        tokio::spawn(selector_task.run());
+        task_tracker.spawn(selector_task.run());
+
+        // wait for metadata refresh
+        let _ = cluster_rx.changed().await;
 
         Self {
             cluster: cluster_rx,
+            cancellation_token,
+            task_tracker,
         }
+    }
+
+    pub async fn shutdown(&self) {
+        self.task_tracker.close();
+        self.cancellation_token.cancel();
+        self.task_tracker.wait().await;
     }
 }

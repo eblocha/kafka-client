@@ -66,6 +66,14 @@ impl NodeTask {
     pub async fn run(mut self) -> Self {
         self.attempts += 1;
 
+        tracing::debug!(
+            broker_id = self.broker_id,
+            host = ?self.host,
+            attempts = self.attempts,
+            backoff = ?self.delay,
+            "connecting to broker"
+        );
+
         if let Some(delay) = self.delay {
             // back off
             tokio::select! {
@@ -85,7 +93,7 @@ impl NodeTask {
             else => return self
         };
 
-        let Ok(versions) = negotiate(&conn).await else {
+        let Ok(versions) = negotiate(self.broker_id, &self.host, self.attempts, &conn).await else {
             return self;
         };
 
@@ -96,6 +104,12 @@ impl NodeTask {
         // try to send the last message sent if it failed
         if let Some(last_message) = self.last_message.take() {
             if let Err(err) = conn.sender().send(last_message).await {
+                tracing::error!(
+                    broker_id = self.broker_id,
+                    host = ?self.host,
+                    attempts = self.attempts,
+                    "failed to re-send last sent message"
+                );
                 // if we're here, the connection we just created is already closed.
                 self.last_message = Some(err.0);
                 return self;
@@ -104,6 +118,12 @@ impl NodeTask {
 
         loop {
             if conn.is_closed() {
+                tracing::error!(
+                    broker_id = self.broker_id,
+                    host = ?self.host,
+                    attempts = self.attempts,
+                    "connection closed unexpectedly"
+                );
                 return self;
             }
 
@@ -123,6 +143,12 @@ impl NodeTask {
             };
 
             if let Err(err) = conn.sender().send((versioned, tx)).await {
+                tracing::error!(
+                    broker_id = self.broker_id,
+                    host = ?self.host,
+                    attempts = self.attempts,
+                    "connection closed unexpectedly, storing last sent message"
+                );
                 self.last_message = Some(err.0);
                 return self;
             }
@@ -163,9 +189,10 @@ pub fn new_pair(
     broker_id: i32,
     host: BrokerHost,
     connection_timeout: Duration,
-    tx: mpsc::Sender<NodeTaskMessage>,
-    rx: mpsc::Receiver<NodeTaskMessage>,
+    config: KafkaConnectionConfig,
 ) -> (NodeTaskHandle, NodeTask) {
+    let (tx, rx) = mpsc::channel(config.send_buffer_size);
+
     let handle = NodeTaskHandle {
         cancellation_token: CancellationToken::new(),
         connected: Arc::new(AtomicBool::new(false)),
@@ -178,7 +205,7 @@ pub fn new_pair(
         rx,
         last_message: None,
         cancellation_token: handle.cancellation_token.clone(),
-        config: Default::default(),
+        config,
         connection_timeout,
         attempts: 0,
         delay: None,
@@ -196,9 +223,17 @@ fn create_version_request() -> ApiVersionsRequest {
 }
 
 async fn negotiate(
+    broker_id: i32,
+    host: &BrokerHost,
+    attempts: u32,
     conn: &KafkaConnection,
 ) -> Result<ApiVersionsResponse, PreparedConnectionInitError> {
-    tracing::debug!("negotiating api versions");
+    tracing::debug!(
+        broker_id = broker_id,
+        host = ?host,
+        attempts = attempts,
+        "negotiating api versions"
+    );
 
     let api_versions_response = conn
         .send(
@@ -210,6 +245,9 @@ async fn negotiate(
     let api_versions_response =
         if api_versions_response.error_code == ErrorCode::UnsupportedVersion as i16 {
             tracing::debug!(
+                broker_id = broker_id,
+                host = ?host,
+                attempts = attempts,
                 "latest api versions request version is unsupported, falling back to version 0"
             );
             conn.send(
@@ -224,11 +262,21 @@ async fn negotiate(
     let error_code: ErrorCode = api_versions_response.error_code.into();
 
     if error_code == ErrorCode::None {
-        tracing::debug!("version negotiation completed successfully");
+        tracing::debug!(
+            broker_id = broker_id,
+            host = ?host,
+            attempts = attempts,
+            "version negotiation completed successfully"
+        );
         Ok(api_versions_response)
     } else {
         let e = PreparedConnectionInitError::NegotiationFailed(error_code);
-        tracing::error!("{e}");
+        tracing::error!(
+            broker_id = broker_id,
+            host = ?host,
+            attempts = attempts,
+            "{e}"
+        );
         Err(e)
     }
 }
@@ -249,5 +297,5 @@ fn determine_version(response: &ApiVersionsResponse, api_key: i16, range: &Versi
         return range.min;
     }
 
-    intersection.min
+    intersection.max
 }

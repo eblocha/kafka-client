@@ -1,3 +1,5 @@
+//! Configuration options for the Kafka client
+
 use std::{sync::Arc, time::Duration};
 
 use crate::config::KafkaConfig;

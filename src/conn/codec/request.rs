@@ -97,6 +97,7 @@ impl codec::Encoder<EncodableRequest> for RequestEncoder {
             header_version = request_header_version,
             api_key = ?item.api_key,
             correlation_id = item.header.correlation_id,
+            item = ?item,
             "encoding request"
         );
 
