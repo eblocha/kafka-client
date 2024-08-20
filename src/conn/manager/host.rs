@@ -4,7 +4,7 @@ use kafka_protocol::messages::metadata_response::MetadataResponseBroker;
 use url::Url;
 
 /// A host:port pair for a Kafka broker
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BrokerHost(pub Arc<str>, pub u16);
 
 impl Debug for BrokerHost {

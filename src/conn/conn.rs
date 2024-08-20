@@ -37,7 +37,7 @@ pub enum KafkaConnectionError {
     Closed,
 }
 
-type ResponseSender = oneshot::Sender<Result<DecodableResponse, io::Error>>;
+pub type ResponseSender = oneshot::Sender<Result<DecodableResponse, io::Error>>;
 
 #[must_use]
 struct KafkaConnectionBackgroundTaskRunner<IO> {
@@ -237,8 +237,8 @@ impl KafkaConnection {
     }
 
     /// Obtain a new Sender to send and receive messages
-    pub fn sender(&self) -> mpsc::Sender<(VersionedRequest, ResponseSender)> {
-        self.sender.clone()
+    pub fn sender(&self) -> &mpsc::Sender<(VersionedRequest, ResponseSender)> {
+        &self.sender
     }
 
     /// Shut down the connection. This is the preferred method to close a connection gracefully.
