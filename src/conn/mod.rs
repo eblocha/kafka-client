@@ -1,7 +1,7 @@
 mod codec;
 pub mod config;
 mod conn;
-pub mod manager;
+pub mod host;
 mod prepared;
 pub mod selector;
 

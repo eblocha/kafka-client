@@ -21,7 +21,7 @@ use crate::{
         codec::VersionedRequest,
         config::KafkaConnectionConfig,
         conn::{KafkaConnection, KafkaConnectionError, ResponseSender},
-        manager::host::BrokerHost,
+        host::BrokerHost,
         PreparedConnectionInitError, Sendable, Versionable,
     },
     proto::{error_codes::ErrorCode, request::KafkaRequest},

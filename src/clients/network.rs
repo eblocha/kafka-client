@@ -1,6 +1,6 @@
 use crate::conn::{
     config::ConnectionManagerConfig,
-    manager::host::{try_parse_hosts, BrokerHost},
+    host::{try_parse_hosts, BrokerHost},
     selector::selector::SelectorTaskHandle,
     KafkaConnectionError, Sendable,
 };

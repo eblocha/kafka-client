@@ -7,7 +7,7 @@ use rand::Rng;
 use tokio::{sync::watch, task::JoinSet};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::conn::{config::ConnectionManagerConfig, manager::host::BrokerHost};
+use crate::conn::{config::ConnectionManagerConfig, host::BrokerHost};
 
 use super::{
     metadata::MetadataRefreshTaskHandle,
