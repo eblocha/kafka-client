@@ -39,7 +39,7 @@ enum Client {
 pub async fn main() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::fmt()
         .with_writer(io::stderr)
-        .with_max_level(Level::DEBUG)
+        .with_max_level(Level::INFO)
         .compact()
         .finish();
 

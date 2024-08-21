@@ -1,7 +1,7 @@
 use crate::conn::{
     config::ConnectionManagerConfig,
     host::{try_parse_hosts, BrokerHost},
-    selector::selector::SelectorTaskHandle,
+    selector::selector::{Cluster, SelectorTaskHandle},
     KafkaConnectionError, Sendable,
 };
 
@@ -38,7 +38,25 @@ impl NetworkClient {
         handle.send(req).await
     }
 
+    pub async fn send_to<R: Sendable>(
+        &self,
+        req: R,
+        broker_id: i32,
+    ) -> Result<R::Response, KafkaConnectionError> {
+        let cluster = self.selector.cluster.borrow();
+        let Some((_, handle)) = cluster.broker_channels.0.get(&broker_id) else {
+            tracing::error!("no broker handle for id {broker_id}");
+            return Err(KafkaConnectionError::Closed);
+        };
+
+        handle.clone().send(req).await
+    }
+
     pub async fn shutdown(&self) {
         self.selector.shutdown().await;
+    }
+
+    pub fn read_cluster_snapshot(&self) -> Cluster {
+        self.selector.cluster.borrow().clone()
     }
 }

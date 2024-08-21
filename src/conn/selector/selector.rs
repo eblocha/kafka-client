@@ -18,7 +18,7 @@ use super::{
 #[derive(Debug, Clone, From, Default)]
 pub struct BrokerMap(#[from] pub FnvHashMap<i32, (BrokerHost, NodeTaskHandle)>);
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Cluster {
     pub broker_channels: BrokerMap,
     pub metadata: MetadataResponse,

@@ -1,6 +1,6 @@
 use std::{
     path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::{Bytes, BytesMut};
@@ -31,9 +31,22 @@ pub async fn produce_from_file(
 
     let topic = TopicName(StrBytes::from_string(topic));
 
-    while let Some(line) = reader.next_line().await? {
-        let mut records = BytesMut::new();
+    let cluster = client.read_cluster_snapshot();
 
+    let Some(topic_data) = cluster.metadata.topics.get(&topic) else {
+        return Ok(());
+    };
+
+    let partition = &topic_data.partitions[0];
+
+    let leader_epoch = partition.leader_epoch;
+    let leader_id = partition.leader_id.0;
+    let mut iter: i32 = 0;
+
+    let mut record_vec = Vec::new();
+    let mut records = BytesMut::new();
+
+    while let Some(line) = reader.next_line().await? {
         let start = SystemTime::now();
         let since_the_epoch = start
             .duration_since(UNIX_EPOCH)
@@ -45,60 +58,68 @@ pub async fn produce_from_file(
         let record = Record {
             transactional: false,
             control: false,
-            partition_leader_epoch: 0,
+            partition_leader_epoch: leader_epoch,
             producer_id: 0,
             producer_epoch: -1,
             timestamp_type: records::TimestampType::Creation,
-            offset: 0,
-            sequence: -1,
+            offset: iter as i64,
+            sequence: iter,
             timestamp: timestamp as i64,
-            key: None,
+            key: Some(Bytes::new()),
             value: Some(Bytes::from(line)),
             headers: Default::default(),
         };
 
-        RecordBatchEncoder::encode(
-            &mut records,
-            [&record].into_iter(),
-            &RecordEncodeOptions {
-                version: 2,
-                compression: records::Compression::None,
-            },
-        )?;
+        record_vec.push(record);
 
-        let mut data = TopicProduceData::default();
+        iter += 1;
+    }
 
-        data.partition_data = vec![{
-            let mut d = PartitionProduceData::default();
-            d.index = 0;
-            d.records = Some(records.into());
-            d
-        }];
+    let now = Instant::now();
 
-        let req = {
-            let mut r = ProduceRequest::default();
-            r.acks = 1;
-            r.timeout_ms = 1000;
-            r.transactional_id = None;
-            r.topic_data = IndexMap::from_iter([(topic.clone(), data)]);
-            r
-        };
+    RecordBatchEncoder::encode(
+        &mut records,
+        record_vec.iter(),
+        &RecordEncodeOptions {
+            version: 2,
+            compression: records::Compression::None,
+        },
+    )?;
 
-        let res = client.send(req).await?;
+    let mut data = TopicProduceData::default();
 
-        for (_, response) in res.responses {
-            for response in response.partition_responses {
-                let error_code = ErrorCode::from(response.error_code);
+    data.partition_data = vec![{
+        let mut d = PartitionProduceData::default();
+        d.index = partition.partition_index;
+        d.records = Some(records.into());
+        d
+    }];
 
-                if error_code != ErrorCode::None {
-                    println!("error: {error_code:?}");
-                    return Ok(());
-                }
+    let req = {
+        let mut r = ProduceRequest::default();
+        r.acks = 1;
+        r.timeout_ms = 1000;
+        r.transactional_id = None;
+        r.topic_data = IndexMap::from_iter([(topic.clone(), data)]);
+        r
+    };
+
+    let res = client.send_to(req, leader_id).await?;
+
+    for (_, response) in res.responses {
+        for response in response.partition_responses {
+            let error_code = ErrorCode::from(response.error_code);
+
+            if error_code != ErrorCode::None {
+                println!("error: {error_code:?}");
+                return Ok(());
             }
         }
-
-        println!("Produced message!");
     }
+
+    let finish = now.elapsed();
+
+    println!("produced {iter} messages in {finish:?}");
 
     Ok(())
 }
