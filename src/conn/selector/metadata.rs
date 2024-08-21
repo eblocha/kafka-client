@@ -16,6 +16,7 @@ struct MetadataRefreshTask {
 impl MetadataRefreshTask {
     pub async fn run(mut self) {
         let mut metadata_interval = tokio::time::interval(self.config.metadata_refresh_interval);
+        metadata_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
