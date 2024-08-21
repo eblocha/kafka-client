@@ -179,10 +179,23 @@ impl NodeTask {
 }
 
 /// Handle to a [`NodeTask`], to control its lifecycle.
+///
+/// The [`NodeTask`] serves as an abstraction over a connection to a _broker_, as opposed to a _host_.
+/// The task contains a message channel to send messages to the specific broker id, and maintains this channel across
+/// retries and reconnects.
+///
+/// If a broker moves hosts, this channel will be maintained across that host change.
+///
+/// It will also re-send the last message after a reconnect if the connection was closed when it was last attempted.
 #[derive(Debug, Clone)]
 pub struct NodeTaskHandle {
+    /// Transmitter to send messages to the underlying connection
     pub tx: mpsc::Sender<NodeTaskMessage>,
+    /// Atomic to determine if this node is _likely_ connected.
+    ///
+    /// Note that this may appear `true` when the connection closes unexpectedly, and the task has not yet been restarted.
     pub connected: Arc<AtomicBool>,
+    /// Token to stop the running task.
     pub cancellation_token: CancellationToken,
 }
 
@@ -207,6 +220,11 @@ impl NodeTaskHandle {
 }
 
 /// Create a new [`NodeTaskHandle`] and [`NodeTask`] pair.
+///
+/// This creates a new message channel, so is only appropriate to use when creating a connection to a new broker id, or
+/// if the original task aborted or panicked, and the message channel was lost.
+///
+/// It does _not_ spawn the task, that must be handled by the selector task in a join set.
 pub fn new_pair(
     broker_id: i32,
     host: BrokerHost,
