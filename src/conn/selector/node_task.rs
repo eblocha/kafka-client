@@ -35,6 +35,7 @@ pub struct NodeTaskMessage {
 /// A connection task to a broker.
 ///
 /// Contains a receiver that forwards requests to the connection.
+#[derive(Debug)]
 pub struct NodeTask {
     /// The broker id this node is assigned to
     pub broker_id: i32,
@@ -86,11 +87,33 @@ impl NodeTask {
         let connect_fut = TcpStream::connect((self.host.0.as_ref(), self.host.1))
             .and_then(|io| KafkaConnection::connect(io, &self.config));
 
-        let conn = tokio::select! {
+        let result = tokio::select! {
             biased;
             _ = self.cancellation_token.cancelled() => return self,
-            Ok(Ok(conn)) = tokio::time::timeout(self.connection_timeout, connect_fut) => conn,
+            result = tokio::time::timeout(self.connection_timeout, connect_fut) => result,
             else => return self
+        };
+
+        let conn = match result {
+            Ok(Ok(conn)) => conn,
+            Ok(Err(e)) => {
+                tracing::error!(
+                    broker_id = self.broker_id,
+                    host = ?self.host,
+                    attempts = self.attempts,
+                    "failed to connect: {e:?}",
+                );
+                return self;
+            }
+            Err(_) => {
+                tracing::error!(
+                    broker_id = self.broker_id,
+                    host = ?self.host,
+                    attempts = self.attempts,
+                    "connection timed out",
+                );
+                return self;
+            }
         };
 
         let Ok(versions) = negotiate(self.broker_id, &self.host, self.attempts, &conn).await else {
@@ -117,19 +140,18 @@ impl NodeTask {
         }
 
         loop {
-            if conn.is_closed() {
-                tracing::error!(
-                    broker_id = self.broker_id,
-                    host = ?self.host,
-                    attempts = self.attempts,
-                    "connection closed unexpectedly"
-                );
-                return self;
-            }
-
             let NodeTaskMessage { request, tx } = tokio::select! {
                 biased;
                 _ = self.cancellation_token.cancelled() => return self,
+                _ = conn.closed() => {
+                    tracing::error!(
+                        broker_id = self.broker_id,
+                        host = ?self.host,
+                        attempts = self.attempts,
+                        "connection closed unexpectedly"
+                    );
+                    return self;
+                },
                 Some(msg) = self.rx.recv() => msg,
                 else => return self
             };

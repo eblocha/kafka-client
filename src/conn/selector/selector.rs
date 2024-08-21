@@ -2,14 +2,17 @@ use std::sync::atomic::Ordering;
 
 use derive_more::derive::From;
 use fnv::FnvHashMap;
-use kafka_protocol::messages::{MetadataRequest, MetadataResponse};
+use kafka_protocol::messages::MetadataResponse;
 use rand::Rng;
 use tokio::{sync::watch, task::JoinSet};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::conn::{config::ConnectionManagerConfig, manager::host::BrokerHost};
 
-use super::node_task::{new_pair, NodeTask, NodeTaskHandle};
+use super::{
+    metadata::MetadataRefreshTaskHandle,
+    node_task::{new_pair, NodeTask, NodeTaskHandle},
+};
 
 /// Mapping of broker id to host and connection handle
 #[derive(Debug, Clone, From, Default)]
@@ -18,7 +21,7 @@ pub struct BrokerMap(#[from] pub FnvHashMap<i32, (BrokerHost, NodeTaskHandle)>);
 #[derive(Debug, Default)]
 pub struct Cluster {
     pub broker_channels: BrokerMap,
-    pub _metadata: MetadataResponse,
+    pub metadata: MetadataResponse,
 }
 
 impl BrokerMap {
@@ -53,6 +56,7 @@ pub struct SelectorTask {
     /// Mapping of broker id to its host
     hosts: BrokerMap,
     tx: watch::Sender<Cluster>,
+    metadata_task_handle: MetadataRefreshTaskHandle,
     join_set: JoinSet<NodeTask>,
     config: ConnectionManagerConfig,
     cancellation_token: CancellationToken,
@@ -69,12 +73,10 @@ enum Event {
 
 impl SelectorTask {
     pub async fn run(mut self) {
-        let mut metadata_interval = tokio::time::interval(self.config.metadata_refresh_interval);
-
         loop {
             let event = tokio::select! {
                 _ = self.cancellation_token.cancelled() => Event::Shutdown,
-                _ = metadata_interval.tick() => Event::Refresh,
+                Ok(_) = self.metadata_task_handle.rx.changed() => Event::Refresh,
                 // if a node panics, the task handle will need to request a new node.
                 // we never abort these tasks.
                 Some(Ok(node_died)) = self.join_set.join_next(), if !self.join_set.is_empty() => Event::NodeDied(node_died),
@@ -82,10 +84,12 @@ impl SelectorTask {
             };
 
             match event {
-                Event::Refresh => match self.refresh_metadata().await {
-                    Some(_) => {}
-                    None => break, // unrecoverable
-                },
+                Event::Refresh => {
+                    let metadata = self.metadata_task_handle.rx.borrow().clone();
+                    if self.update_metadata(metadata).is_none() {
+                        break;
+                    }
+                }
                 Event::NodeDied(mut dead_task) => {
                     // is this node supposed to be running?
                     if let Some((host, mut handle)) = self.hosts.0.remove(&dead_task.broker_id) {
@@ -101,7 +105,9 @@ impl SelectorTask {
                         handle.cancellation_token = cancellation_token;
 
                         // restart it with the host it should be connected to.
-                        if dead_task.connected.load(Ordering::SeqCst) || dead_task.host != host {
+                        if dead_task.connected.fetch_and(false, Ordering::SeqCst)
+                            || dead_task.host != host
+                        {
                             // remove delay if it was connected or changed hosts
                             dead_task.attempts = 0;
                             dead_task.delay = None;
@@ -126,47 +132,17 @@ impl SelectorTask {
                         self.join_set.spawn(dead_task.run());
                     }
                 }
-                Event::Shutdown => {
-                    for (_, (_, handle)) in self.hosts.0.drain() {
-                        handle.cancellation_token.cancel();
-                    }
-
-                    let _ = self.tx.send(Default::default());
-
-                    return;
-                }
+                Event::Shutdown => break,
             }
         }
-    }
 
-    async fn refresh_metadata(&mut self) -> Option<()> {
-        let Some((host_for_refresh, handle_for_refresh)) = self.hosts.get_best_connection() else {
-            tracing::error!("no connections available for metadata refresh!");
-            return None;
-        };
+        for (_, (_, handle)) in self.hosts.0.drain() {
+            handle.cancellation_token.cancel();
+        }
 
-        tracing::debug!(broker = ?host_for_refresh, "attempting to refresh metadata");
+        self.metadata_task_handle.cancellation_token.cancel();
 
-        let request = {
-            let mut r = MetadataRequest::default();
-            r.allow_auto_topic_creation = false;
-            r.topics = None;
-            r
-        };
-
-        let metadata = match handle_for_refresh.send(request).await {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!(broker = ?host_for_refresh, "failed to get metadata: {e}");
-                return Some(());
-            }
-        };
-
-        let result = self.update_metadata(metadata);
-
-        tracing::debug!("successfully updated metadata using broker {host_for_refresh:?}");
-
-        result
+        let _ = self.tx.send(Default::default());
     }
 
     fn update_metadata(&mut self, metadata: MetadataResponse) -> Option<()> {
@@ -229,7 +205,7 @@ impl SelectorTask {
         self.tx
             .send(Cluster {
                 broker_channels: self.hosts.clone(),
-                _metadata: metadata,
+                metadata,
             })
             .ok()
     }
@@ -263,13 +239,19 @@ impl SelectorTaskHandle {
         let task_tracker = TaskTracker::new();
 
         // create the watch channel for the metadata
-        // this is empty to begin with until we bootstrap initial metadata
-        let (cluster_tx, mut cluster_rx) = watch::channel(Default::default());
+        let (cluster_tx, mut cluster_rx) = watch::channel::<Cluster>(Cluster {
+            broker_channels: hosts.clone(),
+            metadata: Default::default(),
+        });
+
+        let metadata_task_handle =
+            MetadataRefreshTaskHandle::new(cluster_rx.clone(), config.clone());
 
         // start the selector task to manage broker connections
         let selector_task = SelectorTask {
             hosts,
             tx: cluster_tx,
+            metadata_task_handle,
             join_set,
             config,
             cancellation_token: cancellation_token.clone(),
