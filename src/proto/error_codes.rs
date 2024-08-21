@@ -134,7 +134,7 @@ impl From<i16> for ErrorCode {
     fn from(value: i16) -> Self {
         match value {
             // SAFETY: ErrorCode is valid in the range provided
-            MIN..=MAX => unsafe { std::mem::transmute::<_, ErrorCode>(value) },
+            MIN..=MAX => unsafe { std::mem::transmute::<i16, ErrorCode>(value) },
             _ => ErrorCode::UnknownServerError,
         }
     }

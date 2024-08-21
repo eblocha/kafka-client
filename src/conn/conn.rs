@@ -112,7 +112,7 @@ impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
                                         "io sink failed to feed frame: {:?}",
                                         e
                                     );
-                                    let _ = sender.send(Err(e.into()));
+                                    let _ = sender.send(Err(e));
                                 }
                             }
 
