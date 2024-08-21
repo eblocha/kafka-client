@@ -181,9 +181,9 @@ impl NodeTask {
 /// Handle to a [`NodeTask`], to control its lifecycle.
 #[derive(Debug, Clone)]
 pub struct NodeTaskHandle {
-    pub cancellation_token: CancellationToken,
-    pub connected: Arc<AtomicBool>,
     pub tx: mpsc::Sender<NodeTaskMessage>,
+    pub connected: Arc<AtomicBool>,
+    pub cancellation_token: CancellationToken,
 }
 
 impl NodeTaskHandle {

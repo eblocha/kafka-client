@@ -140,7 +140,9 @@ impl SelectorTask {
             handle.cancellation_token.cancel();
         }
 
-        self.metadata_task_handle.cancellation_token.cancel();
+        while self.join_set.join_next().await.is_some() {}
+
+        self.metadata_task_handle.shutdown().await;
 
         let _ = self.tx.send(Default::default());
     }

@@ -1,6 +1,6 @@
 use kafka_protocol::messages::{MetadataRequest, MetadataResponse};
 use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::conn::config::ConnectionManagerConfig;
 
@@ -64,7 +64,8 @@ impl MetadataRefreshTask {
 
 pub struct MetadataRefreshTaskHandle {
     pub rx: watch::Receiver<MetadataResponse>,
-    pub cancellation_token: CancellationToken,
+    cancellation_token: CancellationToken,
+    task_tracker: TaskTracker,
 }
 
 impl MetadataRefreshTaskHandle {
@@ -80,11 +81,20 @@ impl MetadataRefreshTaskHandle {
             config: config.clone(),
         };
 
-        tokio::spawn(task.run());
+        let task_tracker = TaskTracker::new();
+
+        task_tracker.spawn(task.run());
 
         Self {
             rx,
             cancellation_token,
+            task_tracker,
         }
+    }
+
+    pub async fn shutdown(&self) {
+        self.task_tracker.close();
+        self.cancellation_token.cancel();
+        self.task_tracker.wait().await;
     }
 }
