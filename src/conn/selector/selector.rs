@@ -55,10 +55,15 @@ impl BrokerMap {
 pub struct SelectorTask {
     /// Mapping of broker id to its host
     hosts: BrokerMap,
+    /// Shared global cluster state. Contains the latest metadata and mapping of broker id to connection
     tx: watch::Sender<Cluster>,
+    /// Task handle for metadata refreshes
     metadata_task_handle: MetadataRefreshTaskHandle,
+    /// Join set for running connection tasks. Used to detect failed connections
     join_set: JoinSet<NodeTask>,
+    /// Configuration settings
     config: ConnectionManagerConfig,
+    /// Cancellation signal
     cancellation_token: CancellationToken,
 }
 
@@ -77,9 +82,13 @@ impl SelectorTask {
             let event = tokio::select! {
                 _ = self.cancellation_token.cancelled() => Event::Shutdown,
                 Ok(_) = self.metadata_task_handle.rx.changed() => Event::Refresh,
-                // if a node panics, the task handle will need to request a new node.
-                // we never abort these tasks.
-                Some(Ok(node_died)) = self.join_set.join_next(), if !self.join_set.is_empty() => Event::NodeDied(node_died),
+                Some(result) = self.join_set.join_next() => match result {
+                    Ok(node_died) => Event::NodeDied(node_died),
+                    Err(join_err) => {
+                        tracing::error!("node connection task stopped unexpectedly, attempting to recover: {join_err:?}");
+                        Event::Refresh
+                    }
+                },
                 else => continue
             };
 
@@ -179,28 +188,22 @@ impl SelectorTask {
             if let Some(pair) = self.hosts.0.get_mut(&broker_id) {
                 let host = &pair.0;
 
+                if pair.1.tx.is_closed() {
+                    // the node is not running, and the receiver dropped - it likely panicked
+                    self.start_new_task(broker_id, new_host);
+                }
                 // if the host is different, stop it (it will restart automatically with the new host)
-                if host != &new_host {
+                else if host != &new_host {
                     tracing::debug!(
                         "stopping connection to host {host:?} for broker_id {}",
                         broker_id
                     );
                     pair.1.cancellation_token.cancel();
+                    pair.0 = new_host;
                 }
-
-                pair.0 = new_host;
             } else {
                 // we don't have a handle to the broker - create one
-                let (handle, task) = new_pair(
-                    broker_id,
-                    new_host.clone(),
-                    self.config.conn.retry.connection_timeout,
-                    self.config.conn.io.clone(),
-                );
-
-                self.join_set.spawn(task.run());
-
-                self.hosts.0.insert(broker_id, (new_host, handle));
+                self.start_new_task(broker_id, new_host);
             }
         }
 
@@ -210,6 +213,19 @@ impl SelectorTask {
                 metadata,
             })
             .ok()
+    }
+
+    fn start_new_task(&mut self, broker_id: i32, host: BrokerHost) {
+        let (handle, task) = new_pair(
+            broker_id,
+            host.clone(),
+            self.config.conn.retry.connection_timeout,
+            self.config.conn.io.clone(),
+        );
+
+        self.join_set.spawn(task.run());
+
+        self.hosts.0.insert(broker_id, (host, handle));
     }
 }
 
