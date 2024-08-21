@@ -126,16 +126,18 @@ impl NodeTask {
 
         // try to send the last message sent if it failed
         if let Some(last_message) = self.last_message.take() {
-            if let Err(err) = conn.sender().send(last_message).await {
-                tracing::error!(
-                    broker_id = self.broker_id,
-                    host = ?self.host,
-                    attempts = self.attempts,
-                    "failed to re-send last sent message"
-                );
-                // if we're here, the connection we just created is already closed.
-                self.last_message = Some(err.0);
-                return self;
+            if !last_message.1.is_closed() {
+                if let Err(err) = conn.sender().send(last_message).await {
+                    tracing::error!(
+                        broker_id = self.broker_id,
+                        host = ?self.host,
+                        attempts = self.attempts,
+                        "failed to re-send last sent message"
+                    );
+                    // if we're here, the connection we just created is already closed.
+                    self.last_message = Some(err.0);
+                    return self;
+                }
             }
         }
 
@@ -163,6 +165,10 @@ impl NodeTask {
                 request,
                 api_version: determine_version(&versions, api_key, &range),
             };
+
+            if tx.is_closed() {
+                continue;
+            }
 
             if let Err(err) = conn.sender().send((versioned, tx)).await {
                 tracing::error!(
