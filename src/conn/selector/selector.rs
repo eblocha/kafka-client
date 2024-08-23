@@ -3,11 +3,13 @@ use std::sync::atomic::Ordering;
 use derive_more::derive::From;
 use fnv::FnvHashMap;
 use kafka_protocol::messages::MetadataResponse;
-use rand::Rng;
 use tokio::{sync::watch, task::JoinSet};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::conn::{config::ConnectionManagerConfig, host::BrokerHost};
+use crate::{
+    backoff::exponential_backoff,
+    conn::{config::ConnectionManagerConfig, host::BrokerHost},
+};
 
 use super::{
     metadata::MetadataRefreshTaskHandle,
@@ -140,20 +142,17 @@ impl SelectorTask {
                             || dead_task.host != host
                         {
                             // remove delay if it was connected or changed hosts
-                            dead_task.attempts = 0;
+                            dead_task.retries = 0;
                             dead_task.delay = None;
                         } else {
-                            let (min, max, jitter) = (
+                            let (min, max) = (
                                 self.config.conn.retry.min_backoff,
                                 self.config.conn.retry.max_backoff,
-                                rand::thread_rng().gen_range(0..self.config.conn.retry.jitter),
                             );
 
-                            let backoff =
-                                std::cmp::min(min * 2u32.saturating_pow(dead_task.attempts), max)
-                                    + min * jitter;
+                            let backoff = exponential_backoff(min, max, dead_task.retries);
 
-                            dead_task.attempts += 1;
+                            dead_task.retries += 1;
                             dead_task.delay = Some(backoff);
                         }
 
@@ -286,7 +285,7 @@ impl SelectorTaskHandle {
         });
 
         let metadata_task_handle =
-            MetadataRefreshTaskHandle::new(cluster_rx.clone(), config.clone());
+            MetadataRefreshTaskHandle::new(cluster_rx.clone(), config.metadata.clone());
 
         // start the selector task to manage broker connections
         let selector_task = SelectorTask {

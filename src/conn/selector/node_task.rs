@@ -51,7 +51,7 @@ pub struct NodeTask {
     /// Timeout to establish a connection before exiting
     pub connection_timeout: Duration,
     /// Attempt count marker to compute next backoff
-    pub attempts: u32,
+    pub retries: u32,
     /// Delay before attempting to connect
     pub delay: Option<Duration>,
     /// This node has acquired a connection
@@ -64,12 +64,10 @@ impl NodeTask {
     /// If the kafka stream has any problems, this will return `Self` to enable reuse of the message channel in a new
     /// connection.
     pub async fn run(mut self) -> Self {
-        self.attempts += 1;
-
         tracing::debug!(
             broker_id = self.broker_id,
             host = ?self.host,
-            attempts = self.attempts,
+            retries = self.retries,
             backoff = ?self.delay,
             "connecting to broker"
         );
@@ -98,7 +96,7 @@ impl NodeTask {
                 tracing::error!(
                     broker_id = self.broker_id,
                     host = ?self.host,
-                    attempts = self.attempts,
+                    retries = self.retries,
                     "failed to connect: {e:?}",
                 );
                 return self;
@@ -107,14 +105,14 @@ impl NodeTask {
                 tracing::error!(
                     broker_id = self.broker_id,
                     host = ?self.host,
-                    attempts = self.attempts,
+                    retries = self.retries,
                     "connection timed out",
                 );
                 return self;
             }
         };
 
-        let Ok(versions) = negotiate(self.broker_id, &self.host, self.attempts, &conn).await else {
+        let Ok(versions) = negotiate(self.broker_id, &self.host, self.retries, &conn).await else {
             return self;
         };
 
@@ -129,7 +127,7 @@ impl NodeTask {
                     tracing::error!(
                         broker_id = self.broker_id,
                         host = ?self.host,
-                        attempts = self.attempts,
+                        retries = self.retries,
                         "failed to re-send last sent message"
                     );
                     // if we're here, the connection we just created is already closed.
@@ -147,7 +145,7 @@ impl NodeTask {
                     tracing::error!(
                         broker_id = self.broker_id,
                         host = ?self.host,
-                        attempts = self.attempts,
+                        retries = self.retries,
                         "connection closed unexpectedly"
                     );
                     return self;
@@ -172,7 +170,7 @@ impl NodeTask {
                 tracing::error!(
                     broker_id = self.broker_id,
                     host = ?self.host,
-                    attempts = self.attempts,
+                    retries = self.retries,
                     "connection closed unexpectedly, storing last sent message"
                 );
                 self.last_message = Some(err.0);
@@ -255,7 +253,7 @@ pub fn new_pair(
         cancellation_token: handle.cancellation_token.clone(),
         config,
         connection_timeout,
-        attempts: 0,
+        retries: 0,
         delay: None,
         connected: handle.connected.clone(),
     };
@@ -273,13 +271,13 @@ fn create_version_request() -> ApiVersionsRequest {
 async fn negotiate(
     broker_id: i32,
     host: &BrokerHost,
-    attempts: u32,
+    retries: u32,
     conn: &KafkaConnection,
 ) -> Result<ApiVersionsResponse, PreparedConnectionInitError> {
     tracing::debug!(
         broker_id = broker_id,
         host = ?host,
-        attempts = attempts,
+        retries = retries,
         "negotiating api versions"
     );
 
@@ -295,7 +293,7 @@ async fn negotiate(
             tracing::debug!(
                 broker_id = broker_id,
                 host = ?host,
-                attempts = attempts,
+                retries = retries,
                 "latest api versions request version is unsupported, falling back to version 0"
             );
             conn.send(
@@ -313,7 +311,7 @@ async fn negotiate(
         tracing::debug!(
             broker_id = broker_id,
             host = ?host,
-            attempts = attempts,
+            retries = retries,
             "version negotiation completed successfully"
         );
         Ok(api_versions_response)
@@ -322,7 +320,7 @@ async fn negotiate(
         tracing::error!(
             broker_id = broker_id,
             host = ?host,
-            attempts = attempts,
+            retries = retries,
             "{e}"
         );
         Err(e)

@@ -51,11 +51,6 @@ pub struct ConnectionRetryConfig {
     ///
     /// Default 30s
     pub max_backoff: Duration,
-    /// Random noise to apply to backoff duration.
-    /// Every backoff adds `min_backoff * 0..jitter` to its wait time.
-    ///
-    /// Default 10
-    pub jitter: u32,
     /// Timeout to establish a connection before retrying.
     ///
     /// Default 10s
@@ -66,7 +61,6 @@ impl Default for ConnectionRetryConfig {
     fn default() -> Self {
         Self {
             max_retries: None,
-            jitter: 10,
             min_backoff: Duration::from_millis(10),
             max_backoff: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
@@ -80,7 +74,6 @@ impl From<&KafkaConfig> for ConnectionRetryConfig {
             max_retries: value.connection_max_retries,
             min_backoff: value.connection_min_backoff,
             max_backoff: value.connection_max_backoff,
-            jitter: value.connection_jitter,
             connection_timeout: value.connection_timeout,
         }
     }
@@ -104,29 +97,51 @@ impl From<&KafkaConfig> for ConnectionConfig {
     }
 }
 
-/// Configuration options for the Kafka connection manager
+/// Controls how metadata is refreshed, and retried.
 #[derive(Debug, Clone)]
+pub struct MetadataRefreshConfig {
+    /// How often to refresh in the background
+    pub interval: Duration,
+    /// If refresh fails, the minimum time to wait before retrying
+    pub min_backoff: Duration,
+    /// If refresh fails, the maximum time to wait before retrying
+    pub max_backoff: Duration,
+}
+
+impl From<&KafkaConfig> for MetadataRefreshConfig {
+    fn from(value: &KafkaConfig) -> Self {
+        Self {
+            interval: value.metadata_refresh_interval,
+            min_backoff: value.connection_min_backoff,
+            max_backoff: value.connection_max_backoff,
+        }
+    }
+}
+
+impl Default for MetadataRefreshConfig {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(5 * 60),
+            min_backoff: Duration::from_millis(10),
+            max_backoff: Duration::from_secs(30),
+        }
+    }
+}
+
+/// Configuration options for the Kafka connection manager
+#[derive(Debug, Default, Clone)]
 pub struct ConnectionManagerConfig {
     /// Options for new broker connections
     pub conn: ConnectionConfig,
-    /// How often to refresh cluster metadata
-    pub metadata_refresh_interval: Duration,
+    /// Cluster metadata refresh options
+    pub metadata: MetadataRefreshConfig,
 }
 
 impl From<&KafkaConfig> for ConnectionManagerConfig {
     fn from(value: &KafkaConfig) -> Self {
         Self {
             conn: value.into(),
-            metadata_refresh_interval: value.metadata_refresh_interval,
-        }
-    }
-}
-
-impl Default for ConnectionManagerConfig {
-    fn default() -> Self {
-        Self {
-            conn: Default::default(),
-            metadata_refresh_interval: Duration::from_secs(5 * 60),
+            metadata: value.into(),
         }
     }
 }

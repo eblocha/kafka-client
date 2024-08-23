@@ -29,11 +29,6 @@ pub struct KafkaConfig {
     ///
     /// Default 30s
     pub connection_max_backoff: Duration,
-    /// Random noise to apply to backoff duration.
-    /// Every backoff adds `min_backoff * 0..jitter` to its wait time.
-    ///
-    /// Default 10
-    pub connection_jitter: u32,
     /// Timeout to establish a connection before retrying.
     ///
     /// Default 10s
@@ -42,6 +37,14 @@ pub struct KafkaConfig {
     ///
     /// Default 5min
     pub metadata_refresh_interval: Duration,
+    /// Minimum time to wait between refresh attempts.
+    ///
+    /// Default 10ms
+    pub metadata_refresh_min_backoff: Duration,
+    /// Maximum time to wait between refresh attempts.
+    ///
+    /// Default 30s
+    pub metadata_refresh_max_backoff: Duration,
 }
 
 impl Default for KafkaConfig {
@@ -55,9 +58,10 @@ impl Default for KafkaConfig {
             connection_max_retries: mgr.conn.retry.max_retries,
             connection_min_backoff: mgr.conn.retry.min_backoff,
             connection_max_backoff: mgr.conn.retry.max_backoff,
-            connection_jitter: mgr.conn.retry.jitter,
             connection_timeout: mgr.conn.retry.connection_timeout,
-            metadata_refresh_interval: mgr.metadata_refresh_interval,
+            metadata_refresh_interval: mgr.metadata.interval,
+            metadata_refresh_max_backoff: mgr.metadata.max_backoff,
+            metadata_refresh_min_backoff: mgr.metadata.min_backoff,
         }
     }
 }
