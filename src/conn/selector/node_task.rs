@@ -91,7 +91,13 @@ impl NodeTask {
         };
 
         let conn = match result {
-            Ok(Ok(conn)) => KafkaConnection::connect(conn, &self.config),
+            Ok(Ok(conn)) => {
+                if let Err(err) = conn.set_nodelay(true) {
+                    tracing::warn!("failed to set TCP_NODELAY on stream: {err:?}");
+                }
+
+                KafkaConnection::connect(conn, &self.config)
+            }
             Ok(Err(e)) => {
                 tracing::error!(
                     broker_id = self.broker_id,
