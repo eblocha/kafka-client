@@ -14,17 +14,26 @@ use super::{
     node_task::{new_pair, NodeTask, NodeTaskHandle},
 };
 
-/// Mapping of broker id to host and connection handle
+/// Mapping of broker id to [`BrokerHost`] and [`NodeTaskHandle`].
+///
+/// Used to send requests to specific brokers, or the current least-loaded broker.
 #[derive(Debug, Clone, From, Default)]
 pub struct BrokerMap(#[from] pub FnvHashMap<i32, (BrokerHost, NodeTaskHandle)>);
 
+/// Current cluster state since the last metadata refresh.
 #[derive(Debug, Default, Clone)]
 pub struct Cluster {
+    /// Mapping of broker id to the [`BrokerHost`] and [`NodeTaskHandle`] to send requests to it.
     pub broker_channels: BrokerMap,
+    /// Metadata response last recieved from a refresh.
     pub metadata: MetadataResponse,
 }
 
 impl BrokerMap {
+    /// Get the current "best" connection handle.
+    ///
+    /// This will prefer connected brokers with the minimum number of pending requests, then favor the minimum number of
+    /// pending requests, connected or not.
     pub fn get_best_connection(&self) -> Option<(BrokerHost, NodeTaskHandle)> {
         // prefer connected nodes with least waiting connections
         let least_loaded_connected = self
@@ -51,8 +60,17 @@ impl BrokerMap {
     }
 }
 
-/// Keeps connections to each broker alive
-pub struct SelectorTask {
+/// Keeps connections to each broker alive.
+///
+/// This task will listen for changes to metadata from the [`MetadataRefreshTaskHandle`], then start/stop
+/// broker handles as necessary to keep a valid mapping of broker id to host connection.
+///
+/// If any nodes fail to connect or close their connection unexpectedly, this task will re-spawn those connection
+/// tasks (with exponential backoff as appropriate) to keep connections alive.
+///
+/// If a [`NodeTask`] panics, then pending requests for the broker will recieve a [`crate::conn::KafkaConnectionError::Closed`]
+/// error, and a new [`NodeTask`] and [`NodeTaskHandle`] pair will be created and spawned.
+struct SelectorTask {
     /// Mapping of broker id to its host
     hosts: BrokerMap,
     /// Shared global cluster state. Contains the latest metadata and mapping of broker id to connection
@@ -68,19 +86,23 @@ pub struct SelectorTask {
 }
 
 enum Event {
-    /// Metadata changed, so re-configure connections
+    /// Metadata changed, so re-configure connections. This is also invoked when a [`NodeTask`]
+    /// panics or is aborted, because we no longer have access to the original channel in that case.
     Refresh,
-    /// A node stopped
+    /// A node stopped. Note this doesn't necessarily indicate that it should be running.
+    /// The [`SelectorTask`] will restart it if it points to a valid broker in the cluster.
     NodeDied(NodeTask),
     /// Stop all connections and shut down
     Shutdown,
 }
 
 impl SelectorTask {
-    pub async fn run(mut self) {
+    async fn run(mut self) {
         loop {
             let event = tokio::select! {
+                biased;
                 _ = self.cancellation_token.cancelled() => Event::Shutdown,
+                // if this returns None, it means the metadata refresh task has stopped, and we will never get metadata again.
                 Ok(_) = self.metadata_task_handle.rx.changed() => Event::Refresh,
                 Some(result) = self.join_set.join_next() => match result {
                     Ok(node_died) => Event::NodeDied(node_died),
@@ -229,7 +251,8 @@ impl SelectorTask {
     }
 }
 
-pub struct SelectorTaskHandle {
+/// Handle to [`SelectorTask`] to pass commands to it.
+pub(crate) struct SelectorTaskHandle {
     pub cluster: watch::Receiver<Cluster>,
     cancellation_token: CancellationToken,
     task_tracker: TaskTracker,

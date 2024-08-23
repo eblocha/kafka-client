@@ -40,14 +40,14 @@ pub enum KafkaConnectionError {
 pub type ResponseSender = oneshot::Sender<Result<DecodableResponse, io::Error>>;
 
 #[must_use]
-struct KafkaConnectionBackgroundTaskRunner<IO> {
+struct KafkaConnectionTask<IO> {
     io: IO,
     rx: mpsc::Receiver<(VersionedRequest, ResponseSender)>,
     cancellation_token: CancellationToken,
     config: KafkaConnectionConfig,
 }
 
-impl<IO> KafkaConnectionBackgroundTaskRunner<IO> {
+impl<IO> KafkaConnectionTask<IO> {
     async fn run(mut self)
     where
         IO: AsyncRead + AsyncWrite,
@@ -180,15 +180,16 @@ pub struct KafkaConnection {
 }
 
 impl KafkaConnection {
-    pub async fn connect<IO: AsyncRead + AsyncWrite + Send + 'static>(
+    /// Wrap an IO stream to use as the transport for a Kafka connection.
+    pub fn connect<IO: AsyncRead + AsyncWrite + Send + 'static>(
         io: IO,
         config: &KafkaConnectionConfig,
-    ) -> io::Result<Self> {
+    ) -> Self {
         let cancellation_token = CancellationToken::new();
 
         let (tx, rx) = mpsc::channel(config.send_buffer_size);
 
-        let task_runner = KafkaConnectionBackgroundTaskRunner {
+        let task_runner = KafkaConnectionTask {
             io,
             rx,
             config: config.clone(),
@@ -209,7 +210,7 @@ impl KafkaConnection {
             _cancel_on_drop: cancellation_token.drop_guard(),
         };
 
-        Ok(client)
+        client
     }
 
     /// Sends a request and returns a future to await the response
@@ -360,9 +361,7 @@ mod test {
             .read(&res_bytes)
             .build();
 
-        let conn = KafkaConnection::connect(io, &Default::default())
-            .await
-            .unwrap();
+        let conn = KafkaConnection::connect(io, &Default::default());
 
         let response =
             tokio::time::timeout(Duration::from_millis(500), conn.send(request, REQ_VERSION))
@@ -389,9 +388,7 @@ mod test {
             .read(&res_bytes_1)
             .build();
 
-        let conn = KafkaConnection::connect(io, &Default::default())
-            .await
-            .unwrap();
+        let conn = KafkaConnection::connect(io, &Default::default());
 
         let (response_1, response_2) = tokio::join!(
             conn.send(request_1, REQ_VERSION),
@@ -410,11 +407,7 @@ mod test {
 
         let io = tokio_test::io::Builder::new().write(&req_bytes).build();
 
-        let conn = Arc::new(
-            KafkaConnection::connect(io, &Default::default())
-                .await
-                .unwrap(),
-        );
+        let conn = Arc::new(KafkaConnection::connect(io, &Default::default()));
 
         let conn_copy = conn.clone();
 
@@ -439,11 +432,7 @@ mod test {
 
         let io = tokio_test::io::Builder::new().build();
 
-        let conn = Arc::new(
-            KafkaConnection::connect(io, &Default::default())
-                .await
-                .unwrap(),
-        );
+        let conn = Arc::new(KafkaConnection::connect(io, &Default::default()));
 
         conn.shutdown().await;
 

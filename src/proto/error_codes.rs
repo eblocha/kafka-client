@@ -1,3 +1,4 @@
+/// All Kafka error codes. See https://kafka.apache.org/protocol#protocol_error_codes
 #[non_exhaustive]
 #[allow(unused)]
 #[repr(i16)]

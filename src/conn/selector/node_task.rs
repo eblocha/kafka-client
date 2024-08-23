@@ -1,4 +1,3 @@
-use futures::TryFutureExt;
 use kafka_protocol::{
     messages::{ApiVersionsRequest, ApiVersionsResponse},
     protocol::{Message, StrBytes, VersionRange},
@@ -84,8 +83,7 @@ impl NodeTask {
             }
         }
 
-        let connect_fut = TcpStream::connect((self.host.0.as_ref(), self.host.1))
-            .and_then(|io| KafkaConnection::connect(io, &self.config));
+        let connect_fut = TcpStream::connect((self.host.0.as_ref(), self.host.1));
 
         let result = tokio::select! {
             biased;
@@ -95,7 +93,7 @@ impl NodeTask {
         };
 
         let conn = match result {
-            Ok(Ok(conn)) => conn,
+            Ok(Ok(conn)) => KafkaConnection::connect(conn, &self.config),
             Ok(Err(e)) => {
                 tracing::error!(
                     broker_id = self.broker_id,
@@ -201,11 +199,15 @@ pub struct NodeTaskHandle {
     ///
     /// Note that this may appear `true` when the connection closes unexpectedly, and the task has not yet been restarted.
     pub connected: Arc<AtomicBool>,
-    /// Token to stop the running task.
-    pub cancellation_token: CancellationToken,
+    /// Token to stop the running task. This is not exposed, because on the [`crate::conn::selector::SelectorTask`]
+    /// should stop the connection.
+    pub(super) cancellation_token: CancellationToken,
 }
 
 impl NodeTaskHandle {
+    /// Send a request to the broker and wait for a response.
+    ///
+    /// Note that this will wait across reconnect retry loops.
     pub async fn send<R: Sendable>(&self, req: R) -> Result<R::Response, KafkaConnectionError> {
         let (tx, rx) = oneshot::channel();
 
@@ -340,7 +342,15 @@ fn determine_version(response: &ApiVersionsResponse, api_key: i16, range: &Versi
 
     if intersection.is_empty() {
         // if the server doesn't support our range, choose the closest one and try anyways
-        return range.min;
+        return if broker_versions.max_version < range.min {
+            // |--broker--| |--client--|
+            //              ^
+            range.min
+        } else {
+            // |--client--| |--broker--|
+            //            ^
+            range.max
+        };
     }
 
     intersection.max

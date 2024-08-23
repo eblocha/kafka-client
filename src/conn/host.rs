@@ -3,7 +3,7 @@ use std::{fmt::Debug, sync::Arc};
 use kafka_protocol::messages::metadata_response::MetadataResponseBroker;
 use url::Url;
 
-/// A host:port pair for a Kafka broker
+/// A cheap-to-clone host:port pair for a Kafka broker
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BrokerHost(pub Arc<str>, pub u16);
 
@@ -37,6 +37,8 @@ impl TryFrom<&str> for BrokerHost {
 }
 
 /// Try to parse a slice of string-like items into a `Vec` of [`BrokerHost`].
+///
+/// Fails if any hosts are invalid.
 pub fn try_parse_hosts<S: AsRef<str>>(brokers: &[S]) -> Result<Vec<BrokerHost>, url::ParseError> {
     brokers
         .iter()

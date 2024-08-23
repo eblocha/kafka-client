@@ -6,6 +6,10 @@ use crate::conn::config::ConnectionManagerConfig;
 
 use super::selector::Cluster;
 
+/// Refreshes cluster metadata periodically, and exposes it as a [`watch::Sender`].
+///
+/// This also contains a [`watch::Receiver`] for the [`Cluster`], which provides connection handles over which to send
+/// the metadata requests.
 struct MetadataRefreshTask {
     rx: watch::Receiver<Cluster>,
     tx: watch::Sender<MetadataResponse>,
@@ -14,7 +18,7 @@ struct MetadataRefreshTask {
 }
 
 impl MetadataRefreshTask {
-    pub async fn run(mut self) {
+    async fn run(mut self) {
         let mut metadata_interval = tokio::time::interval(self.config.metadata_refresh_interval);
         metadata_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -63,6 +67,7 @@ impl MetadataRefreshTask {
     }
 }
 
+/// Handle to [`MetadataRefreshTask`].
 pub struct MetadataRefreshTaskHandle {
     pub rx: watch::Receiver<MetadataResponse>,
     cancellation_token: CancellationToken,
@@ -93,6 +98,7 @@ impl MetadataRefreshTaskHandle {
         }
     }
 
+    /// Stop refreshing metadata.
     pub async fn shutdown(&self) {
         self.task_tracker.close();
         self.cancellation_token.cancel();
