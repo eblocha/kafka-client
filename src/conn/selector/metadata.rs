@@ -22,7 +22,7 @@ impl MetadataRefreshTask {
         let mut metadata_interval = tokio::time::interval(self.config.interval);
         metadata_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        'outer: loop {
+        loop {
             tokio::select! {
                 _ = self.cancellation_token.cancelled() => return,
                 _ = metadata_interval.tick() => {},
@@ -58,7 +58,7 @@ impl MetadataRefreshTask {
                         tracing::info!(
                             "successfully updated metadata using broker {host_for_refresh:?}"
                         );
-                        break 'outer;
+                        break;
                     }
                     Err(e) => {
                         let backoff = exponential_backoff(

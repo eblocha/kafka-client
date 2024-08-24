@@ -202,15 +202,13 @@ impl KafkaConnection {
 
         task_tracker.close();
 
-        let client = Self {
+        Self {
             sender: tx,
             task_tracker,
             task_handle,
             cancellation_token: cancellation_token.clone(),
             _cancel_on_drop: cancellation_token.drop_guard(),
-        };
-
-        client
+        }
     }
 
     /// Sends a request and returns a future to await the response
