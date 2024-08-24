@@ -3,12 +3,14 @@ use kafka_protocol::{
     protocol::{Message, StrBytes, VersionRange},
 };
 use std::{
+    io,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
     time::Duration,
 };
+use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -18,12 +20,37 @@ use crate::{
         config::KafkaConnectionConfig,
         conn::{KafkaConnection, KafkaConnectionError, ResponseSender},
         host::BrokerHost,
-        PreparedConnectionInitError, Sendable, Versionable,
+        Sendable,
     },
-    proto::{error_codes::ErrorCode, request::KafkaRequest},
+    proto::{error_codes::ErrorCode, request::KafkaRequest, ver::Versionable},
 };
 
 use super::connect::Connect;
+
+/// Errors associated with establishing and preparing a Kafka connection.
+#[derive(Debug, Error)]
+pub enum ConnectionInitError {
+    /// Indicates an IO problem. This could be a bad socket or an encoding problem.
+    #[error(transparent)]
+    Io(#[from] io::Error),
+
+    /// The client has stopped processing requests
+    #[error("the connection is closed")]
+    Closed,
+
+    /// Failed to determine the API versions that the server supports.
+    #[error("version negotiation returned an error code: {0:?}")]
+    NegotiationFailed(ErrorCode),
+}
+
+impl From<KafkaConnectionError> for ConnectionInitError {
+    fn from(value: KafkaConnectionError) -> Self {
+        match value {
+            KafkaConnectionError::Io(e) => Self::Io(e),
+            KafkaConnectionError::Closed => Self::Closed,
+        }
+    }
+}
 
 pub struct NodeTaskMessage {
     request: KafkaRequest,
@@ -276,7 +303,7 @@ async fn negotiate(
     host: &BrokerHost,
     retries: u32,
     conn: &KafkaConnection,
-) -> Result<ApiVersionsResponse, PreparedConnectionInitError> {
+) -> Result<ApiVersionsResponse, ConnectionInitError> {
     tracing::debug!(
         broker_id = broker_id,
         host = ?host,
@@ -319,7 +346,7 @@ async fn negotiate(
         );
         Ok(api_versions_response)
     } else {
-        let e = PreparedConnectionInitError::NegotiationFailed(error_code);
+        let e = ConnectionInitError::NegotiationFailed(error_code);
         tracing::error!(
             broker_id = broker_id,
             host = ?host,

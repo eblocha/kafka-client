@@ -29,7 +29,7 @@ use kafka_protocol::{
 };
 use paste::paste;
 
-use crate::conn::Versionable;
+use crate::proto::ver::Versionable;
 
 macro_rules! requests {
     ($($name:ident),* $(,)?) => {
