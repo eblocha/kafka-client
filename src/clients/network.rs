@@ -19,7 +19,7 @@ impl NetworkClient {
     }
 
     pub async fn new_with_hosts(brokers: &[BrokerHost], config: ConnectionManagerConfig) -> Self {
-        let selector = SelectorTaskHandle::new(brokers, config).await;
+        let selector = SelectorTaskHandle::new_tcp(brokers, config).await;
 
         Self { selector }
     }

@@ -12,6 +12,7 @@ use crate::{
 };
 
 use super::{
+    connect::{Connect, Tcp},
     metadata::MetadataRefreshTaskHandle,
     node_task::{new_pair, NodeTask, NodeTaskHandle},
 };
@@ -72,7 +73,7 @@ impl BrokerMap {
 ///
 /// If a [`NodeTask`] panics, then pending requests for the broker will recieve a [`crate::conn::KafkaConnectionError::Closed`]
 /// error, and a new [`NodeTask`] and [`NodeTaskHandle`] pair will be created and spawned.
-struct SelectorTask {
+struct SelectorTask<Conn> {
     /// Mapping of broker id to its host
     hosts: BrokerMap,
     /// Shared global cluster state. Contains the latest metadata and mapping of broker id to connection
@@ -80,25 +81,27 @@ struct SelectorTask {
     /// Task handle for metadata refreshes
     metadata_task_handle: MetadataRefreshTaskHandle,
     /// Join set for running connection tasks. Used to detect failed connections
-    join_set: JoinSet<NodeTask>,
+    join_set: JoinSet<NodeTask<Conn>>,
     /// Configuration settings
     config: ConnectionManagerConfig,
     /// Cancellation signal
     cancellation_token: CancellationToken,
+    /// Used to create new tcp streams
+    connect: Conn,
 }
 
-enum Event {
+enum Event<Conn> {
     /// Metadata changed, so re-configure connections. This is also invoked when a [`NodeTask`]
     /// panics or is aborted, because we no longer have access to the original channel in that case.
     Refresh,
     /// A node stopped. Note this doesn't necessarily indicate that it should be running.
     /// The [`SelectorTask`] will restart it if it points to a valid broker in the cluster.
-    NodeDied(NodeTask),
+    NodeDied(NodeTask<Conn>),
     /// Stop all connections and shut down
     Shutdown,
 }
 
-impl SelectorTask {
+impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
     async fn run(mut self) {
         loop {
             let event = tokio::select! {
@@ -242,6 +245,7 @@ impl SelectorTask {
             host.clone(),
             self.config.conn.retry.connection_timeout,
             self.config.conn.io.clone(),
+            self.connect.clone(),
         );
 
         self.join_set.spawn(task.run());
@@ -258,7 +262,22 @@ pub(crate) struct SelectorTaskHandle {
 }
 
 impl SelectorTaskHandle {
-    pub async fn new(bootstrap: &[BrokerHost], config: ConnectionManagerConfig) -> Self {
+    /// Create a new selector task handle using TCP without TLS.
+    pub async fn new_tcp(bootstrap: &[BrokerHost], config: ConnectionManagerConfig) -> Self {
+        Self::new_with_connect(bootstrap, config, Tcp { nodelay: true }).await
+    }
+
+    pub async fn shutdown(&self) {
+        self.task_tracker.close();
+        self.cancellation_token.cancel();
+        self.task_tracker.wait().await;
+    }
+
+    async fn new_with_connect<Conn: Connect + Clone + Send + 'static>(
+        bootstrap: &[BrokerHost],
+        config: ConnectionManagerConfig,
+        connect: Conn,
+    ) -> Self {
         let mut hosts: BrokerMap = Default::default();
         let mut join_set = JoinSet::new();
 
@@ -268,6 +287,7 @@ impl SelectorTaskHandle {
                 host.clone(),
                 config.conn.retry.connection_timeout,
                 config.conn.io.clone(),
+                connect.clone(),
             );
 
             join_set.spawn(task.run());
@@ -295,6 +315,7 @@ impl SelectorTaskHandle {
             join_set,
             config,
             cancellation_token: cancellation_token.clone(),
+            connect,
         };
 
         task_tracker.spawn(selector_task.run());
@@ -307,11 +328,5 @@ impl SelectorTaskHandle {
             cancellation_token,
             task_tracker,
         }
-    }
-
-    pub async fn shutdown(&self) {
-        self.task_tracker.close();
-        self.cancellation_token.cancel();
-        self.task_tracker.wait().await;
     }
 }

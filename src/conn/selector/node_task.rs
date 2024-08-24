@@ -9,10 +9,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{
-    net::TcpStream,
-    sync::{mpsc, oneshot},
-};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -26,6 +23,8 @@ use crate::{
     proto::{error_codes::ErrorCode, request::KafkaRequest},
 };
 
+use super::connect::Connect;
+
 pub struct NodeTaskMessage {
     request: KafkaRequest,
     tx: ResponseSender,
@@ -35,7 +34,7 @@ pub struct NodeTaskMessage {
 ///
 /// Contains a receiver that forwards requests to the connection.
 #[derive(Debug)]
-pub struct NodeTask {
+pub struct NodeTask<Conn> {
     /// The broker id this node is assigned to
     pub broker_id: i32,
     /// Host this task is connecting to
@@ -56,9 +55,11 @@ pub struct NodeTask {
     pub delay: Option<Duration>,
     /// This node has acquired a connection
     pub connected: Arc<AtomicBool>,
+    /// Creates the new IO stream
+    connect: Conn,
 }
 
-impl NodeTask {
+impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
     /// Attempts to connect after the specified delay, then starts accepting messages and forwarding to the Kafka stream.
     ///
     /// If the kafka stream has any problems, this will return `Self` to enable reuse of the message channel in a new
@@ -81,7 +82,7 @@ impl NodeTask {
             }
         }
 
-        let connect_fut = TcpStream::connect((self.host.0.as_ref(), self.host.1));
+        let connect_fut = self.connect.connect(&self.host);
 
         let result = tokio::select! {
             biased;
@@ -91,13 +92,7 @@ impl NodeTask {
         };
 
         let conn = match result {
-            Ok(Ok(conn)) => {
-                if let Err(err) = conn.set_nodelay(true) {
-                    tracing::warn!("failed to set TCP_NODELAY on stream: {err:?}");
-                }
-
-                KafkaConnection::connect(conn, &self.config)
-            }
+            Ok(Ok(conn)) => KafkaConnection::connect(conn, &self.config),
             Ok(Err(e)) => {
                 tracing::error!(
                     broker_id = self.broker_id,
@@ -237,12 +232,13 @@ impl NodeTaskHandle {
 /// if the original task aborted or panicked, and the message channel was lost.
 ///
 /// It does _not_ spawn the task, that must be handled by the selector task in a join set.
-pub fn new_pair(
+pub fn new_pair<Conn>(
     broker_id: i32,
     host: BrokerHost,
     connection_timeout: Duration,
     config: KafkaConnectionConfig,
-) -> (NodeTaskHandle, NodeTask) {
+    connect: Conn,
+) -> (NodeTaskHandle, NodeTask<Conn>) {
     let (tx, rx) = mpsc::channel(config.send_buffer_size);
 
     let handle = NodeTaskHandle {
@@ -262,6 +258,7 @@ pub fn new_pair(
         retries: 0,
         delay: None,
         connected: handle.connected.clone(),
+        connect,
     };
 
     (handle, task)
