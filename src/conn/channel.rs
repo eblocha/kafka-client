@@ -153,10 +153,15 @@ impl<IO> KafkaChannelTask<IO> {
                                 record,
                                 frame: frame.frame,
                             }));
+                        } else {
+                            tracing::warn!(
+                                correlation_id = frame.id.0,
+                                "read a frame that does not map to any pending request"
+                            );
                         }
                     }
                     Some(Err(e)) => {
-                        tracing::error!("got an error from the io stream {:?}", e);
+                        tracing::error!("got an error from the io stream {e:?}");
                         for (_, (_, sender)) in in_flight {
                             let _ = sender.send(Err(e.kind().into()));
                         }

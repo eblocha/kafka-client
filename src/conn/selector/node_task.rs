@@ -387,3 +387,15 @@ fn determine_version(response: &ApiVersionsResponse, api_key: i16, range: &Versi
 
     intersection.max
 }
+
+#[cfg(test)]
+mod test {
+    // TODO tests
+    // it should wait for the delay before connecting
+    // it should exit when failing to connect
+    // it should time out the connection
+    // it should negotiate versions
+    //  it should try api version request v0 if highest version fails
+    // it should exit if version negotiation fails
+    // it should retry the last request if the connection closes
+}
