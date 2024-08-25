@@ -255,6 +255,17 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
 }
 
 /// Handle to [`SelectorTask`] to pass commands to it.
+///
+/// The selector manages connections to each broker in the cluster.
+///
+/// The cluster state is exposed as a `watch` channel, which contains a mapping of broker id to a handle to send
+/// requests to the broker.
+///
+/// This handle can queue requests for the broker even if the connection is not yet connected. It will also ensure that
+/// queued requests will be sent to the specific broker by id, rather than host. If the cluster configuration changes
+/// when the request is queued, it will remain queued and be sent to the new host for the broker. If the new cluster
+/// config does not contain the broker id, the request will be dropped and the sender will receive an error indicating
+/// the connection is closed.
 pub(crate) struct SelectorTaskHandle {
     pub cluster: watch::Receiver<Cluster>,
     cancellation_token: CancellationToken,
