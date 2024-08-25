@@ -2,7 +2,7 @@ use crate::conn::{
     config::ConnectionManagerConfig,
     host::{try_parse_hosts, BrokerHost},
     selector::{Cluster, SelectorTaskHandle},
-    KafkaConnectionError, Sendable,
+    KafkaChannelError, Sendable,
 };
 
 /// Maintains connections to the entire cluster, and forwards requests to the appropriate broker.
@@ -24,7 +24,7 @@ impl NetworkClient {
         Self { selector }
     }
 
-    pub async fn send<R: Sendable>(&self, req: R) -> Result<R::Response, KafkaConnectionError> {
+    pub async fn send<R: Sendable>(&self, req: R) -> Result<R::Response, KafkaChannelError> {
         let Some((_, handle)) = self
             .selector
             .cluster
@@ -32,7 +32,7 @@ impl NetworkClient {
             .broker_channels
             .get_best_connection()
         else {
-            return Err(KafkaConnectionError::Closed);
+            return Err(KafkaChannelError::Closed);
         };
 
         handle.send(req).await
@@ -42,11 +42,11 @@ impl NetworkClient {
         &self,
         req: R,
         broker_id: i32,
-    ) -> Result<R::Response, KafkaConnectionError> {
+    ) -> Result<R::Response, KafkaChannelError> {
         let cluster = self.selector.cluster.borrow();
         let Some((_, handle)) = cluster.broker_channels.0.get(&broker_id) else {
             tracing::error!("no broker handle for id {broker_id}");
-            return Err(KafkaConnectionError::Closed);
+            return Err(KafkaChannelError::Closed);
         };
 
         handle.clone().send(req).await

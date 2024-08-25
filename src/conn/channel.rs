@@ -8,7 +8,6 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::{mpsc, oneshot},
-    task::JoinHandle,
 };
 use tokio_util::{
     codec::Framed,
@@ -27,7 +26,7 @@ use super::{
 };
 
 #[derive(Debug, Error)]
-pub enum KafkaConnectionError {
+pub enum KafkaChannelError {
     /// Indicates an IO problem. This could be a bad socket or an encoding problem.
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -39,15 +38,21 @@ pub enum KafkaConnectionError {
 
 pub type ResponseSender = oneshot::Sender<Result<DecodableResponse, io::Error>>;
 
+#[derive(Debug)]
+pub struct KafkaChannelMessage {
+    pub versioned: VersionedRequest,
+    pub tx: ResponseSender,
+}
+
 #[must_use]
-struct KafkaConnectionTask<IO> {
+struct KafkaChannelTask<IO> {
     io: IO,
-    rx: mpsc::Receiver<(VersionedRequest, ResponseSender)>,
+    rx: mpsc::Receiver<KafkaChannelMessage>,
     cancellation_token: CancellationToken,
     config: KafkaConnectionConfig,
 }
 
-impl<IO> KafkaConnectionTask<IO> {
+impl<IO> KafkaChannelTask<IO> {
     async fn run(mut self)
     where
         IO: AsyncRead + AsyncWrite,
@@ -77,19 +82,19 @@ impl<IO> KafkaConnectionTask<IO> {
                     0 => break,
                     _ => {
                         tracing::trace!("sending {} frame(s)", request_buffer.len());
-                        for (req, sender) in request_buffer.drain(..) {
+                        for message in request_buffer.drain(..) {
                             let id = CorrelationId(correlation_id);
 
-                            let api_key = req.request.as_api_key();
+                            let api_key = message.versioned.request.as_api_key();
 
                             let record = RequestRecord {
-                                api_version: req.api_version,
+                                api_version: message.versioned.api_version,
                                 response_header_version: api_key
-                                    .response_header_version(req.api_version),
+                                    .response_header_version(message.versioned.api_version),
                             };
 
                             let encodable = EncodableRequest::from_versioned(
-                                req,
+                                message.versioned,
                                 id,
                                 self.config.client_id.clone(),
                             );
@@ -103,7 +108,7 @@ impl<IO> KafkaConnectionTask<IO> {
                                         api_key = ?api_key,
                                         "io sink fed frame",
                                     );
-                                    sender_batch.push((id, sender, record))
+                                    sender_batch.push((id, message.tx, record))
                                 }
                                 Err(e) => {
                                     tracing::trace!(
@@ -112,7 +117,7 @@ impl<IO> KafkaConnectionTask<IO> {
                                         "io sink failed to feed frame: {:?}",
                                         e
                                     );
-                                    let _ = sender.send(Err(e));
+                                    let _ = message.tx.send(Err(e));
                                 }
                             }
 
@@ -171,15 +176,14 @@ impl<IO> KafkaConnectionTask<IO> {
 /// This connection supports multiplexed async io.
 /// The connection will be closed on drop.
 #[derive(Debug)]
-pub struct KafkaConnection {
-    sender: mpsc::Sender<(VersionedRequest, ResponseSender)>,
+pub struct KafkaChannel {
+    sender: mpsc::Sender<KafkaChannelMessage>,
     task_tracker: TaskTracker,
-    task_handle: JoinHandle<()>,
     cancellation_token: CancellationToken,
     _cancel_on_drop: DropGuard,
 }
 
-impl KafkaConnection {
+impl KafkaChannel {
     /// Wrap an IO stream to use as the transport for a Kafka connection.
     pub fn connect<IO: AsyncRead + AsyncWrite + Send + 'static>(
         io: IO,
@@ -189,7 +193,7 @@ impl KafkaConnection {
 
         let (tx, rx) = mpsc::channel(config.send_buffer_size);
 
-        let task_runner = KafkaConnectionTask {
+        let task_runner = KafkaChannelTask {
             io,
             rx,
             config: config.clone(),
@@ -198,14 +202,11 @@ impl KafkaConnection {
 
         let task_tracker = TaskTracker::new();
 
-        let task_handle = task_tracker.spawn(task_runner.run());
-
-        task_tracker.close();
+        task_tracker.spawn(task_runner.run());
 
         Self {
             sender: tx,
             task_tracker,
-            task_handle,
             cancellation_token: cancellation_token.clone(),
             _cancel_on_drop: cancellation_token.drop_guard(),
         }
@@ -216,7 +217,7 @@ impl KafkaConnection {
         &self,
         req: R,
         api_version: i16,
-    ) -> Result<R::Response, KafkaConnectionError> {
+    ) -> Result<R::Response, KafkaChannelError> {
         let (tx, rx) = oneshot::channel();
 
         let versioned = VersionedRequest {
@@ -225,18 +226,18 @@ impl KafkaConnection {
         };
 
         self.sender
-            .send((versioned, tx))
+            .send(KafkaChannelMessage { versioned, tx })
             .await
-            .map_err(|_| KafkaConnectionError::Closed)?;
+            .map_err(|_| KafkaChannelError::Closed)?;
 
         // error happens when the client dropped our sender before sending anything.
-        let response = rx.await.map_err(|_| KafkaConnectionError::Closed)??;
+        let response = rx.await.map_err(|_| KafkaChannelError::Closed)??;
 
         Ok(R::decode(response)?)
     }
 
     /// Obtain a new Sender to send and receive messages
-    pub fn sender(&self) -> &mpsc::Sender<(VersionedRequest, ResponseSender)> {
+    pub fn sender(&self) -> &mpsc::Sender<KafkaChannelMessage> {
         &self.sender
     }
 
@@ -245,17 +246,18 @@ impl KafkaConnection {
     /// Returns a future that can be awaited to wait for shutdown to complete.
     pub fn shutdown(&self) -> impl Future<Output = ()> + '_ {
         self.cancellation_token.cancel();
+        self.task_tracker.close();
         self.task_tracker.wait()
     }
 
     /// Returns true if the connection is closed and will no longer process requests
     pub fn is_closed(&self) -> bool {
-        self.task_handle.is_finished()
+        self.sender.is_closed()
     }
 
     /// Waits until the connection is closed
     pub fn closed(&self) -> impl Future<Output = ()> + '_ {
-        self.task_tracker.wait()
+        self.sender.closed()
     }
 
     /// Returns the number of empty slots in the connection's send buffer
@@ -359,7 +361,7 @@ mod test {
             .read(&res_bytes)
             .build();
 
-        let conn = KafkaConnection::connect(io, &Default::default());
+        let conn = KafkaChannel::connect(io, &Default::default());
 
         let response =
             tokio::time::timeout(Duration::from_millis(500), conn.send(request, REQ_VERSION))
@@ -386,7 +388,7 @@ mod test {
             .read(&res_bytes_1)
             .build();
 
-        let conn = KafkaConnection::connect(io, &Default::default());
+        let conn = KafkaChannel::connect(io, &Default::default());
 
         let (response_1, response_2) = tokio::join!(
             conn.send(request_1, REQ_VERSION),
@@ -405,7 +407,7 @@ mod test {
 
         let io = tokio_test::io::Builder::new().write(&req_bytes).build();
 
-        let conn = Arc::new(KafkaConnection::connect(io, &Default::default()));
+        let conn = Arc::new(KafkaChannel::connect(io, &Default::default()));
 
         let conn_copy = conn.clone();
 
@@ -419,7 +421,7 @@ mod test {
         assert_err!(&response);
 
         match response.unwrap_err() {
-            KafkaConnectionError::Closed => {}
+            KafkaChannelError::Closed => {}
             e => panic!("expected closed error but got {e:?}"),
         };
     }
@@ -430,7 +432,7 @@ mod test {
 
         let io = tokio_test::io::Builder::new().build();
 
-        let conn = Arc::new(KafkaConnection::connect(io, &Default::default()));
+        let conn = Arc::new(KafkaChannel::connect(io, &Default::default()));
 
         conn.shutdown().await;
 
@@ -439,7 +441,7 @@ mod test {
         assert_err!(&response);
 
         match response.unwrap_err() {
-            KafkaConnectionError::Closed => {}
+            KafkaChannelError::Closed => {}
             e => panic!("expected closed error but got {e:?}"),
         };
     }

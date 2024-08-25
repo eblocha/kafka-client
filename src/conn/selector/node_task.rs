@@ -16,9 +16,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     conn::{
+        channel::{KafkaChannel, KafkaChannelError, KafkaChannelMessage, ResponseSender},
         codec::VersionedRequest,
         config::KafkaConnectionConfig,
-        conn::{KafkaConnection, KafkaConnectionError, ResponseSender},
         host::BrokerHost,
         Sendable,
     },
@@ -43,11 +43,11 @@ pub enum ConnectionInitError {
     NegotiationFailed(ErrorCode),
 }
 
-impl From<KafkaConnectionError> for ConnectionInitError {
-    fn from(value: KafkaConnectionError) -> Self {
+impl From<KafkaChannelError> for ConnectionInitError {
+    fn from(value: KafkaChannelError) -> Self {
         match value {
-            KafkaConnectionError::Io(e) => Self::Io(e),
-            KafkaConnectionError::Closed => Self::Closed,
+            KafkaChannelError::Io(e) => Self::Io(e),
+            KafkaChannelError::Closed => Self::Closed,
         }
     }
 }
@@ -69,7 +69,7 @@ pub struct NodeTask<Conn> {
     /// Message receiver
     pub rx: mpsc::Receiver<NodeTaskMessage>,
     /// The last message attempted which could not be sent
-    pub last_message: Option<(VersionedRequest, ResponseSender)>,
+    pub last_message: Option<KafkaChannelMessage>,
     /// Token to stop the task
     pub cancellation_token: CancellationToken,
     /// Options for the io stream
@@ -119,7 +119,7 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
         };
 
         let conn = match result {
-            Ok(Ok(conn)) => KafkaConnection::connect(conn, &self.config),
+            Ok(Ok(conn)) => KafkaChannel::connect(conn, &self.config),
             Ok(Err(e)) => {
                 tracing::error!(
                     broker_id = self.broker_id,
@@ -150,7 +150,7 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
 
         // try to send the last message sent if it failed
         if let Some(last_message) = self.last_message.take() {
-            if !last_message.1.is_closed() {
+            if !last_message.tx.is_closed() {
                 if let Err(err) = conn.sender().send(last_message).await {
                     tracing::error!(
                         broker_id = self.broker_id,
@@ -194,7 +194,11 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
                 continue;
             }
 
-            if let Err(err) = conn.sender().send((versioned, tx)).await {
+            if let Err(err) = conn
+                .sender()
+                .send(KafkaChannelMessage { versioned, tx })
+                .await
+            {
                 tracing::error!(
                     broker_id = self.broker_id,
                     host = ?self.host,
@@ -234,7 +238,7 @@ impl NodeTaskHandle {
     /// Send a request to the broker and wait for a response.
     ///
     /// Note that this will wait across reconnect retry loops.
-    pub async fn send<R: Sendable>(&self, req: R) -> Result<R::Response, KafkaConnectionError> {
+    pub async fn send<R: Sendable>(&self, req: R) -> Result<R::Response, KafkaChannelError> {
         let (tx, rx) = oneshot::channel();
 
         let msg = NodeTaskMessage {
@@ -245,9 +249,9 @@ impl NodeTaskHandle {
         self.tx
             .send(msg)
             .await
-            .map_err(|_| KafkaConnectionError::Closed)?;
+            .map_err(|_| KafkaChannelError::Closed)?;
 
-        let response = rx.await.map_err(|_| KafkaConnectionError::Closed)??;
+        let response = rx.await.map_err(|_| KafkaChannelError::Closed)??;
 
         Ok(R::decode(response)?)
     }
@@ -302,7 +306,7 @@ async fn negotiate(
     broker_id: i32,
     host: &BrokerHost,
     retries: u32,
-    conn: &KafkaConnection,
+    conn: &KafkaChannel,
 ) -> Result<ApiVersionsResponse, ConnectionInitError> {
     tracing::debug!(
         broker_id = broker_id,
