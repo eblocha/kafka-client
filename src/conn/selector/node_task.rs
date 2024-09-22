@@ -1,11 +1,15 @@
 use arc_swap::ArcSwapOption;
+use derive_more::derive::From;
 use kafka_protocol::{
     messages::{ApiVersionsRequest, ApiVersionsResponse},
     protocol::{Message, StrBytes, VersionRange},
 };
 use std::{io, sync::Arc};
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::error::Elapsed,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -38,9 +42,26 @@ pub enum ConnectionInitError {
     NegotiationFailed(ErrorCode),
 }
 
+#[derive(Debug, From)]
 enum ConnectAttemptError {
+    /// The node task was cancelled before a connection was established
     Cancelled,
-    Failed,
+    /// Timed out while waiting to connect
+    Timeout,
+    /// Initialization error
+    Init(#[from] ConnectionInitError),
+}
+
+impl From<Elapsed> for ConnectAttemptError {
+    fn from(_: Elapsed) -> Self {
+        Self::Timeout
+    }
+}
+
+impl From<io::Error> for ConnectAttemptError {
+    fn from(value: io::Error) -> Self {
+        Self::Init(value.into())
+    }
 }
 
 impl From<KafkaChannelError> for ConnectionInitError {
@@ -57,6 +78,7 @@ pub struct NodeTaskMessage {
     tx: ResponseSender,
 }
 
+/// A connection with versioning information
 #[derive(Debug)]
 pub struct VersionedConnection {
     connection: KafkaChannel,
@@ -133,29 +155,9 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
             result = tokio::time::timeout(self.config.retry.connection_timeout, connect_fut) => result,
         };
 
-        let conn = match result {
-            Ok(Ok(conn)) => KafkaChannel::connect(conn, &self.config.io),
-            Ok(Err(e)) => {
-                tracing::error!(
-                    broker_id = self.broker_id,
-                    host = ?self.host,
-                    "failed to connect: {e:?}",
-                );
-                return Err(ConnectAttemptError::Failed);
-            }
-            Err(_) => {
-                tracing::error!(
-                    broker_id = self.broker_id,
-                    host = ?self.host,
-                    "connection timed out",
-                );
-                return Err(ConnectAttemptError::Failed);
-            }
-        };
+        let conn = KafkaChannel::connect(result??, &self.config.io);
 
-        let Ok(versions) = negotiate(self.broker_id, &self.host, &conn).await else {
-            return Err(ConnectAttemptError::Failed);
-        };
+        let versions = negotiate(self.broker_id, &self.host, &conn).await?;
 
         // TODO authenticate
 
@@ -185,18 +187,35 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
                 retries = attempt,
                 "connecting to broker"
             );
-
-            match self.try_connect().await {
+            let backoff = match self.try_connect().await {
                 Ok(conn) => break conn,
                 Err(ConnectAttemptError::Cancelled) => return None,
-                Err(ConnectAttemptError::Failed) => {}
-            }
+                Err(e) => {
+                    let (min, max) = (self.config.retry.min_backoff, self.config.retry.max_backoff);
+                    let backoff = exponential_backoff(min, max, attempt);
 
-            let (min, max) = (self.config.retry.min_backoff, self.config.retry.max_backoff);
+                    macro_rules! log_err {
+                        ($($msg:tt)*) => {
+                            tracing::error!(
+                                broker_id = self.broker_id,
+                                host = ?self.host,
+                                retries = attempt,
+                                backoff = ?backoff,
+                                $($msg)*,
+                            )
+                        };
+                    }
 
-            let backoff = exponential_backoff(min, max, attempt);
+                    match e {
+                        ConnectAttemptError::Cancelled => unreachable!(),
+                        ConnectAttemptError::Timeout => log_err!("connection timed out"),
+                        ConnectAttemptError::Init(e) => log_err!("failed to connect: {e:?}"),
+                    }
 
-            // back off
+                    backoff
+                }
+            };
+
             tokio::select! {
                 biased;
                 _ = self.cancellation_token.cancelled() => return None,
