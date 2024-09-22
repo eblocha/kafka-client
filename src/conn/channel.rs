@@ -30,6 +30,10 @@ pub enum KafkaChannelError {
     /// The client has stopped processing requests
     #[error("the connection is closed")]
     Closed,
+
+    /// The broker's version range does not intersect with the client
+    #[error("version mismatch")]
+    Version,
 }
 
 pub type ResponseSender = oneshot::Sender<Result<DecodableResponse, io::Error>>;

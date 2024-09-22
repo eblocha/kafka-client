@@ -4,7 +4,10 @@ use kafka_protocol::messages::MetadataResponse;
 use tokio::{sync::watch, task::JoinSet};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::conn::{config::ConnectionManagerConfig, host::BrokerHost};
+use crate::conn::{
+    config::{ConnectionManagerConfig, ConnectionRetryConfig},
+    host::BrokerHost,
+};
 
 use super::{
     connect::{Connect, Tcp},
@@ -77,8 +80,8 @@ struct SelectorTask<Conn> {
     metadata_task_handle: MetadataRefreshTaskHandle,
     /// Join set for running connection tasks. Used to detect failed connections
     join_set: JoinSet<NodeTask<Conn>>,
-    /// Configuration settings
-    config: ConnectionManagerConfig,
+    /// Configuration settings for retries
+    retry_config: ConnectionRetryConfig,
     /// Cancellation signal
     cancellation_token: CancellationToken,
     /// Used to create new tcp streams
@@ -224,7 +227,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         let (handle, task) = new_pair(
             broker_id,
             host.clone(),
-            self.config.conn.clone(),
+            self.retry_config.clone(),
             self.connect.clone(),
         );
 
@@ -284,7 +287,7 @@ impl SelectorTaskHandle {
             let (handle, task) = new_pair(
                 id as i32,
                 host.clone(),
-                config.conn.clone(),
+                config.conn.retry.clone(),
                 connect.clone(),
             );
 
@@ -311,7 +314,7 @@ impl SelectorTaskHandle {
             tx: cluster_tx,
             metadata_task_handle,
             join_set,
-            config,
+            retry_config: config.conn.retry,
             cancellation_token: cancellation_token.clone(),
             connect,
         };

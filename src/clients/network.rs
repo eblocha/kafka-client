@@ -1,8 +1,11 @@
-use crate::conn::{
-    config::ConnectionManagerConfig,
-    host::{try_parse_hosts, BrokerHost},
-    selector::{Cluster, SelectorTaskHandle},
-    KafkaChannelError, Sendable,
+use crate::{
+    conn::{
+        config::ConnectionManagerConfig,
+        host::{try_parse_hosts, BrokerHost},
+        selector::{Cluster, SelectorTaskHandle},
+        KafkaChannelError, Sendable,
+    },
+    proto::ver::{FromVersionRange, GetApiKey},
 };
 
 /// Maintains connections to the entire cluster, and forwards requests to the appropriate broker.
@@ -24,7 +27,10 @@ impl NetworkClient {
         Self { selector }
     }
 
-    pub async fn send<R: Sendable>(&self, req: R) -> Result<R::Response, KafkaChannelError> {
+    pub async fn send<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
+        &self,
+        req: F,
+    ) -> Result<R::Response, KafkaChannelError> {
         let Some((_, handle)) = self
             .selector
             .cluster
@@ -38,9 +44,9 @@ impl NetworkClient {
         handle.send(req).await
     }
 
-    pub async fn send_to<R: Sendable>(
+    pub async fn send_to<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
         &self,
-        req: R,
+        req: F,
         broker_id: i32,
     ) -> Result<R::Response, KafkaChannelError> {
         let cluster = self.selector.cluster.borrow();

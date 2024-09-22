@@ -29,7 +29,7 @@ use kafka_protocol::{
 };
 use paste::paste;
 
-use crate::proto::ver::Versionable;
+use crate::proto::ver::{GetApiKey, Versionable};
 
 macro_rules! requests {
     ($($name:ident),* $(,)?) => {
@@ -60,10 +60,6 @@ macro_rules! requests {
             }
 
             impl Versionable for KafkaRequest {
-                fn key(&self) -> i16 {
-                    self.as_api_key() as i16
-                }
-
                 fn versions(&self) -> ::kafka_protocol::protocol::VersionRange {
                     match self {
                         $(Self::$name(_) => [<$name Request>]::VERSIONS,)*
@@ -150,3 +146,9 @@ requests!(
     Vote,
     WriteTxnMarkers,
 );
+
+impl GetApiKey for KafkaRequest {
+    fn key(&self) -> i16 {
+        self.as_api_key() as i16
+    }
+}

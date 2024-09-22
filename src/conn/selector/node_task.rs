@@ -15,13 +15,15 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     backoff::exponential_backoff,
     conn::{
-        channel::{send_on, KafkaChannelError, KafkaChannelMessage, ResponseSender},
-        codec::VersionedRequest,
-        config::{ConnectionConfig, ConnectionRetryConfig},
+        channel::{send_on, KafkaChannelError, KafkaChannelMessage},
+        config::ConnectionRetryConfig,
         host::BrokerHost,
         Sendable,
     },
-    proto::{error_codes::ErrorCode, request::KafkaRequest, ver::Versionable},
+    proto::{
+        error_codes::ErrorCode,
+        ver::{FromVersionRange, GetApiKey},
+    },
 };
 
 use super::connect::Connect;
@@ -40,6 +42,10 @@ pub enum ConnectionInitError {
     /// Failed to determine the API versions that the server supports.
     #[error("version negotiation returned an error code: {0:?}")]
     NegotiationFailed(ErrorCode),
+
+    /// The broker's version range does not intersect with the client
+    #[error("version mismatch")]
+    Version,
 }
 
 #[derive(Debug, From)]
@@ -69,13 +75,13 @@ impl From<KafkaChannelError> for ConnectionInitError {
         match value {
             KafkaChannelError::Io(e) => Self::Io(e),
             KafkaChannelError::Closed => Self::Closed,
+            KafkaChannelError::Version => Self::Version,
         }
     }
 }
 
 pub struct NodeTaskMessage {
-    request: KafkaRequest,
-    tx: ResponseSender,
+    tx: oneshot::Sender<Arc<VersionedConnection>>,
 }
 
 /// A connection with versioning information
@@ -86,8 +92,6 @@ pub struct VersionedConnection {
 }
 
 /// A connection task to a broker.
-///
-/// Contains a receiver that forwards requests to the connection.
 #[derive(Debug)]
 pub struct NodeTask<Conn> {
     /// The broker id this node is assigned to
@@ -98,8 +102,8 @@ pub struct NodeTask<Conn> {
     pub rx: mpsc::Receiver<NodeTaskMessage>,
     /// Token to stop the task
     pub cancellation_token: CancellationToken,
-    /// Options for the io stream
-    pub config: ConnectionRetryConfig,
+    /// Options for connection retries
+    pub retry_config: ConnectionRetryConfig,
     // The kafka channel with version information.
     // This will be None if no connection has ever been established.
     pub connection: Arc<ArcSwapOption<VersionedConnection>>,
@@ -114,7 +118,7 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
     /// connection.
     pub async fn run(mut self) -> Self {
         loop {
-            let NodeTaskMessage { request, tx } = tokio::select! {
+            let NodeTaskMessage { tx } = tokio::select! {
                 biased;
                 _ = self.cancellation_token.cancelled() => return self,
                 Some(msg) = self.rx.recv() => msg,
@@ -125,23 +129,7 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
                 return self;
             };
 
-            let api_key = request.key();
-            let range = request.versions();
-
-            let versioned = VersionedRequest {
-                request,
-                api_version: determine_version(&conn.versions, api_key, &range),
-            };
-
-            if tx.is_closed() {
-                // the request was abandoned - no need to send it
-                continue;
-            }
-
-            _ = conn
-                .connection
-                .send(KafkaChannelMessage { versioned, tx })
-                .await;
+            let _ = tx.send(conn);
         }
     }
 
@@ -151,7 +139,7 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
         let result = tokio::select! {
             biased;
             _ = self.cancellation_token.cancelled() => return Err(ConnectAttemptError::Cancelled),
-            result = tokio::time::timeout(self.config.connection_timeout, connect_fut) => result,
+            result = tokio::time::timeout(self.retry_config.connection_timeout, connect_fut) => result,
         };
 
         let conn = result??;
@@ -190,7 +178,7 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
                 Ok(conn) => break conn,
                 Err(ConnectAttemptError::Cancelled) => return None,
                 Err(e) => {
-                    let (min, max) = (self.config.min_backoff, self.config.max_backoff);
+                    let (min, max) = (self.retry_config.min_backoff, self.retry_config.max_backoff);
                     let backoff = exponential_backoff(min, max, attempt);
 
                     macro_rules! log_err {
@@ -255,22 +243,37 @@ impl NodeTaskHandle {
     /// Send a request to the broker and wait for a response.
     ///
     /// Note that this will wait across reconnect retry loops.
-    pub async fn send<R: Sendable>(&self, req: R) -> Result<R::Response, KafkaChannelError> {
+    pub async fn send<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
+        &self,
+        req: F,
+    ) -> Result<R::Response, KafkaChannelError> {
         let (tx, rx) = oneshot::channel();
 
-        let msg = NodeTaskMessage {
-            request: req.into(),
-            tx,
-        };
+        let msg = NodeTaskMessage { tx };
 
         self.tx
             .send(msg)
             .await
             .map_err(|_| KafkaChannelError::Closed)?;
 
-        let response = rx.await.map_err(|_| KafkaChannelError::Closed)??;
+        let conn = rx.await.map_err(|_| KafkaChannelError::Closed)?;
 
-        Ok(R::decode(response)?)
+        let api_key = req.key();
+
+        let Some(broker_versions) = conn.versions.api_keys.get(&api_key) else {
+            return Err(KafkaChannelError::Version);
+        };
+
+        let broker_range = VersionRange {
+            min: broker_versions.min_version,
+            max: broker_versions.max_version,
+        };
+
+        let Some((req, version)) = req.from_version_range(broker_range) else {
+            return Err(KafkaChannelError::Version);
+        };
+
+        send_on(&conn.connection, req, version).await
     }
 
     /// Determine if this node has an open connection to the host.
@@ -291,10 +294,11 @@ impl NodeTaskHandle {
 pub fn new_pair<Conn>(
     broker_id: i32,
     host: BrokerHost,
-    config: ConnectionConfig,
+    retry_config: ConnectionRetryConfig,
     connect: Conn,
 ) -> (NodeTaskHandle, NodeTask<Conn>) {
-    let (tx, rx) = mpsc::channel(config.io.send_buffer_size);
+    // We only need 1 slot because we are just waiting for a shared connection, not sending messages.
+    let (tx, rx) = mpsc::channel(1);
 
     let connection = Arc::new(ArcSwapOption::empty());
 
@@ -309,7 +313,7 @@ pub fn new_pair<Conn>(
         host,
         rx,
         cancellation_token: handle.cancellation_token.clone(),
-        config: config.retry,
+        retry_config,
         connection: handle.connection.clone(),
         connect,
     };
@@ -377,33 +381,6 @@ async fn negotiate(
         );
         Err(e)
     }
-}
-
-fn determine_version(response: &ApiVersionsResponse, api_key: i16, range: &VersionRange) -> i16 {
-    let Some(broker_versions) = response.api_keys.get(&api_key) else {
-        // if the server doesn't recognize the request, try sending anyways with the max version
-        return range.max;
-    };
-
-    let intersection = range.intersect(&VersionRange {
-        min: broker_versions.min_version,
-        max: broker_versions.max_version,
-    });
-
-    if intersection.is_empty() {
-        // if the server doesn't support our range, choose the closest one and try anyways
-        return if broker_versions.max_version < range.min {
-            // |--broker--| |--client--|
-            //              ^
-            range.min
-        } else {
-            // |--client--| |--broker--|
-            //            ^
-            range.max
-        };
-    }
-
-    intersection.max
 }
 
 #[cfg(test)]
