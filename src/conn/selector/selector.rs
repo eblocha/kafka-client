@@ -6,10 +6,7 @@ use kafka_protocol::messages::MetadataResponse;
 use tokio::{sync::watch, task::JoinSet};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::{
-    backoff::exponential_backoff,
-    conn::{config::ConnectionManagerConfig, host::BrokerHost},
-};
+use crate::conn::{config::ConnectionManagerConfig, host::BrokerHost};
 
 use super::{
     connect::{Connect, Tcp},
@@ -140,25 +137,6 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                         dead_task.cancellation_token = cancellation_token.clone();
                         handle.cancellation_token = cancellation_token;
 
-                        // restart it with the host it should be connected to.
-                        if dead_task.connected.fetch_and(false, Ordering::SeqCst)
-                            || dead_task.host != host
-                        {
-                            // remove delay if it was connected or changed hosts
-                            dead_task.retries = 0;
-                            dead_task.delay = None;
-                        } else {
-                            let (min, max) = (
-                                self.config.conn.retry.min_backoff,
-                                self.config.conn.retry.max_backoff,
-                            );
-
-                            let backoff = exponential_backoff(min, max, dead_task.retries);
-
-                            dead_task.retries += 1;
-                            dead_task.delay = Some(backoff);
-                        }
-
                         dead_task.host = host.clone();
 
                         self.hosts.0.insert(dead_task.broker_id, (host, handle));
@@ -243,8 +221,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         let (handle, task) = new_pair(
             broker_id,
             host.clone(),
-            self.config.conn.retry.connection_timeout,
-            self.config.conn.io.clone(),
+            self.config.conn.clone(),
             self.connect.clone(),
         );
 
@@ -296,8 +273,7 @@ impl SelectorTaskHandle {
             let (handle, task) = new_pair(
                 id as i32,
                 host.clone(),
-                config.conn.retry.connection_timeout,
-                config.conn.io.clone(),
+                config.conn.clone(),
                 connect.clone(),
             );
 

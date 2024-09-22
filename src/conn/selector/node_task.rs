@@ -15,10 +15,11 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    backoff::exponential_backoff,
     conn::{
         channel::{KafkaChannel, KafkaChannelError, KafkaChannelMessage, ResponseSender},
         codec::VersionedRequest,
-        config::KafkaConnectionConfig,
+        config::ConnectionConfig,
         host::BrokerHost,
         Sendable,
     },
@@ -41,6 +42,11 @@ pub enum ConnectionInitError {
     /// Failed to determine the API versions that the server supports.
     #[error("version negotiation returned an error code: {0:?}")]
     NegotiationFailed(ErrorCode),
+}
+
+enum ConnectAttemptError {
+    Cancelled,
+    Failed,
 }
 
 impl From<KafkaChannelError> for ConnectionInitError {
@@ -73,13 +79,7 @@ pub struct NodeTask<Conn> {
     /// Token to stop the task
     pub cancellation_token: CancellationToken,
     /// Options for the io stream
-    pub config: KafkaConnectionConfig,
-    /// Timeout to establish a connection before exiting
-    pub connection_timeout: Duration,
-    /// Attempt count marker to compute next backoff
-    pub retries: u32,
-    /// Delay before attempting to connect
-    pub delay: Option<Duration>,
+    pub config: ConnectionConfig,
     /// This node has acquired a connection
     pub connected: Arc<AtomicBool>,
     /// Creates the new IO stream
@@ -92,61 +92,24 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
     /// If the kafka stream has any problems, this will return `Self` to enable reuse of the message channel in a new
     /// connection.
     pub async fn run(mut self) -> Self {
-        tracing::debug!(
-            broker_id = self.broker_id,
-            host = ?self.host,
-            retries = self.retries,
-            backoff = ?self.delay,
-            "connecting to broker"
-        );
+        let mut attempt = 0;
+        let (conn, versions) = loop {
+            let (min, max) = (self.config.retry.min_backoff, self.config.retry.max_backoff);
 
-        if let Some(delay) = self.delay {
-            // back off
-            tokio::select! {
-                biased;
-                _ = self.cancellation_token.cancelled() => return self,
-                _ = tokio::time::sleep(delay) => {}
-            }
-        }
+            let backoff = if attempt == 0 {
+                None
+            } else {
+                Some(exponential_backoff(min, max, attempt))
+            };
 
-        let connect_fut = self.connect.connect(&self.host);
-
-        let result = tokio::select! {
-            biased;
-            _ = self.cancellation_token.cancelled() => return self,
-            result = tokio::time::timeout(self.connection_timeout, connect_fut) => result,
-            else => return self
-        };
-
-        let conn = match result {
-            Ok(Ok(conn)) => KafkaChannel::connect(conn, &self.config),
-            Ok(Err(e)) => {
-                tracing::error!(
-                    broker_id = self.broker_id,
-                    host = ?self.host,
-                    retries = self.retries,
-                    "failed to connect: {e:?}",
-                );
-                return self;
-            }
-            Err(_) => {
-                tracing::error!(
-                    broker_id = self.broker_id,
-                    host = ?self.host,
-                    retries = self.retries,
-                    "connection timed out",
-                );
-                return self;
+            match self.try_connect(backoff, attempt).await {
+                Ok(conn) => break conn,
+                Err(ConnectAttemptError::Cancelled) => return self,
+                Err(ConnectAttemptError::Failed) => {
+                    attempt += 1;
+                }
             }
         };
-
-        let Ok(versions) = negotiate(self.broker_id, &self.host, self.retries, &conn).await else {
-            return self;
-        };
-
-        // TODO authenticate
-
-        self.connected.store(true, Ordering::SeqCst);
 
         // try to send the last message sent if it failed
         if let Some(last_message) = self.last_message.take() {
@@ -155,7 +118,6 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
                     tracing::error!(
                         broker_id = self.broker_id,
                         host = ?self.host,
-                        retries = self.retries,
                         "failed to re-send last sent message"
                     );
                     // if we're here, the connection we just created is already closed.
@@ -173,7 +135,6 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
                     tracing::error!(
                         broker_id = self.broker_id,
                         host = ?self.host,
-                        retries = self.retries,
                         "connection closed unexpectedly"
                     );
                     return self;
@@ -202,13 +163,75 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
                 tracing::error!(
                     broker_id = self.broker_id,
                     host = ?self.host,
-                    retries = self.retries,
                     "connection closed unexpectedly, storing last sent message"
                 );
                 self.last_message = Some(err.0);
                 return self;
             }
         }
+    }
+
+    async fn try_connect(
+        &mut self,
+        delay: Option<Duration>,
+        retries: u32,
+    ) -> Result<(KafkaChannel, ApiVersionsResponse), ConnectAttemptError> {
+        tracing::debug!(
+            broker_id = self.broker_id,
+            host = ?self.host,
+            retries = retries,
+            backoff = ?delay,
+            "connecting to broker"
+        );
+
+        if let Some(delay) = delay {
+            // back off
+            tokio::select! {
+                biased;
+                _ = self.cancellation_token.cancelled() => return Err(ConnectAttemptError::Cancelled),
+                _ = tokio::time::sleep(delay) => {}
+            }
+        }
+
+        let connect_fut = self.connect.connect(&self.host);
+
+        let result = tokio::select! {
+            biased;
+            _ = self.cancellation_token.cancelled() => return Err(ConnectAttemptError::Cancelled),
+            result = tokio::time::timeout(self.config.retry.connection_timeout, connect_fut) => result,
+        };
+
+        let conn = match result {
+            Ok(Ok(conn)) => KafkaChannel::connect(conn, &self.config.io),
+            Ok(Err(e)) => {
+                tracing::error!(
+                    broker_id = self.broker_id,
+                    host = ?self.host,
+                    retries = retries,
+                    "failed to connect: {e:?}",
+                );
+                return Err(ConnectAttemptError::Failed);
+            }
+            Err(_) => {
+                tracing::error!(
+                    broker_id = self.broker_id,
+                    host = ?self.host,
+                    retries = retries,
+                    "connection timed out",
+                );
+                return Err(ConnectAttemptError::Failed);
+            }
+        };
+
+        let Ok(versions) = negotiate(self.broker_id, &self.host, retries, &conn).await else {
+            return Err(ConnectAttemptError::Failed);
+        };
+
+        // TODO authenticate
+
+        self.connected.store(true, Ordering::SeqCst);
+
+        Ok((conn, versions))
     }
 }
 
@@ -266,11 +289,10 @@ impl NodeTaskHandle {
 pub fn new_pair<Conn>(
     broker_id: i32,
     host: BrokerHost,
-    connection_timeout: Duration,
-    config: KafkaConnectionConfig,
+    config: ConnectionConfig,
     connect: Conn,
 ) -> (NodeTaskHandle, NodeTask<Conn>) {
-    let (tx, rx) = mpsc::channel(config.send_buffer_size);
+    let (tx, rx) = mpsc::channel(config.io.send_buffer_size);
 
     let handle = NodeTaskHandle {
         cancellation_token: CancellationToken::new(),
@@ -285,9 +307,6 @@ pub fn new_pair<Conn>(
         last_message: None,
         cancellation_token: handle.cancellation_token.clone(),
         config,
-        connection_timeout,
-        retries: 0,
-        delay: None,
         connected: handle.connected.clone(),
         connect,
     };
