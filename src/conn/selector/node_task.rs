@@ -3,7 +3,7 @@ use kafka_protocol::{
     messages::{ApiVersionsRequest, ApiVersionsResponse},
     protocol::{Message, StrBytes, VersionRange},
 };
-use std::{io, sync::Arc, time::Duration};
+use std::{io, sync::Arc};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -124,28 +124,7 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
         }
     }
 
-    async fn try_connect(
-        &mut self,
-        delay: Option<Duration>,
-        retries: u32,
-    ) -> Result<VersionedConnection, ConnectAttemptError> {
-        tracing::debug!(
-            broker_id = self.broker_id,
-            host = ?self.host,
-            retries = retries,
-            backoff = ?delay,
-            "connecting to broker"
-        );
-
-        if let Some(delay) = delay {
-            // back off
-            tokio::select! {
-                biased;
-                _ = self.cancellation_token.cancelled() => return Err(ConnectAttemptError::Cancelled),
-                _ = tokio::time::sleep(delay) => {}
-            }
-        }
-
+    async fn try_connect(&mut self) -> Result<VersionedConnection, ConnectAttemptError> {
         let connect_fut = self.connect.connect(&self.host);
 
         let result = tokio::select! {
@@ -160,7 +139,6 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
                 tracing::error!(
                     broker_id = self.broker_id,
                     host = ?self.host,
-                    retries = retries,
                     "failed to connect: {e:?}",
                 );
                 return Err(ConnectAttemptError::Failed);
@@ -169,14 +147,13 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
                 tracing::error!(
                     broker_id = self.broker_id,
                     host = ?self.host,
-                    retries = retries,
                     "connection timed out",
                 );
                 return Err(ConnectAttemptError::Failed);
             }
         };
 
-        let Ok(versions) = negotiate(self.broker_id, &self.host, retries, &conn).await else {
+        let Ok(versions) = negotiate(self.broker_id, &self.host, &conn).await else {
             return Err(ConnectAttemptError::Failed);
         };
 
@@ -202,21 +179,31 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
         let mut attempt = 0;
 
         let conn = loop {
-            let (min, max) = (self.config.retry.min_backoff, self.config.retry.max_backoff);
+            tracing::debug!(
+                broker_id = self.broker_id,
+                host = ?self.host,
+                retries = attempt,
+                "connecting to broker"
+            );
 
-            let backoff = if attempt == 0 {
-                None
-            } else {
-                Some(exponential_backoff(min, max, attempt - 1))
-            };
-
-            match self.try_connect(backoff, attempt).await {
+            match self.try_connect().await {
                 Ok(conn) => break conn,
                 Err(ConnectAttemptError::Cancelled) => return None,
-                Err(ConnectAttemptError::Failed) => {
-                    attempt += 1;
-                }
+                Err(ConnectAttemptError::Failed) => {}
             }
+
+            let (min, max) = (self.config.retry.min_backoff, self.config.retry.max_backoff);
+
+            let backoff = exponential_backoff(min, max, attempt);
+
+            // back off
+            tokio::select! {
+                biased;
+                _ = self.cancellation_token.cancelled() => return None,
+                _ = tokio::time::sleep(backoff) => {}
+            }
+
+            attempt += 1;
         };
 
         let conn_arc = Arc::new(conn);
@@ -322,13 +309,11 @@ fn create_version_request() -> ApiVersionsRequest {
 async fn negotiate(
     broker_id: i32,
     host: &BrokerHost,
-    retries: u32,
     conn: &KafkaChannel,
 ) -> Result<ApiVersionsResponse, ConnectionInitError> {
     tracing::debug!(
         broker_id = broker_id,
         host = ?host,
-        retries = retries,
         "negotiating api versions"
     );
 
@@ -344,7 +329,6 @@ async fn negotiate(
             tracing::debug!(
                 broker_id = broker_id,
                 host = ?host,
-                retries = retries,
                 "latest api versions request version is unsupported, falling back to version 0"
             );
             conn.send(
@@ -362,7 +346,6 @@ async fn negotiate(
         tracing::debug!(
             broker_id = broker_id,
             host = ?host,
-            retries = retries,
             "version negotiation completed successfully"
         );
         Ok(api_versions_response)
@@ -371,7 +354,6 @@ async fn negotiate(
         tracing::error!(
             broker_id = broker_id,
             host = ?host,
-            retries = retries,
             "{e}"
         );
         Err(e)
