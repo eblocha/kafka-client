@@ -92,6 +92,8 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
     /// If the kafka stream has any problems, this will return `Self` to enable reuse of the message channel in a new
     /// connection.
     pub async fn run(mut self) -> Self {
+        self.connected.store(false, Ordering::SeqCst);
+
         let mut attempt = 0;
         let (conn, versions) = loop {
             let (min, max) = (self.config.retry.min_backoff, self.config.retry.max_backoff);
