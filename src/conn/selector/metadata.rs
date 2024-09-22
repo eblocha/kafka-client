@@ -2,7 +2,9 @@ use kafka_protocol::messages::{MetadataRequest, MetadataResponse};
 use tokio::sync::watch;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::{backoff::exponential_backoff, conn::config::MetadataRefreshConfig};
+use crate::{
+    backoff::exponential_backoff, conn::config::MetadataRefreshConfig, proto::ver::with_max_version,
+};
 
 use super::selector::Cluster;
 
@@ -15,6 +17,25 @@ struct MetadataRefreshTask {
     tx: watch::Sender<MetadataResponse>,
     cancellation_token: CancellationToken,
     config: MetadataRefreshConfig,
+}
+
+fn create_metadata_request(version: i16) -> Option<MetadataRequest> {
+    let mut r = MetadataRequest::default();
+
+    if version >= 4 {
+        r.allow_auto_topic_creation = false;
+    }
+
+    if version >= 8 {
+        if version <= 10 {
+            r.include_cluster_authorized_operations = true;
+        }
+
+        r.include_topic_authorized_operations = true;
+    }
+
+    r.topics = None;
+    Some(r)
 }
 
 impl MetadataRefreshTask {
@@ -40,14 +61,9 @@ impl MetadataRefreshTask {
 
                 tracing::info!(broker = ?host_for_refresh, "attempting to refresh metadata");
 
-                let request = {
-                    let mut r = MetadataRequest::default();
-                    r.allow_auto_topic_creation = false;
-                    r.topics = None;
-                    r
-                };
-
-                let metadata = handle_for_refresh.send(request).await;
+                let metadata = handle_for_refresh
+                    .send(with_max_version(create_metadata_request))
+                    .await;
 
                 match metadata {
                     Ok(metadata) => {

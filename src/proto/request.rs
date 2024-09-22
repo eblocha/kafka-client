@@ -25,11 +25,11 @@ use kafka_protocol::{
         UnregisterBrokerRequest, UpdateFeaturesRequest, UpdateMetadataRequest, VoteRequest,
         WriteTxnMarkersRequest,
     },
-    protocol::{buf::ByteBufMut, Encodable, Message},
+    protocol::{buf::ByteBufMut, Encodable, Message, VersionRange},
 };
 use paste::paste;
 
-use crate::proto::ver::{GetApiKey, Versionable};
+use crate::proto::ver::{max_intersecting_version, FromVersionRange, GetApiKey, Versionable};
 
 macro_rules! requests {
     ($($name:ident),* $(,)?) => {
@@ -66,6 +66,25 @@ macro_rules! requests {
                     }
                 }
             }
+
+            $(
+                impl FromVersionRange for [<$name Request>] {
+                    type Req = Self;
+
+                    fn from_version_range(self, range: VersionRange) -> Option<(Self::Req, i16)> {
+                        let ver = max_intersecting_version(&[<$name Request>]::VERSIONS, &range)?;
+                        Some((self, ver))
+                    }
+                }
+            )*
+
+            $(
+                impl GetApiKey for [<$name Request>] {
+                    fn key(&self) -> i16 {
+                        ApiKey::[<$name Key>] as i16
+                    }
+                }
+            )*
         }
     };
 }
@@ -150,5 +169,14 @@ requests!(
 impl GetApiKey for KafkaRequest {
     fn key(&self) -> i16 {
         self.as_api_key() as i16
+    }
+}
+
+impl FromVersionRange for KafkaRequest {
+    type Req = Self;
+
+    fn from_version_range(self, range: VersionRange) -> Option<(Self::Req, i16)> {
+        let ver = max_intersecting_version(&self.versions(), &range)?;
+        Some((self, ver))
     }
 }
