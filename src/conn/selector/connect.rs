@@ -1,32 +1,33 @@
 use std::{future::Future, io, sync::Arc};
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    net::TcpStream,
-};
+use tokio::{net::TcpStream, sync::mpsc};
 
-use crate::conn::host::BrokerHost;
+use crate::conn::{
+    channel::{KafkaChannel, KafkaChannelMessage},
+    config::KafkaConnectionConfig,
+    host::BrokerHost,
+};
 
 /// Creates a new async stream for the connection to a broker.
 pub trait Connect {
-    type IO: AsyncRead + AsyncWrite + Send + 'static;
-
     fn connect(
         &self,
         host: &BrokerHost,
-    ) -> impl Future<Output = Result<Self::IO, io::Error>> + Send;
+    ) -> impl Future<Output = Result<mpsc::Sender<KafkaChannelMessage>, io::Error>> + Send;
 }
 
 /// [`Connect`] for creating a non-TLS [`TcpStream`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Tcp {
     /// Setting for `TCP_NODELAY`
     pub nodelay: bool,
+    pub config: KafkaConnectionConfig,
 }
 
 impl Connect for Tcp {
-    type IO = TcpStream;
-
-    async fn connect(&self, host: &BrokerHost) -> Result<Self::IO, io::Error> {
+    async fn connect(
+        &self,
+        host: &BrokerHost,
+    ) -> Result<mpsc::Sender<KafkaChannelMessage>, io::Error> {
         let conn = TcpStream::connect((host.0.as_ref(), host.1)).await?;
 
         if let Err(err) = conn.set_nodelay(self.nodelay) {
@@ -34,19 +35,17 @@ impl Connect for Tcp {
                 "failed to set TCP_NODELAY={} on stream: {err:?}",
                 self.nodelay
             );
-        }
+        };
 
-        Ok(conn)
+        Ok(KafkaChannel::connect(conn, &self.config).sender().clone())
     }
 }
 
 impl<C: Connect> Connect for Arc<C> {
-    type IO = C::IO;
-
     fn connect(
         &self,
         host: &BrokerHost,
-    ) -> impl Future<Output = Result<Self::IO, io::Error>> + Send {
+    ) -> impl Future<Output = Result<mpsc::Sender<KafkaChannelMessage>, io::Error>> + Send {
         self.as_ref().connect(host)
     }
 }

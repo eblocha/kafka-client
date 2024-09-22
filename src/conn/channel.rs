@@ -9,11 +9,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::{mpsc, oneshot},
 };
-use tokio_util::{
-    codec::Framed,
-    sync::{CancellationToken, DropGuard},
-    task::TaskTracker,
-};
+use tokio_util::{codec::Framed, sync::CancellationToken, task::TaskTracker};
 
 use crate::conn::codec::sendable::RequestRecord;
 
@@ -180,12 +176,11 @@ impl<IO> KafkaChannelTask<IO> {
 ///
 /// This connection supports multiplexed async io.
 /// The connection will be closed on drop.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct KafkaChannel {
     sender: mpsc::Sender<KafkaChannelMessage>,
     task_tracker: TaskTracker,
     cancellation_token: CancellationToken,
-    _cancel_on_drop: DropGuard,
 }
 
 impl KafkaChannel {
@@ -213,7 +208,6 @@ impl KafkaChannel {
             sender: tx,
             task_tracker,
             cancellation_token: cancellation_token.clone(),
-            _cancel_on_drop: cancellation_token.drop_guard(),
         }
     }
 
@@ -223,22 +217,7 @@ impl KafkaChannel {
         req: R,
         api_version: i16,
     ) -> Result<R::Response, KafkaChannelError> {
-        let (tx, rx) = oneshot::channel();
-
-        let versioned = VersionedRequest {
-            api_version,
-            request: req.into(),
-        };
-
-        self.sender
-            .send(KafkaChannelMessage { versioned, tx })
-            .await
-            .map_err(|_| KafkaChannelError::Closed)?;
-
-        // error happens when the client dropped our sender before sending anything.
-        let response = rx.await.map_err(|_| KafkaChannelError::Closed)??;
-
-        Ok(R::decode(response)?)
+        send_on(&self.sender, req, api_version).await
     }
 
     /// Obtain a new Sender to send and receive messages
@@ -254,26 +233,30 @@ impl KafkaChannel {
         self.task_tracker.close();
         self.task_tracker.wait()
     }
+}
 
-    /// Returns true if the connection is closed and will no longer process requests
-    pub fn is_closed(&self) -> bool {
-        self.sender.is_closed()
-    }
+/// Send a message on the provided channel and await the response.
+pub async fn send_on<R: Sendable>(
+    sender: &mpsc::Sender<KafkaChannelMessage>,
+    req: R,
+    api_version: i16,
+) -> Result<R::Response, KafkaChannelError> {
+    let (tx, rx) = oneshot::channel();
 
-    /// Waits until the connection is closed
-    pub fn closed(&self) -> impl Future<Output = ()> + '_ {
-        self.sender.closed()
-    }
+    let versioned = VersionedRequest {
+        api_version,
+        request: req.into(),
+    };
 
-    /// Returns the number of empty slots in the connection's send buffer
-    pub fn capacity(&self) -> usize {
-        self.sender.capacity()
-    }
+    sender
+        .send(KafkaChannelMessage { versioned, tx })
+        .await
+        .map_err(|_| KafkaChannelError::Closed)?;
 
-    /// Returns the maximum number of slots in the connection's send buffer
-    pub fn max_capacity(&self) -> usize {
-        self.sender.max_capacity()
-    }
+    // error happens when the client dropped our sender before sending anything.
+    let response = rx.await.map_err(|_| KafkaChannelError::Closed)??;
+
+    Ok(R::decode(response)?)
 }
 
 #[cfg(test)]

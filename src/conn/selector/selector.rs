@@ -255,7 +255,15 @@ pub(crate) struct SelectorTaskHandle {
 impl SelectorTaskHandle {
     /// Create a new selector task handle using TCP without TLS.
     pub async fn new_tcp(bootstrap: &[BrokerHost], config: ConnectionManagerConfig) -> Self {
-        Self::new_with_connect(bootstrap, config, Tcp { nodelay: true }).await
+        Self::new_with_connect(
+            bootstrap,
+            config.clone(),
+            Tcp {
+                nodelay: true,
+                config: config.conn.io,
+            },
+        )
+        .await
     }
 
     pub async fn shutdown(&self) {

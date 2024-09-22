@@ -15,9 +15,9 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     backoff::exponential_backoff,
     conn::{
-        channel::{KafkaChannel, KafkaChannelError, KafkaChannelMessage, ResponseSender},
+        channel::{send_on, KafkaChannelError, KafkaChannelMessage, ResponseSender},
         codec::VersionedRequest,
-        config::ConnectionConfig,
+        config::{ConnectionConfig, ConnectionRetryConfig},
         host::BrokerHost,
         Sendable,
     },
@@ -81,7 +81,7 @@ pub struct NodeTaskMessage {
 /// A connection with versioning information
 #[derive(Debug)]
 pub struct VersionedConnection {
-    connection: KafkaChannel,
+    connection: mpsc::Sender<KafkaChannelMessage>,
     versions: ApiVersionsResponse,
 }
 
@@ -99,7 +99,7 @@ pub struct NodeTask<Conn> {
     /// Token to stop the task
     pub cancellation_token: CancellationToken,
     /// Options for the io stream
-    pub config: ConnectionConfig,
+    pub config: ConnectionRetryConfig,
     // The kafka channel with version information.
     // This will be None if no connection has ever been established.
     pub connection: Arc<ArcSwapOption<VersionedConnection>>,
@@ -140,7 +140,6 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
 
             _ = conn
                 .connection
-                .sender()
                 .send(KafkaChannelMessage { versioned, tx })
                 .await;
         }
@@ -152,17 +151,17 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
         let result = tokio::select! {
             biased;
             _ = self.cancellation_token.cancelled() => return Err(ConnectAttemptError::Cancelled),
-            result = tokio::time::timeout(self.config.retry.connection_timeout, connect_fut) => result,
+            result = tokio::time::timeout(self.config.connection_timeout, connect_fut) => result,
         };
 
-        let conn = KafkaChannel::connect(result??, &self.config.io);
+        let conn = result??;
 
         let versions = negotiate(self.broker_id, &self.host, &conn).await?;
 
         // TODO authenticate
 
         Ok(VersionedConnection {
-            connection: conn,
+            connection: conn.clone(),
             versions,
         })
     }
@@ -191,7 +190,7 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
                 Ok(conn) => break conn,
                 Err(ConnectAttemptError::Cancelled) => return None,
                 Err(e) => {
-                    let (min, max) = (self.config.retry.min_backoff, self.config.retry.max_backoff);
+                    let (min, max) = (self.config.min_backoff, self.config.max_backoff);
                     let backoff = exponential_backoff(min, max, attempt);
 
                     macro_rules! log_err {
@@ -310,7 +309,7 @@ pub fn new_pair<Conn>(
         host,
         rx,
         cancellation_token: handle.cancellation_token.clone(),
-        config,
+        config: config.retry,
         connection: handle.connection.clone(),
         connect,
     };
@@ -328,7 +327,7 @@ fn create_version_request() -> ApiVersionsRequest {
 async fn negotiate(
     broker_id: i32,
     host: &BrokerHost,
-    conn: &KafkaChannel,
+    conn: &mpsc::Sender<KafkaChannelMessage>,
 ) -> Result<ApiVersionsResponse, ConnectionInitError> {
     tracing::debug!(
         broker_id = broker_id,
@@ -336,12 +335,12 @@ async fn negotiate(
         "negotiating api versions"
     );
 
-    let api_versions_response = conn
-        .send(
-            create_version_request(),
-            <ApiVersionsRequest as Message>::VERSIONS.max,
-        )
-        .await?;
+    let api_versions_response = send_on(
+        conn,
+        create_version_request(),
+        <ApiVersionsRequest as Message>::VERSIONS.max,
+    )
+    .await?;
 
     let api_versions_response =
         if api_versions_response.error_code == ErrorCode::UnsupportedVersion as i16 {
@@ -350,7 +349,8 @@ async fn negotiate(
                 host = ?host,
                 "latest api versions request version is unsupported, falling back to version 0"
             );
-            conn.send(
+            send_on(
+                conn,
                 create_version_request(),
                 <ApiVersionsRequest as Message>::VERSIONS.min,
             )
