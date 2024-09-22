@@ -8,6 +8,7 @@ description = "A kafka client"
 
 [dependencies]
 anyhow = "1.0.86"
+arc-swap = "1.7.1"
 bytes = "1.7.1"
 clap = { version = "4.5.15", features = ["derive"] }
 crossbeam = "0.8.4"

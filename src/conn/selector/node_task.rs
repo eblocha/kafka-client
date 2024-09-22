@@ -1,15 +1,9 @@
+use arc_swap::ArcSwapOption;
 use kafka_protocol::{
     messages::{ApiVersionsRequest, ApiVersionsResponse},
     protocol::{Message, StrBytes, VersionRange},
 };
-use std::{
-    io,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::{io, sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -63,6 +57,12 @@ pub struct NodeTaskMessage {
     tx: ResponseSender,
 }
 
+#[derive(Debug)]
+pub struct VersionedConnection {
+    connection: KafkaChannel,
+    versions: ApiVersionsResponse,
+}
+
 /// A connection task to a broker.
 ///
 /// Contains a receiver that forwards requests to the connection.
@@ -74,14 +74,13 @@ pub struct NodeTask<Conn> {
     pub host: BrokerHost,
     /// Message receiver
     pub rx: mpsc::Receiver<NodeTaskMessage>,
-    /// The last message attempted which could not be sent
-    pub last_message: Option<KafkaChannelMessage>,
     /// Token to stop the task
     pub cancellation_token: CancellationToken,
     /// Options for the io stream
     pub config: ConnectionConfig,
-    /// This node has acquired a connection
-    pub connected: Arc<AtomicBool>,
+    // The kafka channel with version information.
+    // This will be None if no connection has ever been established.
+    pub connection: Arc<ArcSwapOption<VersionedConnection>>,
     /// Creates the new IO stream
     connect: Conn,
 }
@@ -92,57 +91,16 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
     /// If the kafka stream has any problems, this will return `Self` to enable reuse of the message channel in a new
     /// connection.
     pub async fn run(mut self) -> Self {
-        self.connected.store(false, Ordering::SeqCst);
-
-        let mut attempt = 0;
-        let (conn, versions) = loop {
-            let (min, max) = (self.config.retry.min_backoff, self.config.retry.max_backoff);
-
-            let backoff = if attempt == 0 {
-                None
-            } else {
-                Some(exponential_backoff(min, max, attempt))
-            };
-
-            match self.try_connect(backoff, attempt).await {
-                Ok(conn) => break conn,
-                Err(ConnectAttemptError::Cancelled) => return self,
-                Err(ConnectAttemptError::Failed) => {
-                    attempt += 1;
-                }
-            }
-        };
-
-        // try to send the last message sent if it failed
-        if let Some(last_message) = self.last_message.take() {
-            if !last_message.tx.is_closed() {
-                if let Err(err) = conn.sender().send(last_message).await {
-                    tracing::error!(
-                        broker_id = self.broker_id,
-                        host = ?self.host,
-                        "failed to re-send last sent message"
-                    );
-                    // if we're here, the connection we just created is already closed.
-                    self.last_message = Some(err.0);
-                    return self;
-                }
-            }
-        }
-
         loop {
             let NodeTaskMessage { request, tx } = tokio::select! {
                 biased;
                 _ = self.cancellation_token.cancelled() => return self,
-                _ = conn.closed() => {
-                    tracing::error!(
-                        broker_id = self.broker_id,
-                        host = ?self.host,
-                        "connection closed unexpectedly"
-                    );
-                    return self;
-                },
                 Some(msg) = self.rx.recv() => msg,
                 else => return self
+            };
+
+            let Some(conn) = self.get_connection().await else {
+                return self;
             };
 
             let api_key = request.key();
@@ -150,26 +108,19 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
 
             let versioned = VersionedRequest {
                 request,
-                api_version: determine_version(&versions, api_key, &range),
+                api_version: determine_version(&conn.versions, api_key, &range),
             };
 
             if tx.is_closed() {
+                // the request was abandoned - no need to send it
                 continue;
             }
 
-            if let Err(err) = conn
+            _ = conn
+                .connection
                 .sender()
                 .send(KafkaChannelMessage { versioned, tx })
-                .await
-            {
-                tracing::error!(
-                    broker_id = self.broker_id,
-                    host = ?self.host,
-                    "connection closed unexpectedly, storing last sent message"
-                );
-                self.last_message = Some(err.0);
-                return self;
-            }
+                .await;
         }
     }
 
@@ -177,7 +128,7 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
         &mut self,
         delay: Option<Duration>,
         retries: u32,
-    ) -> Result<(KafkaChannel, ApiVersionsResponse), ConnectAttemptError> {
+    ) -> Result<VersionedConnection, ConnectAttemptError> {
         tracing::debug!(
             broker_id = self.broker_id,
             host = ?self.host,
@@ -231,9 +182,48 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
 
         // TODO authenticate
 
-        self.connected.store(true, Ordering::SeqCst);
+        Ok(VersionedConnection {
+            connection: conn,
+            versions,
+        })
+    }
 
-        Ok((conn, versions))
+    async fn get_connection(&mut self) -> Option<Arc<VersionedConnection>> {
+        if let Some(conn) = self
+            .connection
+            .load()
+            .as_ref()
+            .filter(|conn| !conn.connection.is_closed())
+        {
+            return Some(conn.clone());
+        }
+
+        // create a new connection to the broker
+        let mut attempt = 0;
+
+        let conn = loop {
+            let (min, max) = (self.config.retry.min_backoff, self.config.retry.max_backoff);
+
+            let backoff = if attempt == 0 {
+                None
+            } else {
+                Some(exponential_backoff(min, max, attempt - 1))
+            };
+
+            match self.try_connect(backoff, attempt).await {
+                Ok(conn) => break conn,
+                Err(ConnectAttemptError::Cancelled) => return None,
+                Err(ConnectAttemptError::Failed) => {
+                    attempt += 1;
+                }
+            }
+        };
+
+        let conn_arc = Arc::new(conn);
+
+        self.connection.store(Some(conn_arc.clone()));
+
+        Some(conn_arc)
     }
 }
 
@@ -244,16 +234,13 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
 /// retries and reconnects.
 ///
 /// If a broker moves hosts, this channel will be maintained across that host change.
-///
-/// It will also re-send the last message after a reconnect if the connection was closed when it was last attempted.
 #[derive(Debug, Clone)]
 pub struct NodeTaskHandle {
     /// Transmitter to send messages to the underlying connection
     pub tx: mpsc::Sender<NodeTaskMessage>,
-    /// Atomic to determine if this node is _likely_ connected.
-    ///
-    /// Note that this may appear `true` when the connection closes unexpectedly, and the task has not yet been restarted.
-    pub connected: Arc<AtomicBool>,
+    // The kafka channel with version information.
+    // This will be None if no connection has ever been established.
+    pub connection: Arc<ArcSwapOption<VersionedConnection>>,
     /// Token to stop the running task. This is not exposed, because on the [`crate::conn::selector::SelectorTask`]
     /// should stop the connection.
     pub(super) cancellation_token: CancellationToken,
@@ -280,6 +267,14 @@ impl NodeTaskHandle {
 
         Ok(R::decode(response)?)
     }
+
+    /// Determine if this node has an open connection to the host.
+    pub fn is_connected(&self) -> bool {
+        self.connection
+            .load()
+            .as_ref()
+            .is_some_and(|conn| !conn.connection.is_closed())
+    }
 }
 
 /// Create a new [`NodeTaskHandle`] and [`NodeTask`] pair.
@@ -296,9 +291,11 @@ pub fn new_pair<Conn>(
 ) -> (NodeTaskHandle, NodeTask<Conn>) {
     let (tx, rx) = mpsc::channel(config.io.send_buffer_size);
 
+    let connection = Arc::new(ArcSwapOption::empty());
+
     let handle = NodeTaskHandle {
         cancellation_token: CancellationToken::new(),
-        connected: Arc::new(AtomicBool::new(false)),
+        connection,
         tx,
     };
 
@@ -306,10 +303,9 @@ pub fn new_pair<Conn>(
         broker_id,
         host,
         rx,
-        last_message: None,
         cancellation_token: handle.cancellation_token.clone(),
         config,
-        connected: handle.connected.clone(),
+        connection: handle.connection.clone(),
         connect,
     };
 

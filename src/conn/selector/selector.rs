@@ -1,5 +1,3 @@
-use std::sync::atomic::Ordering;
-
 use derive_more::derive::From;
 use fnv::FnvHashMap;
 use kafka_protocol::messages::MetadataResponse;
@@ -40,7 +38,7 @@ impl BrokerMap {
             .0
             .iter()
             .filter_map(|(_, (broker, handle))| {
-                if handle.connected.load(Ordering::SeqCst) && handle.tx.capacity() > 0 {
+                if handle.is_connected() && handle.tx.capacity() > 0 {
                     Some((broker, handle))
                 } else {
                     None
@@ -66,7 +64,7 @@ impl BrokerMap {
 /// broker handles as necessary to keep a valid mapping of broker id to host connection.
 ///
 /// If any nodes fail to connect or close their connection unexpectedly, this task will re-spawn those connection
-/// tasks (with exponential backoff as appropriate) to keep connections alive.
+/// tasks to keep connections alive.
 ///
 /// If a [`NodeTask`] panics, then pending requests for the broker will recieve a [`crate::conn::KafkaConnectionError::Closed`]
 /// error, and a new [`NodeTask`] and [`NodeTaskHandle`] pair will be created and spawned.
@@ -136,6 +134,11 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
 
                         dead_task.cancellation_token = cancellation_token.clone();
                         handle.cancellation_token = cancellation_token;
+
+                        // if the host is different, stop the existing connection
+                        if dead_task.host != host {
+                            dead_task.connection.store(None);
+                        }
 
                         dead_task.host = host.clone();
 
