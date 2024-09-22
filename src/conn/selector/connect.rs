@@ -1,18 +1,14 @@
 use std::{future::Future, io, sync::Arc};
-use tokio::{net::TcpStream, sync::mpsc};
+use tokio::net::TcpStream;
 
-use crate::conn::{
-    channel::{KafkaChannel, KafkaChannelMessage},
-    config::KafkaConnectionConfig,
-    host::BrokerHost,
-};
+use crate::conn::{channel::KafkaChannel, config::KafkaConnectionConfig, host::BrokerHost};
 
 /// Creates a new async stream for the connection to a broker.
 pub trait Connect {
     fn connect(
         &self,
         host: &BrokerHost,
-    ) -> impl Future<Output = Result<mpsc::Sender<KafkaChannelMessage>, io::Error>> + Send;
+    ) -> impl Future<Output = Result<KafkaChannel, io::Error>> + Send;
 }
 
 /// [`Connect`] for creating a non-TLS [`TcpStream`].
@@ -24,10 +20,7 @@ pub struct Tcp {
 }
 
 impl Connect for Tcp {
-    async fn connect(
-        &self,
-        host: &BrokerHost,
-    ) -> Result<mpsc::Sender<KafkaChannelMessage>, io::Error> {
+    async fn connect(&self, host: &BrokerHost) -> Result<KafkaChannel, io::Error> {
         let conn = TcpStream::connect((host.0.as_ref(), host.1)).await?;
 
         if let Err(err) = conn.set_nodelay(self.nodelay) {
@@ -37,7 +30,7 @@ impl Connect for Tcp {
             );
         };
 
-        Ok(KafkaChannel::connect(conn, &self.config).sender().clone())
+        Ok(KafkaChannel::connect(conn, &self.config))
     }
 }
 
@@ -45,7 +38,7 @@ impl<C: Connect> Connect for Arc<C> {
     fn connect(
         &self,
         host: &BrokerHost,
-    ) -> impl Future<Output = Result<mpsc::Sender<KafkaChannelMessage>, io::Error>> + Send {
+    ) -> impl Future<Output = Result<KafkaChannel, io::Error>> + Send {
         self.as_ref().connect(host)
     }
 }

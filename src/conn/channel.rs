@@ -215,6 +215,20 @@ impl KafkaChannel {
         }
     }
 
+    /// Create a channel from raw parts instead of using an IO stream. Useful for testing.
+    #[cfg(test)]
+    pub(crate) async fn from_parts(
+        sender: mpsc::Sender<KafkaChannelMessage>,
+        task_tracker: TaskTracker,
+        cancellation_token: CancellationToken,
+    ) -> Self {
+        Self {
+            sender,
+            task_tracker,
+            cancellation_token,
+        }
+    }
+
     /// Sends a request and returns a future to await the response
     pub async fn send<R: Sendable>(
         &self,

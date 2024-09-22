@@ -36,18 +36,18 @@ impl BrokerMap {
     /// This will prefer connected brokers with the minimum number of pending requests, then favor the minimum number of
     /// pending requests, connected or not.
     pub fn get_best_connection(&self) -> Option<(BrokerHost, NodeTaskHandle)> {
-        // prefer connected nodes with least waiting connections
+        // prefer connected, non-saturated nodes with least waiting connections
         let least_loaded_connected = self
             .0
             .iter()
             .filter_map(|(_, (broker, handle))| {
-                if handle.is_connected() && handle.tx.capacity() > 0 {
+                if handle.capacity().is_some_and(|cap| cap > 0) {
                     Some((broker, handle))
                 } else {
                     None
                 }
             })
-            .max_by(|left, right| left.1.tx.capacity().cmp(&right.1.tx.capacity()));
+            .min_by(|left, right| left.1.in_flight().cmp(&right.1.in_flight()));
 
         if let Some((host, handle)) = least_loaded_connected {
             return Some((host.clone(), handle.clone()));
@@ -56,7 +56,7 @@ impl BrokerMap {
         self.0
             .iter()
             .map(|(_, (broker, handle))| (broker, handle))
-            .max_by(|left, right| left.1.tx.capacity().cmp(&right.1.tx.capacity()))
+            .min_by(|left, right| left.1.in_flight().cmp(&right.1.in_flight()))
             .map(|(host, handle)| (host.clone(), handle.clone()))
     }
 }

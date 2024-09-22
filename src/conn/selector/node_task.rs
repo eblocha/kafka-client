@@ -4,7 +4,13 @@ use kafka_protocol::{
     messages::{ApiVersionsRequest, ApiVersionsResponse},
     protocol::{Message, StrBytes, VersionRange},
 };
-use std::{io, sync::Arc};
+use std::{
+    io,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 use thiserror::Error;
 use tokio::{
     sync::{mpsc, oneshot},
@@ -15,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     backoff::exponential_backoff,
     conn::{
-        channel::{send_on, KafkaChannelError, KafkaChannelMessage},
+        channel::{KafkaChannel, KafkaChannelError},
         config::ConnectionRetryConfig,
         host::BrokerHost,
         Sendable,
@@ -87,7 +93,7 @@ pub struct NodeTaskMessage {
 /// A connection with versioning information
 #[derive(Debug)]
 pub struct VersionedConnection {
-    connection: mpsc::Sender<KafkaChannelMessage>,
+    connection: KafkaChannel,
     versions: ApiVersionsResponse,
 }
 
@@ -159,7 +165,7 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
             .connection
             .load()
             .as_ref()
-            .filter(|conn| !conn.connection.is_closed())
+            .filter(|conn| !conn.connection.sender().is_closed())
         {
             return Some(conn.clone());
         }
@@ -237,6 +243,8 @@ pub struct NodeTaskHandle {
     /// Token to stop the running task. This is not exposed, because on the [`crate::conn::selector::SelectorTask`]
     /// should stop the connection.
     pub(super) cancellation_token: CancellationToken,
+    /// Number of requests waiting for a response
+    in_flight: Arc<AtomicUsize>,
 }
 
 impl NodeTaskHandle {
@@ -244,6 +252,19 @@ impl NodeTaskHandle {
     ///
     /// Note that this will wait across reconnect retry loops.
     pub async fn send<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
+        &self,
+        req: F,
+    ) -> Result<R::Response, KafkaChannelError> {
+        self.in_flight.fetch_add(1, Ordering::Acquire);
+
+        let result = self.send_inner(req).await;
+
+        self.in_flight.fetch_sub(1, Ordering::Release);
+
+        result
+    }
+
+    async fn send_inner<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
         &self,
         req: F,
     ) -> Result<R::Response, KafkaChannelError> {
@@ -273,7 +294,7 @@ impl NodeTaskHandle {
             return Err(KafkaChannelError::Version);
         };
 
-        send_on(&conn.connection, req, version).await
+        conn.connection.send(req, version).await
     }
 
     /// Determine if this node has an open connection to the host.
@@ -281,7 +302,22 @@ impl NodeTaskHandle {
         self.connection
             .load()
             .as_ref()
-            .is_some_and(|conn| !conn.connection.is_closed())
+            .is_some_and(|conn| !conn.connection.sender().is_closed())
+    }
+
+    /// Determine the number of in-flight requests to this broker
+    pub fn in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::Relaxed)
+    }
+
+    /// Determine the capacity of the connection send buffer if connected.
+    ///
+    /// If the node is not connected, this will return None.
+    pub fn capacity(&self) -> Option<usize> {
+        self.connection
+            .load()
+            .as_ref()
+            .map(|conn| conn.connection.sender().capacity())
     }
 }
 
@@ -306,6 +342,7 @@ pub fn new_pair<Conn>(
         cancellation_token: CancellationToken::new(),
         connection,
         tx,
+        in_flight: Arc::new(AtomicUsize::new(0)),
     };
 
     let task = NodeTask {
@@ -331,7 +368,7 @@ fn create_version_request() -> ApiVersionsRequest {
 async fn negotiate(
     broker_id: i32,
     host: &BrokerHost,
-    conn: &mpsc::Sender<KafkaChannelMessage>,
+    conn: &KafkaChannel,
 ) -> Result<ApiVersionsResponse, ConnectionInitError> {
     tracing::debug!(
         broker_id = broker_id,
@@ -339,12 +376,12 @@ async fn negotiate(
         "negotiating api versions"
     );
 
-    let api_versions_response = send_on(
-        conn,
-        create_version_request(),
-        <ApiVersionsRequest as Message>::VERSIONS.max,
-    )
-    .await?;
+    let api_versions_response = conn
+        .send(
+            create_version_request(),
+            <ApiVersionsRequest as Message>::VERSIONS.max,
+        )
+        .await?;
 
     let api_versions_response =
         if api_versions_response.error_code == ErrorCode::UnsupportedVersion as i16 {
@@ -353,8 +390,7 @@ async fn negotiate(
                 host = ?host,
                 "latest api versions request version is unsupported, falling back to version 0"
             );
-            send_on(
-                conn,
+            conn.send(
                 create_version_request(),
                 <ApiVersionsRequest as Message>::VERSIONS.min,
             )
