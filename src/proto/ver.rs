@@ -54,7 +54,7 @@ impl<R: Request, F: FnOnce(VersionRange) -> Option<(R, i16)>> GetApiKey for F {
 }
 
 /// A strategy for constructing a request that uses the maximum version that intersects with the broker.
-pub struct MaxVersionStrategy<R, F: FnOnce(i16) -> Option<R>> {
+struct MaxVersionStrategy<R, F: FnOnce(i16) -> Option<R>> {
     func: F,
 }
 
@@ -77,12 +77,14 @@ impl<R: Request, F: FnOnce(i16) -> Option<R>> FromVersionRange for MaxVersionStr
 
 /// Create a struct that implements [`FromVersionRange`] using a function to create the request given the maximum
 /// api version that intersects the client and broker ranges.
-pub fn with_max_version<R, F: FnOnce(i16) -> Option<R>>(func: F) -> MaxVersionStrategy<R, F> {
+pub fn with_max_version<R: Request, F: FnOnce(i16) -> Option<R>>(
+    func: F,
+) -> impl FromVersionRange<Req = R> + GetApiKey {
     MaxVersionStrategy { func }
 }
 
 /// A strategy for selecting constructing a request that uses the intersection of client and broker versions
-pub struct IntersectionStrategy<R, F: FnOnce(VersionRange) -> Option<(R, i16)>> {
+struct IntersectionStrategy<R, F: FnOnce(VersionRange) -> Option<(R, i16)>> {
     func: F,
 }
 
@@ -112,8 +114,8 @@ impl<R: Request, F: FnOnce(VersionRange) -> Option<(R, i16)>> FromVersionRange
 
 /// Create a struct that implements [`FromVersionRange`] using a function to create the request given the intersection
 /// range of the client and broker versions.
-pub fn with_intersection<R, F: FnOnce(VersionRange) -> Option<(R, i16)>>(
+pub fn with_intersection<R: Request, F: FnOnce(VersionRange) -> Option<(R, i16)>>(
     func: F,
-) -> IntersectionStrategy<R, F> {
+) -> impl FromVersionRange<Req = R> + GetApiKey {
     IntersectionStrategy { func }
 }
