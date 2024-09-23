@@ -1,15 +1,15 @@
 use std::{io, sync::Arc};
 
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use kafka_protocol::{
     messages::{ApiKey, RequestHeader},
     protocol::{Encodable, StrBytes},
 };
 use tokio_util::codec;
 
-use crate::proto::request::KafkaRequest;
+use crate::{conn::codec::LENGTH_FIELD_LENGTH, proto::request::KafkaRequest};
 
-use super::{correlated::CorrelationId, LENGTH_FIELD_LENGTH};
+use super::correlated::CorrelationId;
 
 /// A request with version information
 #[derive(Debug, Clone)]
@@ -65,17 +65,12 @@ impl EncodableRequest {
 }
 
 pub struct RequestEncoder {
-    raw_codec: codec::LengthDelimitedCodec,
+    max_frame_length: usize,
 }
 
 impl RequestEncoder {
     pub fn new(max_frame_length: usize) -> Self {
-        Self {
-            raw_codec: codec::LengthDelimitedCodec::builder()
-                .length_field_length(LENGTH_FIELD_LENGTH)
-                .max_frame_length(max_frame_length)
-                .new_codec(),
-        }
+        Self { max_frame_length }
     }
 }
 
@@ -101,17 +96,30 @@ impl codec::Encoder<EncodableRequest> for RequestEncoder {
             "encoding request"
         );
 
-        let mut bytes = BytesMut::new();
+        let starting_pos = dst.len();
+
+        // write space for the length header
+        dst.put_bytes(0, LENGTH_FIELD_LENGTH);
 
         item.header
-            .encode(&mut bytes, request_header_version)
+            .encode(dst, request_header_version)
             .map_err(into_invalid_input)?;
 
         item.request
-            .encode(&mut bytes, item.header.request_api_version)
+            .encode(dst, item.header.request_api_version)
             .map_err(into_invalid_input)?;
 
-        self.raw_codec.encode(bytes.into(), dst)?;
+        let len = dst.len() - starting_pos - LENGTH_FIELD_LENGTH;
+
+        if len > self.max_frame_length {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "frame size too big",
+            ));
+        }
+
+        dst[starting_pos..starting_pos + LENGTH_FIELD_LENGTH]
+            .copy_from_slice(&(len as i32).to_be_bytes());
 
         Ok(())
     }

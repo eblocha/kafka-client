@@ -4,7 +4,7 @@ use correlated::{CorrelatedDecoder, CorrelatedFrame};
 use request::RequestEncoder;
 use tokio_util::codec;
 
-pub(crate) const LENGTH_FIELD_LENGTH: usize = 4;
+pub(crate) const LENGTH_FIELD_LENGTH: usize = size_of::<i32>();
 
 mod correlated;
 mod request;
