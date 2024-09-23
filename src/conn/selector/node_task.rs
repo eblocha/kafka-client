@@ -126,17 +126,23 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
         loop {
             let NodeTaskMessage { tx } = tokio::select! {
                 biased;
-                _ = self.cancellation_token.cancelled() => return self,
+                _ = self.cancellation_token.cancelled() => break,
                 Some(msg) = self.rx.recv() => msg,
-                else => return self
+                else => break
             };
 
             let Some(conn) = self.get_connection().await else {
-                return self;
+                break;
             };
 
             let _ = tx.send(conn);
         }
+
+        if let Some(conn) = self.connection.swap(None) {
+            conn.connection.shutdown().await;
+        }
+
+        self
     }
 
     async fn try_connect(&mut self) -> Result<VersionedConnection, ConnectAttemptError> {
