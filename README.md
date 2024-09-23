@@ -4,6 +4,12 @@ This is a Kafka client written in pure Rust.
 
 It uses [kafka-protocol](https://github.com/tychedelia/kafka-protocol-rs) for the protocol implementation, and [tokio](https://github.com/tokio-rs/tokio) for async io.
 
+## Features
+
+- Multiplexed, async IO
+- Client-side load balancing
+- Connection retry with exponential backoff
+
 ## To Do
 
 - Get the producer working similarly to the Java client
@@ -22,9 +28,6 @@ It uses [kafka-protocol](https://github.com/tychedelia/kafka-protocol-rs) for th
 
 - Other questions:
 
-  - The Java NIO selector seems to just drop messages bound for a broker when the connection to the host closes. Is there a reason why?
-    - This library will persist the channel for the broker id and only drop messages if the broker id is no longer part of the cluster.
-      - Drawback is there's no immediate feedback that a broker might be failing, and requests should retry on a different broker if possible. Maybe there's something we can do about that.
   - What is the difference between `offset` and `sequence` in the context of a `ProduceRequest`?
 
 - Benchmarking
@@ -35,10 +38,8 @@ It uses [kafka-protocol](https://github.com/tychedelia/kafka-protocol-rs) for th
 
 - More tests
 
-- The node task and selector should be IO-agnostic. Make these generic over an `AsyncRead + AsyncWrite` type. Makes it far more testable.
-
 - Think about switching off of kafka-protocol. It is not production-grade atm.
   - It uses `anyhow` for errors. This is not appropriate for a low-level protocol library.
   - It fails to encode instead of ignoring parameters not relevant to newer versions
-  - It panicks in situations that should instead return an `Err`
+  - It panics in situations that should instead return an `Err`
   - It would be nice to decode into `Result<Response, ErrorCode>`

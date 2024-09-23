@@ -216,6 +216,14 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
             }
 
             attempt += 1;
+
+            if self
+                .retry_config
+                .max_retries
+                .is_some_and(|max_retries| max_retries < attempt)
+            {
+                return None;
+            }
         };
 
         let conn_arc = Arc::new(conn);
