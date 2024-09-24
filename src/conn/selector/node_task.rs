@@ -206,9 +206,9 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
                     }
 
                     match e {
-                        ConnectAttemptError::Cancelled => unreachable!(),
                         ConnectAttemptError::Timeout => log_err!("connection timed out"),
                         ConnectAttemptError::Init(e) => log_err!("failed to connect: {e:?}"),
+                        ConnectAttemptError::Cancelled => {}
                     }
 
                     backoff
@@ -435,12 +435,224 @@ async fn negotiate(
 
 #[cfg(test)]
 mod test {
-    // TODO tests
-    // it should wait for the delay before connecting
-    // it should exit when failing to connect
+    use std::sync::Arc;
+
+    use bytes::BytesMut;
+    use kafka_protocol::{
+        messages::{
+            api_versions_response::ApiVersion, ApiKey, ApiVersionsRequest, ApiVersionsResponse,
+            MetadataRequest, MetadataResponse, ResponseHeader,
+        },
+        protocol::{Encodable, HeaderVersion, Message},
+    };
+    use tokio::sync::mpsc;
+    use tokio_test::assert_ok;
+    use tokio_util::{sync::CancellationToken, task::TaskTracker};
+    use tracing_test::traced_test;
+
+    use crate::{
+        conn::{
+            channel::{KafkaChannel, KafkaChannelMessage},
+            codec::sendable::{DecodableResponse, RequestRecord},
+            config::ConnectionRetryConfig,
+            host::BrokerHost,
+        },
+        proto::request::KafkaRequest,
+    };
+
+    use super::*;
+
+    fn encode_response<R: Encodable + HeaderVersion>(
+        response: R,
+        api_version: i16,
+    ) -> DecodableResponse {
+        let header = ResponseHeader::default();
+        let header_version = R::header_version(api_version);
+
+        let mut frame = BytesMut::new();
+
+        header.encode(&mut frame, header_version).unwrap();
+        response.encode(&mut frame, api_version).unwrap();
+
+        DecodableResponse {
+            record: RequestRecord {
+                api_version,
+                response_header_version: header_version,
+            },
+            frame,
+        }
+    }
+
+    /// Execute a request and forget about it
+    fn fire_and_forget_request() -> mpsc::Receiver<KafkaChannelMessage> {
+        let (tx, rx) = mpsc::channel(1);
+        let task_tracker = TaskTracker::new();
+        let cancellation_token = CancellationToken::new();
+        let retry_config = ConnectionRetryConfig::default();
+
+        let (handle, task) = new_pair(
+            0,
+            BrokerHost(Arc::from("localhost"), 9092),
+            retry_config.clone(),
+            KafkaChannel::from_parts(tx, task_tracker, cancellation_token.clone()),
+        );
+
+        tokio::spawn(task.run());
+
+        let h_clone = handle.clone();
+
+        tokio::spawn(async move { h_clone.send(MetadataRequest::default()).await });
+
+        rx
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn starts_not_connected() {
+        let (tx, _rx) = mpsc::channel(1);
+        let task_tracker = TaskTracker::new();
+        let cancellation_token = CancellationToken::new();
+
+        let (handle, task) = new_pair(
+            0,
+            BrokerHost(Arc::from("localhost"), 9092),
+            ConnectionRetryConfig::default(),
+            KafkaChannel::from_parts(tx, task_tracker, cancellation_token.clone()),
+        );
+
+        tokio::spawn(task.run());
+
+        assert!(!handle.is_connected());
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[traced_test]
+    async fn connects_on_request() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let task_tracker = TaskTracker::new();
+        let cancellation_token = CancellationToken::new();
+
+        let (handle, task) = new_pair(
+            0,
+            BrokerHost(Arc::from("localhost"), 9092),
+            ConnectionRetryConfig::default(),
+            KafkaChannel::from_parts(tx, task_tracker, cancellation_token.clone()),
+        );
+
+        tokio::spawn(task.run());
+
+        let h_clone = handle.clone();
+
+        let metadata_response_handle =
+            tokio::spawn(async move { h_clone.send(MetadataRequest::default()).await });
+
+        let channel_msg = rx.recv().await.unwrap();
+
+        // the channel message should be an api versions request with max api version
+        assert_eq!(
+            channel_msg.versioned.api_version,
+            ApiVersionsRequest::VERSIONS.max
+        );
+
+        assert!(
+            matches!(channel_msg.versioned.request, KafkaRequest::ApiVersions(_)),
+            "expected an ApiVersionsRequest, got {:?}",
+            channel_msg.versioned.request
+        );
+
+        let response = encode_response(
+            {
+                let mut r = ApiVersionsResponse::default();
+
+                r.api_keys.insert(ApiKey::MetadataKey as i16, {
+                    let mut v = ApiVersion::default();
+                    v.min_version = MetadataRequest::VERSIONS.min;
+                    v.max_version = MetadataRequest::VERSIONS.max;
+                    v
+                });
+
+                r
+            },
+            channel_msg.versioned.api_version,
+        );
+
+        let _ = channel_msg.tx.send(Ok(response));
+
+        let channel_msg = rx.recv().await.unwrap();
+
+        // the channel message should be our metadata request
+        assert!(
+            matches!(channel_msg.versioned.request, KafkaRequest::Metadata(_)),
+            "expected an MetadataRequest, got {:?}",
+            channel_msg.versioned.request
+        );
+
+        // we should advertise as connected now
+        assert!(handle.is_connected());
+
+        let response = encode_response(
+            MetadataResponse::default(),
+            channel_msg.versioned.api_version,
+        );
+
+        let _ = channel_msg.tx.send(Ok(response));
+
+        // the sender should get a response
+        let response = metadata_response_handle.await.unwrap();
+
+        assert_ok!(response);
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[traced_test]
+    async fn retry_on_fail() {
+        let mut rx = fire_and_forget_request();
+
+        let channel_msg = rx.recv().await.unwrap();
+
+        let _ = channel_msg.tx.send(Err(io::Error::other("test")));
+
+        // It will wait for backoff, then try to reconnect
+        tokio::time::advance(ConnectionRetryConfig::default().min_backoff).await;
+
+        let channel_msg = rx.recv().await.unwrap();
+
+        assert!(
+            matches!(channel_msg.versioned.request, KafkaRequest::ApiVersions(_)),
+            "expected an ApiVersionsRequest, got {:?}",
+            channel_msg.versioned.request
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[traced_test]
+    async fn retry_with_v0_if_unsupported_version() {
+        let mut rx = fire_and_forget_request();
+
+        let channel_msg = rx.recv().await.unwrap();
+
+        let response = encode_response(
+            {
+                let mut r = ApiVersionsResponse::default();
+                r.error_code = ErrorCode::UnsupportedVersion as i16;
+                r
+            },
+            channel_msg.versioned.api_version,
+        );
+
+        let _ = channel_msg.tx.send(Ok(response));
+
+        let channel_msg = rx.recv().await.unwrap();
+
+        assert_eq!(
+            channel_msg.versioned.api_version,
+            ApiVersionsRequest::VERSIONS.min
+        );
+
+        assert!(
+            matches!(channel_msg.versioned.request, KafkaRequest::ApiVersions(_)),
+            "expected an ApiVersionsRequest, got {:?}",
+            channel_msg.versioned.request
+        );
+    }
     // it should time out the connection
-    // it should negotiate versions
-    //  it should try api version request v0 if highest version fails
-    // it should exit if version negotiation fails
-    // it should retry the last request if the connection closes
 }

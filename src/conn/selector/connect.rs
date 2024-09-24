@@ -42,3 +42,9 @@ impl<C: Connect> Connect for Arc<C> {
         self.as_ref().connect(host)
     }
 }
+
+impl Connect for KafkaChannel {
+    async fn connect(&self, _host: &BrokerHost) -> Result<KafkaChannel, io::Error> {
+        Ok(self.clone())
+    }
+}

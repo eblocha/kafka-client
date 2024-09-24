@@ -28,3 +28,4 @@ url = "2.5.2"
 
 [dev-dependencies]
 tokio-test = "0.4.4"
+tracing-test = "0.2.5"

@@ -217,7 +217,7 @@ impl KafkaChannel {
 
     /// Create a channel from raw parts instead of using an IO stream. Useful for testing.
     #[cfg(test)]
-    pub(crate) async fn from_parts(
+    pub(crate) fn from_parts(
         sender: mpsc::Sender<KafkaChannelMessage>,
         task_tracker: TaskTracker,
         cancellation_token: CancellationToken,
