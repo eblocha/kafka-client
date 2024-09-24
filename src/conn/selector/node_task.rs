@@ -438,6 +438,7 @@ mod test {
     use std::sync::Arc;
 
     use bytes::BytesMut;
+    use futures::future;
     use kafka_protocol::{
         messages::{
             api_versions_response::ApiVersion, ApiKey, ApiVersionsRequest, ApiVersionsResponse,
@@ -445,7 +446,7 @@ mod test {
         },
         protocol::{Encodable, HeaderVersion, Message},
     };
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, watch};
     use tokio_test::assert_ok;
     use tokio_util::{sync::CancellationToken, task::TaskTracker};
     use tracing_test::traced_test;
@@ -651,5 +652,50 @@ mod test {
             "expected an ApiVersionsRequest, got {:?}",
             channel_msg.versioned.request
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[traced_test]
+    async fn retry_on_timeout() {
+        #[derive(Debug, Clone)]
+        struct RetryCountingConnect {
+            attempts: watch::Sender<usize>,
+        }
+
+        impl Connect for RetryCountingConnect {
+            async fn connect(&self, _: &BrokerHost) -> io::Result<KafkaChannel> {
+                self.attempts.send_modify(|val| *val += 1);
+                future::pending().await
+            }
+        }
+
+        let retry_config = ConnectionRetryConfig::default();
+
+        let (tx, mut rx) = watch::channel(0);
+
+        let conn = RetryCountingConnect { attempts: tx };
+
+        let (handle, task) = new_pair(
+            0,
+            BrokerHost(Arc::from("localhost"), 9092),
+            retry_config.clone(),
+            conn,
+        );
+
+        tokio::spawn(task.run());
+
+        let h_clone = handle.clone();
+
+        tokio::spawn(async move { h_clone.send(MetadataRequest::default()).await });
+
+        let _ = rx.changed().await;
+
+        // wait for timeout and backoff period
+        tokio::time::advance(retry_config.connection_timeout).await;
+        tokio::time::advance(retry_config.min_backoff).await;
+
+        let _ = rx.changed().await;
+
+        assert_eq!(rx.borrow().clone(), 2);
     }
 }
