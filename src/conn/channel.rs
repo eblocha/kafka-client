@@ -179,7 +179,6 @@ impl<IO> KafkaChannelTask<IO> {
 /// A connection to a Kafka broker
 ///
 /// This connection supports multiplexed async io.
-/// The connection will be closed on drop.
 #[derive(Debug, Clone)]
 pub struct KafkaChannel {
     sender: mpsc::Sender<KafkaChannelMessage>,

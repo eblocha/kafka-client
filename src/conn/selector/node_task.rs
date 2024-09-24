@@ -483,25 +483,23 @@ mod test {
         }
     }
 
-    /// Execute a request and forget about it
+    /// Start a task to a fake broker, and send a metadata request to it.
+    ///
+    /// Returns a reciever for messages that the broker would receive from the client.
     fn fire_and_forget_request() -> mpsc::Receiver<KafkaChannelMessage> {
         let (tx, rx) = mpsc::channel(1);
         let task_tracker = TaskTracker::new();
         let cancellation_token = CancellationToken::new();
-        let retry_config = ConnectionRetryConfig::default();
 
         let (handle, task) = new_pair(
             0,
             BrokerHost(Arc::from("localhost"), 9092),
-            retry_config.clone(),
-            KafkaChannel::from_parts(tx, task_tracker, cancellation_token.clone()),
+            ConnectionRetryConfig::default(),
+            KafkaChannel::from_parts(tx, task_tracker, cancellation_token),
         );
 
         tokio::spawn(task.run());
-
-        let h_clone = handle.clone();
-
-        tokio::spawn(async move { h_clone.send(MetadataRequest::default()).await });
+        tokio::spawn(async move { handle.send(MetadataRequest::default()).await });
 
         rx
     }
@@ -654,5 +652,4 @@ mod test {
             channel_msg.versioned.request
         );
     }
-    // it should time out the connection
 }
