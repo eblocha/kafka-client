@@ -114,6 +114,7 @@ impl<R: Request, F: FnOnce(VersionRange) -> Option<(R, i16)>> FromVersionRange
 
 /// Create a struct that implements [`FromVersionRange`] using a function to create the request given the intersection
 /// range of the client and broker versions.
+#[allow(dead_code)]
 pub fn with_intersection<R: Request, F: FnOnce(VersionRange) -> Option<(R, i16)>>(
     func: F,
 ) -> impl FromVersionRange<Req = R> + GetApiKey {

@@ -1,17 +1,26 @@
 use derive_more::derive::From;
 use fnv::FnvHashMap;
-use kafka_protocol::messages::MetadataResponse;
-use tokio::{sync::watch, task::JoinSet};
+use kafka_protocol::messages::{
+    metadata_request::MetadataRequestTopic, MetadataRequest, MetadataResponse,
+};
+use tokio::{
+    sync::{mpsc, oneshot, watch},
+    task::JoinSet,
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-use crate::conn::{
-    config::{ConnectionManagerConfig, ConnectionRetryConfig},
-    host::BrokerHost,
+use crate::{
+    backoff::exponential_backoff,
+    conn::{
+        config::{ConnectionManagerConfig, ConnectionRetryConfig, MetadataRefreshConfig},
+        host::BrokerHost,
+        KafkaChannelError,
+    },
+    proto::ver::with_max_version,
 };
 
 use super::{
     connect::{Connect, Tcp},
-    metadata::MetadataRefreshTaskHandle,
     node_task::{new_pair, NodeTask, NodeTaskHandle},
 };
 
@@ -61,6 +70,35 @@ impl BrokerMap {
     }
 }
 
+pub struct TopicMetadataRequest {
+    pub topics: Vec<MetadataRequestTopic>,
+    pub tx: oneshot::Sender<()>,
+}
+
+fn create_metadata_request(
+    version: i16,
+    topics: Option<Vec<MetadataRequestTopic>>,
+) -> Option<MetadataRequest> {
+    let mut r = MetadataRequest::default();
+
+    if version >= 4 {
+        r.allow_auto_topic_creation = false;
+    }
+
+    if version >= 8 {
+        if version <= 10 {
+            r.include_cluster_authorized_operations = true;
+        }
+
+        r.include_topic_authorized_operations = true;
+    }
+
+    if let Some(topics) = topics {
+        r.topics = Some(topics);
+    }
+    Some(r)
+}
+
 /// Keeps connections to each broker alive.
 ///
 /// This task will listen for changes to metadata from the [`MetadataRefreshTaskHandle`], then start/stop
@@ -77,11 +115,15 @@ struct SelectorTask<Conn> {
     /// Shared global cluster state. Contains the latest metadata and mapping of broker id to connection
     tx: watch::Sender<Cluster>,
     /// Task handle for metadata refreshes
-    metadata_task_handle: MetadataRefreshTaskHandle,
+    // metadata_task_handle: MetadataRefreshTaskHandle,
     /// Join set for running connection tasks. Used to detect failed connections
     join_set: JoinSet<NodeTask<Conn>>,
     /// Configuration settings for retries
     retry_config: ConnectionRetryConfig,
+    /// Configuration for metadata refresh process
+    metadata_config: MetadataRefreshConfig,
+    /// Receiver for requests to refresh metadata now
+    rx_topic_metadata: mpsc::Receiver<TopicMetadataRequest>,
     /// Cancellation signal
     cancellation_token: CancellationToken,
     /// Used to create new tcp streams
@@ -91,7 +133,7 @@ struct SelectorTask<Conn> {
 enum Event<Conn> {
     /// Metadata changed, so re-configure connections. This is also invoked when a [`NodeTask`]
     /// panics or is aborted, because we no longer have access to the original channel in that case.
-    Refresh,
+    Refresh(Option<TopicMetadataRequest>),
     /// A node stopped. Note this doesn't necessarily indicate that it should be running.
     /// The [`SelectorTask`] will restart it if it points to a valid broker in the cluster.
     NodeDied(NodeTask<Conn>),
@@ -101,27 +143,76 @@ enum Event<Conn> {
 
 impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
     async fn run(mut self) {
-        loop {
+        let mut metadata_interval = tokio::time::interval(self.metadata_config.interval);
+        metadata_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        'outer: loop {
             let event = tokio::select! {
                 biased;
                 _ = self.cancellation_token.cancelled() => Event::Shutdown,
-                // if this returns None, it means the metadata refresh task has stopped, and we will never get metadata again.
-                Ok(_) = self.metadata_task_handle.rx.changed() => Event::Refresh,
+                _ = metadata_interval.tick() => Event::Refresh(None),
+                Some(req) = self.rx_topic_metadata.recv() => Event::Refresh(Some(req)),
                 Some(result) = self.join_set.join_next() => match result {
                     Ok(node_died) => Event::NodeDied(node_died),
                     Err(join_err) => {
                         tracing::error!("node connection task stopped unexpectedly, attempting to recover: {join_err:?}");
-                        Event::Refresh
+                        Event::Refresh(None)
                     }
                 },
                 else => continue
             };
 
             match event {
-                Event::Refresh => {
-                    let metadata = self.metadata_task_handle.rx.borrow().clone();
-                    if self.update_metadata(metadata).is_none() {
-                        break;
+                Event::Refresh(req) => {
+                    let (on_refresh, topics) = match req {
+                        Some(r) => (Some(r.tx), Some(r.topics)),
+                        _ => (None, None),
+                    };
+
+                    let mut retries = 0;
+
+                    loop {
+                        let Some((host_for_refresh, handle_for_refresh)) =
+                            self.tx.borrow().broker_channels.get_best_connection()
+                        else {
+                            tracing::error!("no connections available for metadata refresh!");
+                            return;
+                        };
+
+                        tracing::info!(broker = ?host_for_refresh, "attempting to refresh metadata");
+
+                        let metadata = handle_for_refresh
+                            .send(with_max_version(|ver| {
+                                create_metadata_request(ver, topics.clone())
+                            }))
+                            .await;
+
+                        match metadata {
+                            Ok(metadata) => {
+                                if self.update_metadata(metadata).is_none() {
+                                    break 'outer;
+                                }
+
+                                tracing::info!(
+                                    "successfully updated metadata using broker {host_for_refresh:?}"
+                                );
+                                break;
+                            }
+                            Err(e) => {
+                                let backoff = exponential_backoff(
+                                    self.metadata_config.min_backoff,
+                                    self.metadata_config.max_backoff,
+                                    retries,
+                                );
+                                retries += 1;
+                                tracing::error!(broker = ?host_for_refresh, "failed to get metadata: {e}, backing off for {backoff:?}, retries: {retries}");
+                                tokio::time::sleep(backoff).await;
+                            }
+                        }
+                    }
+
+                    if let Some(tx) = on_refresh {
+                        let _ = tx.send(());
                     }
                 }
                 Event::NodeDied(mut dead_task) => {
@@ -158,8 +249,6 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         }
 
         while self.join_set.join_next().await.is_some() {}
-
-        self.metadata_task_handle.shutdown().await;
 
         let _ = self.tx.send(Default::default());
     }
@@ -215,6 +304,8 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             }
         }
 
+        // TODO merge topic metadata with existing metadata
+
         self.tx
             .send(Cluster {
                 broker_channels: self.hosts.clone(),
@@ -251,6 +342,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
 /// the connection is closed.
 pub(crate) struct SelectorTaskHandle {
     pub cluster: watch::Receiver<Cluster>,
+    pub tx_topic_metadata: mpsc::Sender<TopicMetadataRequest>,
     cancellation_token: CancellationToken,
     task_tracker: TaskTracker,
 }
@@ -305,16 +397,16 @@ impl SelectorTaskHandle {
             metadata: Default::default(),
         });
 
-        let metadata_task_handle =
-            MetadataRefreshTaskHandle::new(cluster_rx.clone(), config.metadata.clone());
+        let (tx_topic_metadata, rx_topic_metadata) = mpsc::channel(1);
 
         // start the selector task to manage broker connections
         let selector_task = SelectorTask {
             hosts,
             tx: cluster_tx,
-            metadata_task_handle,
+            rx_topic_metadata,
             join_set,
             retry_config: config.conn.retry,
+            metadata_config: config.metadata,
             cancellation_token: cancellation_token.clone(),
             connect,
         };
@@ -326,9 +418,26 @@ impl SelectorTaskHandle {
 
         Self {
             cluster: cluster_rx,
+            tx_topic_metadata,
             cancellation_token,
             task_tracker,
         }
+    }
+
+    pub async fn refresh_metadata_for_topics(
+        &self,
+        topics: Vec<MetadataRequestTopic>,
+    ) -> Result<(), KafkaChannelError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.tx_topic_metadata
+            .send(TopicMetadataRequest { topics, tx })
+            .await
+            .map_err(|_| KafkaChannelError::Closed)?;
+
+        rx.await.map_err(|_| KafkaChannelError::Closed)?;
+
+        Ok(())
     }
 }
 
