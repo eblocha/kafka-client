@@ -93,6 +93,8 @@ fn create_metadata_request(
         r.include_topic_authorized_operations = true;
     }
 
+    // Setting topics to None will fetch for all topics.
+    // Some([]) is the default.
     if let Some(topics) = topics {
         r.topics = Some(topics);
     }
