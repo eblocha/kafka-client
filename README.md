@@ -10,6 +10,10 @@ It uses [kafka-protocol](https://github.com/tychedelia/kafka-protocol-rs) for th
 - Client-side load balancing
 - Connection retry with exponential backoff
 
+## Architecture
+
+![architecture diagram](./images/architecture.png "Architecture")
+
 ## To Do
 
 - Get the producer working similarly to the Java client

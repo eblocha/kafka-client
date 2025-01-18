@@ -1,3 +1,5 @@
+use kafka_protocol::messages::metadata_request::MetadataRequestTopic;
+
 use crate::{
     conn::{
         config::ConnectionManagerConfig,
@@ -56,6 +58,13 @@ impl NetworkClient {
         };
 
         handle.clone().send(req).await
+    }
+
+    pub async fn refresh_metadata_for_topics(
+        &self,
+        topics: Vec<MetadataRequestTopic>,
+    ) -> Result<(), KafkaChannelError> {
+        self.selector.refresh_metadata_for_topics(topics).await
     }
 
     pub async fn shutdown(&self) {
