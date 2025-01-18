@@ -12,7 +12,7 @@ use crate::{
 
 /// Maintains connections to the entire cluster, and forwards requests to the appropriate broker.
 pub struct NetworkClient {
-    pub(crate) selector: SelectorTaskHandle,
+    selector: SelectorTaskHandle,
 }
 
 impl NetworkClient {
