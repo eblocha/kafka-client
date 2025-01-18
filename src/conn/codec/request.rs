@@ -51,16 +51,8 @@ impl EncodableRequest {
         }
     }
 
-    pub fn api_version(&self) -> i16 {
-        self.header.request_api_version
-    }
-
     pub fn api_key(&self) -> ApiKey {
         self.api_key
-    }
-
-    pub fn correlation_id(&self) -> CorrelationId {
-        CorrelationId(self.header.correlation_id)
     }
 }
 
