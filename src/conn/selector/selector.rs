@@ -114,8 +114,6 @@ struct SelectorTask<Conn> {
     hosts: BrokerMap,
     /// Shared global cluster state. Contains the latest metadata and mapping of broker id to connection
     tx: watch::Sender<Cluster>,
-    /// Task handle for metadata refreshes
-    // metadata_task_handle: MetadataRefreshTaskHandle,
     /// Join set for running connection tasks. Used to detect failed connections
     join_set: JoinSet<NodeTask<Conn>>,
     /// Configuration settings for retries
