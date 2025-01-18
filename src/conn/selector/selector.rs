@@ -159,7 +159,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                         Event::Refresh(None)
                     }
                 },
-                else => continue
+                else => break
             };
 
             match event {
@@ -253,7 +253,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         let _ = self.tx.send(Default::default());
     }
 
-    fn update_metadata(&mut self, metadata: MetadataResponse) -> Option<()> {
+    fn update_metadata(&mut self, mut metadata: MetadataResponse) -> Option<()> {
         if metadata.brokers.is_empty() {
             tracing::warn!("metadata response has no brokers, ignoring");
             return Some(());
@@ -304,14 +304,18 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             }
         }
 
-        // TODO merge topic metadata with existing metadata
+        self.tx.send_modify(|cluster| {
+            cluster.broker_channels = self.hosts.clone();
+            // merge topic metadata with existing metadata
+            for (k, v) in cluster.metadata.topics.drain(..) {
+                if !metadata.topics.contains_key(&k) {
+                    metadata.topics.insert(k, v);
+                }
+            }
+            cluster.metadata = metadata;
+        });
 
-        self.tx
-            .send(Cluster {
-                broker_channels: self.hosts.clone(),
-                metadata,
-            })
-            .ok()
+        Some(())
     }
 
     fn start_new_task(&mut self, broker_id: i32, host: BrokerHost) {
