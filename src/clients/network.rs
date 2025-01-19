@@ -1,4 +1,6 @@
-use kafka_protocol::messages::metadata_request::MetadataRequestTopic;
+use kafka_protocol::messages::{
+    metadata_request::MetadataRequestTopic, metadata_response::MetadataResponseTopic, TopicName,
+};
 
 use crate::{
     conn::{
@@ -7,7 +9,10 @@ use crate::{
         selector::{Cluster, SelectorTaskHandle},
         KafkaChannelError, Sendable,
     },
-    proto::ver::{FromVersionRange, GetApiKey},
+    proto::{
+        error_codes::ErrorCode,
+        ver::{FromVersionRange, GetApiKey},
+    },
 };
 
 /// Maintains connections to the entire cluster, and forwards requests to the appropriate broker.
@@ -60,11 +65,42 @@ impl NetworkClient {
         handle.clone().send(req).await
     }
 
-    pub async fn refresh_metadata_for_topics(
+    pub async fn get_topic_metadata(
         &self,
-        topics: Vec<MetadataRequestTopic>,
-    ) -> Result<(), KafkaChannelError> {
-        self.selector.refresh_metadata_for_topics(topics).await
+        name: &TopicName,
+    ) -> Result<Result<MetadataResponseTopic, ErrorCode>, KafkaChannelError> {
+        let cluster_state = self.selector.cluster.borrow();
+
+        let topic_data = match cluster_state.metadata.topics.get(name) {
+            Some(td) if td.error_code == ErrorCode::None as i16 => td.clone(),
+            _ => {
+                drop(cluster_state); // release lock on cluster state
+                let mut req_topic = MetadataRequestTopic::default();
+                req_topic.name = Some(name.clone());
+
+                tracing::debug!("refreshing metadata for topic {:?}", name.0);
+
+                self.selector
+                    .refresh_metadata_for_topics(vec![req_topic])
+                    .await?;
+
+                let cluster_state = self.selector.cluster.borrow();
+
+                let Some(topic_data) = cluster_state.metadata.topics.get(name) else {
+                    return Ok(Err(ErrorCode::UnknownTopicOrPartition));
+                };
+
+                topic_data.clone()
+            }
+        };
+
+        let error_code: ErrorCode = topic_data.error_code.into();
+
+        if error_code != ErrorCode::None {
+            return Ok(Err(error_code));
+        }
+
+        return Ok(Ok(topic_data));
     }
 
     pub async fn shutdown(&self) {

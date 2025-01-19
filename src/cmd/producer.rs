@@ -3,12 +3,10 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::bail;
 use bytes::{Bytes, BytesMut};
 use kafka_protocol::{
     indexmap::IndexMap,
     messages::{
-        metadata_request::MetadataRequestTopic,
         produce_request::{PartitionProduceData, TopicProduceData},
         ProduceRequest, TopicName,
     },
@@ -33,25 +31,7 @@ pub async fn produce_from_file(
 
     let topic = TopicName(StrBytes::from_string(topic));
 
-    let cluster = client.read_cluster_snapshot();
-
-    let topic_data = match cluster.metadata.topics.get(&topic) {
-        Some(td) => td.clone(),
-        None => {
-            let mut req_topic = MetadataRequestTopic::default();
-            req_topic.name = Some(topic.clone());
-
-            client.refresh_metadata_for_topics(vec![req_topic]).await?;
-
-            let cluster = client.read_cluster_snapshot();
-
-            let Some(topic_data) = cluster.metadata.topics.get(&topic) else {
-                bail!("Topic not found: {}", topic.0.as_str())
-            };
-
-            topic_data.clone()
-        }
-    };
+    let topic_data = client.get_topic_metadata(&topic).await??;
 
     let partition = &topic_data.partitions[0];
 

@@ -1,8 +1,12 @@
+use std::fmt::{Debug, Display};
+
+use thiserror::Error;
+
 /// All Kafka error codes. See https://kafka.apache.org/protocol#protocol_error_codes
 #[non_exhaustive]
 #[allow(unused)]
 #[repr(i16)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Error)]
 pub enum ErrorCode {
     UnknownServerError = MIN,
     None = 0,
@@ -138,5 +142,11 @@ impl From<i16> for ErrorCode {
             MIN..=MAX => unsafe { std::mem::transmute::<i16, ErrorCode>(value) },
             _ => ErrorCode::UnknownServerError,
         }
+    }
+}
+
+impl Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(&self, f)
     }
 }
