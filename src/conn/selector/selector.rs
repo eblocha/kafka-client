@@ -137,8 +137,6 @@ enum Event<Conn> {
     /// A node stopped. Note this doesn't necessarily indicate that it should be running.
     /// The [`SelectorTask`] will restart it if it points to a valid broker in the cluster.
     NodeDied(NodeTask<Conn>),
-    /// Stop all connections and shut down
-    Shutdown,
 }
 
 impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
@@ -149,7 +147,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         'outer: loop {
             let event = tokio::select! {
                 biased;
-                _ = self.cancellation_token.cancelled() => Event::Shutdown,
+                _ = self.cancellation_token.cancelled() => break,
                 _ = metadata_interval.tick() => Event::Refresh(None),
                 Some(req) = self.rx_topic_metadata.recv() => Event::Refresh(Some(req)),
                 Some(result) = self.join_set.join_next() => match result {
@@ -159,6 +157,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                         Event::Refresh(None)
                     }
                 },
+                // Either all handles are dropped, or we have no nodes to connect to in the cluster.
                 else => break
             };
 
@@ -206,7 +205,10 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                                 );
                                 retries += 1;
                                 tracing::error!(broker = ?host_for_refresh, "failed to get metadata: {e}, backing off for {backoff:?}, retries: {retries}");
-                                tokio::time::sleep(backoff).await;
+                                tokio::select! {
+                                    _ = tokio::time::sleep(backoff) => {},
+                                    _ = self.cancellation_token.cancelled() => break 'outer
+                                };
                             }
                         }
                     }
@@ -240,7 +242,6 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                         self.join_set.spawn(dead_task.run());
                     }
                 }
-                Event::Shutdown => break,
             }
         }
 
@@ -307,6 +308,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         self.tx.send_modify(|cluster| {
             cluster.broker_channels = self.hosts.clone();
             // merge topic metadata with existing metadata
+            // TODO: can we remove any topics here?
             for (k, v) in cluster.metadata.topics.drain(..) {
                 if !metadata.topics.contains_key(&k) {
                     metadata.topics.insert(k, v);
@@ -401,6 +403,7 @@ impl SelectorTaskHandle {
             metadata: Default::default(),
         });
 
+        // TODO: what size for refresh channel?
         let (tx_topic_metadata, rx_topic_metadata) = mpsc::channel(1);
 
         // start the selector task to manage broker connections
