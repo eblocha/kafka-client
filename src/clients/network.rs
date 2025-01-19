@@ -16,11 +16,15 @@ use crate::{
 };
 
 /// Maintains connections to the entire cluster, and forwards requests to the appropriate broker.
+#[derive(Clone)]
 pub struct NetworkClient {
     selector: SelectorTaskHandle,
 }
 
 impl NetworkClient {
+    /// Create a new client with bootstrap servers
+    ///
+    /// This can fail if the broker hostnames are not valid.
     pub async fn try_new(
         brokers: &[String],
         config: ConnectionManagerConfig,
@@ -28,12 +32,15 @@ impl NetworkClient {
         Ok(Self::new_with_hosts(&try_parse_hosts(brokers)?, config).await)
     }
 
+    /// Create a new client with bootstrap servers
     pub async fn new_with_hosts(brokers: &[BrokerHost], config: ConnectionManagerConfig) -> Self {
         let selector = SelectorTaskHandle::new_tcp(brokers, config).await;
 
         Self { selector }
     }
 
+    /// Send a message to any available broker.
+    /// This uses load-balancing to distribute the request load.
     pub async fn send<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
         &self,
         req: F,
@@ -51,18 +58,19 @@ impl NetworkClient {
         handle.send(req).await
     }
 
+    /// Send a request to a specific broker by id.
     pub async fn send_to<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
         &self,
         req: F,
         broker_id: i32,
     ) -> Result<R::Response, KafkaChannelError> {
-        let cluster = self.selector.cluster.borrow();
+        let cluster = self.read_cluster_snapshot();
         let Some((_, handle)) = cluster.broker_channels.0.get(&broker_id) else {
             tracing::error!("no broker handle for id {broker_id}");
             return Err(KafkaChannelError::Closed);
         };
 
-        handle.clone().send(req).await
+        handle.send(req).await
     }
 
     pub async fn get_topic_metadata(
@@ -81,7 +89,7 @@ impl NetworkClient {
                 tracing::debug!("refreshing metadata for topic {:?}", name.0);
 
                 self.selector
-                    .refresh_metadata_for_topics(vec![req_topic])
+                    .refresh_metadata_for_topics(Some(vec![req_topic]))
                     .await?;
 
                 let cluster_state = self.selector.cluster.borrow();

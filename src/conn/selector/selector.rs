@@ -1,7 +1,8 @@
 use derive_more::derive::From;
 use fnv::FnvHashMap;
 use kafka_protocol::messages::{
-    metadata_request::MetadataRequestTopic, MetadataRequest, MetadataResponse,
+    metadata_request::MetadataRequestTopic, metadata_response::MetadataResponseTopic,
+    MetadataRequest, MetadataResponse, TopicName,
 };
 use tokio::{
     sync::{mpsc, oneshot, watch},
@@ -70,8 +71,15 @@ impl BrokerMap {
     }
 }
 
-pub struct TopicMetadataRequest {
-    pub topics: Vec<MetadataRequestTopic>,
+/// A request to fetch metadata for a specific set of topics, or all topics
+pub struct RefreshMetadataRequest {
+    /// The requested topics
+    ///
+    /// If None, this will fetch metadata for all topics.
+    ///
+    /// If Some(vec![]), this will only refresh the cluster metadata
+    pub topics: Option<Vec<MetadataRequestTopic>>,
+    /// Channel which sends when the request has been executed
     pub tx: oneshot::Sender<()>,
 }
 
@@ -93,12 +101,19 @@ fn create_metadata_request(
         r.include_topic_authorized_operations = true;
     }
 
-    // Setting topics to None will fetch for all topics.
-    // Some([]) is the default.
-    if let Some(topics) = topics {
-        r.topics = Some(topics);
-    }
+    r.topics = topics;
+
     Some(r)
+}
+
+fn metadata_request_topic_from_entry(
+    entry: (&TopicName, &MetadataResponseTopic),
+) -> MetadataRequestTopic {
+    let mut req = MetadataRequestTopic::default();
+    req.name = Some(entry.0.clone());
+    req.topic_id = entry.1.topic_id;
+
+    req
 }
 
 /// Keeps connections to each broker alive.
@@ -123,7 +138,7 @@ struct SelectorTask<Conn> {
     /// Configuration for metadata refresh process
     metadata_config: MetadataRefreshConfig,
     /// Receiver for requests to refresh metadata now
-    rx_topic_metadata: mpsc::Receiver<TopicMetadataRequest>,
+    rx_topic_metadata: mpsc::Receiver<RefreshMetadataRequest>,
     /// Cancellation signal
     cancellation_token: CancellationToken,
     /// Used to create new tcp streams
@@ -133,7 +148,7 @@ struct SelectorTask<Conn> {
 enum Event<Conn> {
     /// Metadata changed, so re-configure connections. This is also invoked when a [`NodeTask`]
     /// panics or is aborted, because we no longer have access to the original channel in that case.
-    Refresh(Option<TopicMetadataRequest>),
+    Refresh(Option<RefreshMetadataRequest>),
     /// A node stopped. Note this doesn't necessarily indicate that it should be running.
     /// The [`SelectorTask`] will restart it if it points to a valid broker in the cluster.
     NodeDied(NodeTask<Conn>),
@@ -164,8 +179,21 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             match event {
                 Event::Refresh(req) => {
                     let (on_refresh, topics) = match req {
-                        Some(r) => (Some(r.tx), Some(r.topics)),
-                        _ => (None, None),
+                        Some(r) => (Some(r.tx), r.topics),
+                        _ => (
+                            None,
+                            // If this is not from a refresh-now request,
+                            // fetch for all previously-fetched topics.
+                            Some(
+                                self.tx
+                                    .borrow()
+                                    .metadata
+                                    .topics
+                                    .iter()
+                                    .map(metadata_request_topic_from_entry)
+                                    .collect(),
+                            ),
+                        ),
                     };
 
                     let mut retries = 0;
@@ -188,6 +216,8 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
 
                         match metadata {
                             Ok(metadata) => {
+                                // TODO respect throttle time
+
                                 if self.update_metadata(metadata).is_none() {
                                     break 'outer;
                                 }
@@ -346,9 +376,10 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
 /// when the request is queued, it will remain queued and be sent to the new host for the broker. If the new cluster
 /// config does not contain the broker id, the request will be dropped and the sender will receive an error indicating
 /// the connection is closed.
+#[derive(Clone)]
 pub(crate) struct SelectorTaskHandle {
     pub cluster: watch::Receiver<Cluster>,
-    pub tx_topic_metadata: mpsc::Sender<TopicMetadataRequest>,
+    pub tx_topic_metadata: mpsc::Sender<RefreshMetadataRequest>,
     cancellation_token: CancellationToken,
     task_tracker: TaskTracker,
 }
@@ -433,12 +464,12 @@ impl SelectorTaskHandle {
 
     pub async fn refresh_metadata_for_topics(
         &self,
-        topics: Vec<MetadataRequestTopic>,
+        topics: Option<Vec<MetadataRequestTopic>>,
     ) -> Result<(), KafkaChannelError> {
         let (tx, rx) = oneshot::channel();
 
         self.tx_topic_metadata
-            .send(TopicMetadataRequest { topics, tx })
+            .send(RefreshMetadataRequest { topics, tx })
             .await
             .map_err(|_| KafkaChannelError::Closed)?;
 

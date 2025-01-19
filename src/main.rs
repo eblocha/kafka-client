@@ -5,12 +5,13 @@ pub mod config;
 mod conn;
 mod proto;
 
-use std::{io, path::PathBuf};
+use std::{io, path::PathBuf, pin::pin};
 
 use clap::{Parser, Subcommand};
 use clients::network::NetworkClient;
-use cmd::{admin::AdminCommands, producer::produce_from_file, Run};
+use cmd::{admin::AdminCommands, consumer::Consumer, producer::produce_from_file, Run};
 use config::KafkaConfig;
+use futures::StreamExt;
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
@@ -32,6 +33,10 @@ enum Client {
     Producer {
         #[arg(short, long)]
         file: PathBuf,
+        #[arg(short, long)]
+        topic: String,
+    },
+    Consumer {
         #[arg(short, long)]
         topic: String,
     },
@@ -57,6 +62,21 @@ pub async fn main() -> anyhow::Result<()> {
     match cli.client {
         Client::Admin(cmd) => cmd.run(&manager).await?,
         Client::Producer { file, topic } => produce_from_file(&manager, topic, file).await?,
+        Client::Consumer { topic } => {
+            let consumer = Consumer::new(topic, manager.clone());
+            let mut stream = pin!(consumer.stream());
+            while let Some(Ok(batch)) = stream.next().await {
+                for set in batch {
+                    for record in set.records {
+                        if let Some(value) = record.value {
+                            if let Ok(value) = String::from_utf8(value.to_vec()) {
+                                println!("{}", value);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     manager.shutdown().await;
