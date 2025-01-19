@@ -12,6 +12,7 @@ use clients::network::NetworkClient;
 use cmd::{admin::AdminCommands, producer::produce_from_file, Run};
 use config::KafkaConfig;
 use tracing::Level;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -40,7 +41,8 @@ enum Client {
 pub async fn main() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::fmt()
         .with_writer(io::stderr)
-        .with_max_level(Level::DEBUG)
+        .with_max_level(Level::WARN)
+        .with_env_filter(EnvFilter::from_default_env())
         .compact()
         .finish();
 
