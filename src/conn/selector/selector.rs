@@ -380,6 +380,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
 pub(crate) struct SelectorTaskHandle {
     pub cluster: watch::Receiver<Cluster>,
     pub tx_topic_metadata: mpsc::Sender<RefreshMetadataRequest>,
+    pub tx_cluster: watch::Sender<Cluster>,
     cancellation_token: CancellationToken,
     task_tracker: TaskTracker,
 }
@@ -440,7 +441,7 @@ impl SelectorTaskHandle {
         // start the selector task to manage broker connections
         let selector_task = SelectorTask {
             hosts,
-            tx: cluster_tx,
+            tx: cluster_tx.clone(),
             rx_topic_metadata,
             join_set,
             retry_config: config.conn.retry,
@@ -459,6 +460,7 @@ impl SelectorTaskHandle {
             tx_topic_metadata,
             cancellation_token,
             task_tracker,
+            tx_cluster: cluster_tx,
         }
     }
 

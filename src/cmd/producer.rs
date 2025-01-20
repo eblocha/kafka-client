@@ -31,7 +31,11 @@ pub async fn produce_from_file(
 
     let topic = TopicName(StrBytes::from_string(topic));
 
-    let topic_data = client.get_topic_metadata(&topic).await??;
+    let topic_map = client.get_topic_metadata(&[&topic]).await?;
+
+    let topic_data = topic_map
+        .get(&topic)
+        .ok_or(ErrorCode::UnknownTopicOrPartition)?;
 
     let partition = &topic_data.partitions[0];
 
@@ -55,13 +59,13 @@ pub async fn produce_from_file(
             transactional: false,
             control: false,
             partition_leader_epoch: leader_epoch,
-            producer_id: 0,
+            producer_id: -1,
             producer_epoch: -1,
             timestamp_type: records::TimestampType::Creation,
             offset: iter as i64,
             sequence: iter,
             timestamp: timestamp as i64,
-            key: Some(Bytes::new()),
+            key: None,
             value: Some(Bytes::from(line)),
             headers: Default::default(),
         };

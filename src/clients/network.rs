@@ -1,5 +1,8 @@
-use kafka_protocol::messages::{
-    metadata_request::MetadataRequestTopic, metadata_response::MetadataResponseTopic, TopicName,
+use kafka_protocol::{
+    indexmap::IndexMap,
+    messages::{
+        metadata_request::MetadataRequestTopic, metadata_response::MetadataResponseTopic, TopicName,
+    },
 };
 
 use crate::{
@@ -9,10 +12,7 @@ use crate::{
         selector::{Cluster, SelectorTaskHandle},
         KafkaChannelError, Sendable,
     },
-    proto::{
-        error_codes::ErrorCode,
-        ver::{FromVersionRange, GetApiKey},
-    },
+    proto::ver::{FromVersionRange, GetApiKey},
 };
 
 /// Maintains connections to the entire cluster, and forwards requests to the appropriate broker.
@@ -73,42 +73,39 @@ impl NetworkClient {
         handle.send(req).await
     }
 
+    pub fn invalidate_topic_metadata(&mut self, topic_names: &[&TopicName]) {
+        self.selector.tx_cluster.send_modify(|cluster| {
+            for topic_name in topic_names {
+                cluster.metadata.topics.swap_remove(*topic_name);
+            }
+        });
+    }
+
     pub async fn get_topic_metadata(
         &self,
-        name: &TopicName,
-    ) -> Result<Result<MetadataResponseTopic, ErrorCode>, KafkaChannelError> {
+        topic_names: &[&TopicName],
+    ) -> Result<IndexMap<TopicName, MetadataResponseTopic>, KafkaChannelError> {
         let cluster_state = self.selector.cluster.borrow();
 
-        let topic_data = match cluster_state.metadata.topics.get(name) {
-            Some(td) if td.error_code == ErrorCode::None as i16 => td.clone(),
-            _ => {
-                drop(cluster_state); // release lock on cluster state
+        let missing_topic_names = topic_names
+            .iter()
+            .filter(|topic_name| !cluster_state.metadata.topics.contains_key(**topic_name))
+            .map(|name| {
                 let mut req_topic = MetadataRequestTopic::default();
-                req_topic.name = Some(name.clone());
+                req_topic.name = Some((*name).clone());
+                req_topic
+            })
+            .collect::<Vec<_>>();
 
-                tracing::debug!("refreshing metadata for topic {:?}", name.0);
+        drop(cluster_state);
 
-                self.selector
-                    .refresh_metadata_for_topics(Some(vec![req_topic]))
-                    .await?;
-
-                let cluster_state = self.selector.cluster.borrow();
-
-                let Some(topic_data) = cluster_state.metadata.topics.get(name) else {
-                    return Ok(Err(ErrorCode::UnknownTopicOrPartition));
-                };
-
-                topic_data.clone()
-            }
-        };
-
-        let error_code: ErrorCode = topic_data.error_code.into();
-
-        if error_code != ErrorCode::None {
-            return Ok(Err(error_code));
+        if !missing_topic_names.is_empty() {
+            self.selector
+                .refresh_metadata_for_topics(Some(missing_topic_names))
+                .await?;
         }
 
-        return Ok(Ok(topic_data));
+        return Ok(self.read_cluster_snapshot().metadata.topics);
     }
 
     pub async fn shutdown(&self) {

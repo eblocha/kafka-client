@@ -5,13 +5,13 @@ pub mod config;
 mod conn;
 mod proto;
 
-use std::{io, path::PathBuf, pin::pin};
+use std::{io, path::PathBuf};
 
 use clap::{Parser, Subcommand};
-use clients::network::NetworkClient;
-use cmd::{admin::AdminCommands, consumer::Consumer, producer::produce_from_file, Run};
+use clients::{consumer::Consumer, network::NetworkClient};
+use cmd::{admin::AdminCommands, producer::produce_from_file, Run};
 use config::KafkaConfig;
-use futures::StreamExt;
+use kafka_protocol::{messages::TopicName, protocol::StrBytes};
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
@@ -63,12 +63,15 @@ pub async fn main() -> anyhow::Result<()> {
         Client::Admin(cmd) => cmd.run(&manager).await?,
         Client::Producer { file, topic } => produce_from_file(&manager, topic, file).await?,
         Client::Consumer { topic } => {
-            let consumer = Consumer::new(topic, manager.clone());
-            let mut stream = pin!(consumer.stream());
-            while let Some(Ok(batch)) = stream.next().await {
-                for set in batch {
-                    for record in set.records {
-                        if let Some(value) = record.value {
+            let mut consumer = Consumer::new(manager.clone());
+            consumer
+                .subscribe(&[&TopicName(StrBytes::from_string(topic))])
+                .await?;
+
+            while let Ok(batch) = consumer.poll().await {
+                for set in batch.iter() {
+                    for record in set.records.iter() {
+                        if let Some(ref value) = record.value {
                             if let Ok(value) = String::from_utf8(value.to_vec()) {
                                 println!("{}", value);
                             }
