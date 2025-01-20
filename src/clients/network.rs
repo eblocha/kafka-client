@@ -1,9 +1,5 @@
-use kafka_protocol::{
-    indexmap::IndexMap,
-    messages::{
-        metadata_request::MetadataRequestTopic, metadata_response::MetadataResponseTopic, TopicName,
-    },
-};
+use kafka_protocol::messages::{metadata_request::MetadataRequestTopic, TopicName};
+use tokio::sync::watch::Ref;
 
 use crate::{
     conn::{
@@ -64,7 +60,7 @@ impl NetworkClient {
         req: F,
         broker_id: i32,
     ) -> Result<R::Response, KafkaChannelError> {
-        let cluster = self.read_cluster_snapshot();
+        let cluster = self.borrow_cluster().clone();
         let Some((_, handle)) = cluster.broker_channels.0.get(&broker_id) else {
             tracing::error!("no broker handle for id {broker_id}");
             return Err(KafkaChannelError::Closed);
@@ -73,23 +69,22 @@ impl NetworkClient {
         handle.send(req).await
     }
 
-    pub fn invalidate_topic_metadata(&mut self, topic_names: &[&TopicName]) {
+    pub fn invalidate_topic_metadata<'a>(&self, topic_names: impl Iterator<Item = &'a TopicName>) {
         self.selector.tx_cluster.send_modify(|cluster| {
             for topic_name in topic_names {
-                cluster.metadata.topics.swap_remove(*topic_name);
+                cluster.metadata.topics.swap_remove(topic_name);
             }
         });
     }
 
-    pub async fn get_topic_metadata(
+    pub async fn load_topic_metadata<'a>(
         &self,
-        topic_names: &[&TopicName],
-    ) -> Result<IndexMap<TopicName, MetadataResponseTopic>, KafkaChannelError> {
+        topic_names: impl Iterator<Item = &'a TopicName>,
+    ) -> Result<(), KafkaChannelError> {
         let cluster_state = self.selector.cluster.borrow();
 
         let missing_topic_names = topic_names
-            .iter()
-            .filter(|topic_name| !cluster_state.metadata.topics.contains_key(**topic_name))
+            .filter(|topic_name| !cluster_state.metadata.topics.contains_key(*topic_name))
             .map(|name| {
                 let mut req_topic = MetadataRequestTopic::default();
                 req_topic.name = Some((*name).clone());
@@ -105,14 +100,14 @@ impl NetworkClient {
                 .await?;
         }
 
-        return Ok(self.read_cluster_snapshot().metadata.topics);
+        return Ok(());
     }
 
     pub async fn shutdown(&self) {
         self.selector.shutdown().await;
     }
 
-    pub fn read_cluster_snapshot(&self) -> Cluster {
-        self.selector.cluster.borrow().clone()
+    pub fn borrow_cluster(&self) -> Ref<'_, Cluster> {
+        self.selector.cluster.borrow()
     }
 }

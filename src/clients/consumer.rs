@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use fnv::FnvHashMap;
 use kafka_protocol::{
@@ -46,12 +49,13 @@ impl Consumer {
         }
     }
 
-    pub async fn subscribe(&mut self, topics: &[&TopicName]) -> Result<(), KafkaChannelError> {
-        let topic_map = self.client.get_topic_metadata(topics).await?;
+    pub async fn subscribe(&mut self, topics: &[TopicName]) -> Result<(), KafkaChannelError> {
+        self.client.load_topic_metadata(topics.iter()).await?;
+        let topic_map = &self.client.borrow_cluster().metadata.topics;
         self.subscriptions = topics
-            .iter()
+            .into_iter()
             .filter_map(|name| {
-                let metadata = topic_map.get(*name);
+                let metadata = topic_map.get(name);
                 metadata.map(|meta| (meta.topic_id, (*name).clone()))
             })
             .collect();
@@ -59,19 +63,36 @@ impl Consumer {
         Ok(())
     }
 
-    pub async fn poll(&mut self) -> Result<Vec<ConsumerRecords>, KafkaChannelError> {
-        let subscribed_topics: Vec<_> = self.subscriptions.values().collect();
+    pub async fn poll(
+        &mut self,
+    ) -> Result<(Vec<ConsumerRecords>, Option<Duration>), KafkaChannelError> {
+        self.client
+            .load_topic_metadata(self.subscriptions.values())
+            .await?;
 
-        let topic_map = self.client.get_topic_metadata(&subscribed_topics).await?;
+        let cluster = self.client.borrow_cluster();
 
         let mut broker_id_to_fetch_req = FnvHashMap::<i32, FetchRequest>::default();
         let mut broker_id_to_offset_req = FnvHashMap::<i32, ListOffsetsRequest>::default();
 
+        let mut invalid_topics = HashSet::<TopicName>::new();
+
         for (topic_id, topic_name) in self.subscriptions.iter() {
-            let Some(meta) = topic_map.get(topic_name) else {
+            let Some(meta) = cluster.metadata.topics.get(topic_name) else {
                 tracing::warn!(topic = topic_name.0.as_str(), "unknown topic");
                 continue;
             };
+
+            let error_code: ErrorCode = meta.error_code.into();
+
+            if error_code != ErrorCode::None {
+                tracing::error!(
+                    "error fetching metadata for topic {}",
+                    topic_name.0.as_str()
+                );
+                invalid_topics.insert(topic_name.clone());
+                continue;
+            }
 
             let mut broker_id_to_fetch_topic = FnvHashMap::<i32, FetchTopic>::default();
             let mut broker_id_to_offset_topic = FnvHashMap::<i32, ListOffsetsTopic>::default();
@@ -111,14 +132,19 @@ impl Consumer {
                     offsets_topic.partitions.push({
                         let mut offsets_partition = ListOffsetsPartition::default();
                         offsets_partition.partition_index = part.partition_index;
+                        offsets_partition.timestamp = -1; // latest
                         offsets_partition
                     });
                 }
             }
 
             for (broker_id, topic) in broker_id_to_fetch_topic {
-                let req = broker_id_to_fetch_req.entry(broker_id).or_default();
-                req.max_wait_ms = 5000;
+                let req = broker_id_to_fetch_req.entry(broker_id).or_insert_with(|| {
+                    let mut req = FetchRequest::default();
+                    req.cluster_id = cluster.metadata.cluster_id.clone();
+                    req.min_bytes = 4096;
+                    req
+                });
                 req.topics.push(topic);
             }
 
@@ -126,6 +152,12 @@ impl Consumer {
                 let req = broker_id_to_offset_req.entry(broker_id).or_default();
                 req.topics.push(topic);
             }
+        }
+
+        drop(cluster);
+
+        if !invalid_topics.is_empty() {
+            self.client.invalidate_topic_metadata(invalid_topics.iter());
         }
 
         let mut fetch_join_set = JoinSet::new();
@@ -142,6 +174,7 @@ impl Consumer {
         }
 
         let mut records = Vec::<ConsumerRecords>::new();
+        let mut will_have_records = false;
 
         loop {
             let event = tokio::select! {
@@ -179,6 +212,9 @@ impl Consumer {
                             match error_code {
                                 ErrorCode::InvalidTopicException
                                 | ErrorCode::ReassignmentInProgress
+                                | ErrorCode::FencedLeaderEpoch
+                                | ErrorCode::UnknownLeaderEpoch
+                                | ErrorCode::StaleBrokerEpoch
                                 | ErrorCode::NotLeaderOrFollower => {
                                     invalid_topics.insert(topic_name.clone());
                                     continue;
@@ -219,11 +255,11 @@ impl Consumer {
                     }
 
                     if !invalid_topics.is_empty() {
-                        self.client
-                            .invalidate_topic_metadata(&invalid_topics.iter().collect::<Vec<_>>());
+                        self.client.invalidate_topic_metadata(invalid_topics.iter());
                     }
                 }
                 Either::Right(offsets) => {
+                    will_have_records = true;
                     for top in offsets.topics {
                         for part in top.partitions {
                             // TODO handle error codes here
@@ -242,6 +278,10 @@ impl Consumer {
             }
         }
 
-        Ok(records)
+        if !records.is_empty() || will_have_records {
+            Ok((records, None))
+        } else {
+            Ok((records, Some(Duration::from_millis(500))))
+        }
     }
 }

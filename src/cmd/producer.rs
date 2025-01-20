@@ -3,6 +3,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+use anyhow::bail;
 use bytes::{Bytes, BytesMut};
 use kafka_protocol::{
     indexmap::IndexMap,
@@ -31,11 +32,19 @@ pub async fn produce_from_file(
 
     let topic = TopicName(StrBytes::from_string(topic));
 
-    let topic_map = client.get_topic_metadata(&[&topic]).await?;
+    client.load_topic_metadata([&topic].into_iter()).await?;
+
+    let topic_map = &client.borrow_cluster().metadata.topics;
 
     let topic_data = topic_map
         .get(&topic)
         .ok_or(ErrorCode::UnknownTopicOrPartition)?;
+
+    let error_code: ErrorCode = topic_data.error_code.into();
+
+    if error_code != ErrorCode::None {
+        bail!(error_code);
+    }
 
     let partition = &topic_data.partitions[0];
 
