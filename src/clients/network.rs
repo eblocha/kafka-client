@@ -90,7 +90,7 @@ impl NetworkClient {
             .filter(|topic_name| !cluster_state.metadata.topics.contains_key(*topic_name))
             .map(|name| {
                 let mut req_topic = MetadataRequestTopic::default();
-                req_topic.name = Some((*name).clone());
+                req_topic.name = Some(name.clone());
                 req_topic
             })
             .collect::<Vec<_>>();
