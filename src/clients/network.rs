@@ -60,10 +60,13 @@ impl NetworkClient {
         req: F,
         broker_id: i32,
     ) -> Result<R::Response, KafkaChannelError> {
-        let cluster = self.borrow_cluster().clone();
-        let Some((_, handle)) = cluster.broker_channels.0.get(&broker_id) else {
-            tracing::error!("no broker handle for id {broker_id}");
-            return Err(KafkaChannelError::Closed);
+        let handle = {
+            let cluster = self.borrow_cluster();
+            let Some((_, handle)) = cluster.broker_channels.0.get(&broker_id) else {
+                tracing::error!("no broker handle for id {broker_id}");
+                return Err(KafkaChannelError::Closed);
+            };
+            handle.clone()
         };
 
         handle.send(req).await
