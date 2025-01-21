@@ -36,6 +36,20 @@ pub enum KafkaChannelError {
     Version,
 }
 
+impl From<oneshot::error::RecvError> for KafkaChannelError {
+    #[inline]
+    fn from(_: oneshot::error::RecvError) -> Self {
+        Self::Closed
+    }
+}
+
+impl<T> From<mpsc::error::SendError<T>> for KafkaChannelError {
+    #[inline]
+    fn from(_: mpsc::error::SendError<T>) -> Self {
+        Self::Closed
+    }
+}
+
 pub type ResponseSender = oneshot::Sender<Result<DecodableResponse, io::Error>>;
 
 #[derive(Debug)]
@@ -266,13 +280,10 @@ pub async fn send_on<R: Sendable>(
         request: req.into(),
     };
 
-    sender
-        .send(KafkaChannelMessage { versioned, tx })
-        .await
-        .map_err(|_| KafkaChannelError::Closed)?;
+    sender.send(KafkaChannelMessage { versioned, tx }).await?;
 
     // error happens when the client dropped our sender before sending anything.
-    let response = rx.await.map_err(|_| KafkaChannelError::Closed)??;
+    let response = rx.await??;
 
     Ok(R::decode(response)?)
 }

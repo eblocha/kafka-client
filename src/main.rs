@@ -65,12 +65,10 @@ pub async fn main() -> anyhow::Result<()> {
         Client::Consumer { topic } => {
             let mut consumer = Consumer::new(manager.clone());
             consumer
-                .subscribe(&[TopicName(StrBytes::from_string(topic))])
+                .subscribe(vec![TopicName(StrBytes::from_string(topic))])
                 .await?;
 
-            while let Ok(batch) = consumer.poll().await {
-                let (batch, sleep) = batch;
-
+            while let Some(batch) = consumer.next().await {
                 for set in batch.iter() {
                     for record in set.records.iter() {
                         if let Some(ref value) = record.value {
@@ -79,10 +77,6 @@ pub async fn main() -> anyhow::Result<()> {
                             }
                         }
                     }
-                }
-
-                if let Some(duration) = sleep {
-                    tokio::time::sleep(duration).await;
                 }
             }
         }

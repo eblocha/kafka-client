@@ -41,14 +41,13 @@ impl NetworkClient {
         &self,
         req: F,
     ) -> Result<R::Response, KafkaChannelError> {
-        let Some((_, handle)) = self
-            .selector
-            .cluster
-            .borrow()
-            .broker_channels
-            .get_best_connection()
-        else {
-            return Err(KafkaChannelError::Closed);
+        let handle = {
+            // Closure is to prevent holding the cluster across an await point, which would make this non-Send.
+            let Some((_, handle)) = self.borrow_cluster().broker_channels.get_best_connection()
+            else {
+                return Err(KafkaChannelError::Closed);
+            };
+            handle
         };
 
         handle.send(req).await
@@ -61,6 +60,7 @@ impl NetworkClient {
         broker_id: i32,
     ) -> Result<R::Response, KafkaChannelError> {
         let handle = {
+            // Closure is to prevent holding the cluster across an await point, which would make this non-Send.
             let cluster = self.borrow_cluster();
             let Some((_, handle)) = cluster.broker_channels.0.get(&broker_id) else {
                 tracing::error!("no broker handle for id {broker_id}");
@@ -84,18 +84,18 @@ impl NetworkClient {
         &self,
         topic_names: impl Iterator<Item = &'a TopicName>,
     ) -> Result<(), KafkaChannelError> {
-        let cluster_state = self.selector.cluster.borrow();
-
-        let missing_topic_names = topic_names
-            .filter(|topic_name| !cluster_state.metadata.topics.contains_key(*topic_name))
-            .map(|name| {
-                let mut req_topic = MetadataRequestTopic::default();
-                req_topic.name = Some(name.clone());
-                req_topic
-            })
-            .collect::<Vec<_>>();
-
-        drop(cluster_state);
+        let missing_topic_names = {
+            // Closure is to prevent holding the cluster across an await point, which would make this non-Send.
+            let cluster_state = self.borrow_cluster();
+            topic_names
+                .filter(|topic_name| !cluster_state.metadata.topics.contains_key(*topic_name))
+                .map(|name| {
+                    let mut req_topic = MetadataRequestTopic::default();
+                    req_topic.name = Some(name.clone());
+                    req_topic
+                })
+                .collect::<Vec<_>>()
+        };
 
         if !missing_topic_names.is_empty() {
             self.selector

@@ -472,10 +472,9 @@ impl SelectorTaskHandle {
 
         self.tx_topic_metadata
             .send(RefreshMetadataRequest { topics, tx })
-            .await
-            .map_err(|_| KafkaChannelError::Closed)?;
+            .await?;
 
-        rx.await.map_err(|_| KafkaChannelError::Closed)?;
+        rx.await?;
 
         Ok(())
     }

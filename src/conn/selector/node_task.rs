@@ -286,12 +286,9 @@ impl NodeTaskHandle {
 
         let msg = NodeTaskMessage { tx };
 
-        self.tx
-            .send(msg)
-            .await
-            .map_err(|_| KafkaChannelError::Closed)?;
+        self.tx.send(msg).await?;
 
-        let conn = rx.await.map_err(|_| KafkaChannelError::Closed)?;
+        let conn = rx.await?;
 
         let api_key = req.key();
 

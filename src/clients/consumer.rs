@@ -12,7 +12,11 @@ use kafka_protocol::{
     },
     records::{Record, RecordBatchDecoder},
 };
-use tokio::task::JoinSet;
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinSet,
+    time::Instant,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -24,10 +28,15 @@ use crate::{
 #[derive(Debug, Hash, PartialEq, PartialOrd, Eq, Ord, Clone)]
 pub struct TopicPartition(TopicName, i32);
 
+/// A set of records from a topic partition
 #[derive(Debug, Clone)]
 pub struct ConsumerRecords {
+    /// The topic name and partition index
     pub topic_partition: TopicPartition,
+    /// The batch of records from the partition
     pub records: Vec<Record>,
+    /// The offset of the last record in `records`.
+    pub largest_offset: Option<i64>,
 }
 
 #[derive(Debug, Default)]
@@ -35,24 +44,108 @@ struct PartitionState {
     offset: Option<i64>,
 }
 
-pub struct Consumer {
+enum ConsumerCommandKind {
+    SubscribeTopics(Vec<TopicName>),
+}
+
+struct ConsumerCommand {
+    /// Emits when the command has been executed successfully. Drop to abort.
+    tx: oneshot::Sender<Result<(), KafkaChannelError>>,
+    kind: ConsumerCommandKind,
+}
+
+enum ConsumerTaskEvent {
+    Command(ConsumerCommand),
+    Poll,
+    Shutdown,
+}
+
+struct ConsumerTask {
     client: NetworkClient,
     states: HashMap<TopicPartition, PartitionState>,
     subscriptions: HashMap<Uuid, TopicName>,
     join_set: JoinSet<Result<ResponseKind, KafkaChannelError>>,
+    tx: mpsc::Sender<Vec<ConsumerRecords>>,
+    rx: mpsc::UnboundedReceiver<ConsumerCommand>,
+    next_event: Option<ConsumerTaskEvent>,
+    next_poll_delayed_until: Option<Instant>,
 }
 
-impl Consumer {
-    pub fn new(client: NetworkClient) -> Self {
+impl ConsumerTask {
+    pub fn new(
+        client: NetworkClient,
+        tx: mpsc::Sender<Vec<ConsumerRecords>>,
+        rx: mpsc::UnboundedReceiver<ConsumerCommand>,
+    ) -> Self {
         Self {
             client,
-            states: Default::default(),
-            subscriptions: Default::default(),
+            tx,
+            rx,
+            states: HashMap::new(),
+            subscriptions: HashMap::new(),
             join_set: JoinSet::new(),
+            next_event: None,
+            next_poll_delayed_until: None,
         }
     }
 
-    pub async fn subscribe(&mut self, topics: &[TopicName]) -> Result<(), KafkaChannelError> {
+    pub async fn run(mut self) {
+        loop {
+            // This loop is roughly equivalent to "poll" in the Java impl
+            let event = self.recv_next_event().await;
+
+            match event {
+                ConsumerTaskEvent::Shutdown => break,
+                ConsumerTaskEvent::Command(command) => self.handle_command(command).await,
+                ConsumerTaskEvent::Poll => self.handle_poll().await,
+            }
+        }
+    }
+
+    async fn handle_command(&mut self, command: ConsumerCommand) {
+        if command.tx.is_closed() {
+            return;
+        }
+
+        match command.kind {
+            ConsumerCommandKind::SubscribeTopics(ref topics) => {
+                let result = self.subscribe(topics).await;
+                if let Err(ref e) = result {
+                    tracing::error!(topics = ?topics, "failed to subscribe: {e}");
+                };
+                let _ = command.tx.send(result);
+            }
+        }
+    }
+
+    async fn recv_next_event(&mut self) -> ConsumerTaskEvent {
+        if let Some(event) = self.next_event.take() {
+            return event;
+        }
+
+        let sleep_then_poll = async {
+            if let Some(instant) = self.next_poll_delayed_until {
+                tokio::time::sleep_until(instant).await;
+            }
+        };
+
+        let event = tokio::select! {
+            biased;
+            command = self.rx.recv() => {
+                let Some(cmd) = command else {
+                    return ConsumerTaskEvent::Shutdown;
+                };
+                ConsumerTaskEvent::Command(cmd)
+            },
+            _ = sleep_then_poll => ConsumerTaskEvent::Poll,
+            else => ConsumerTaskEvent::Poll,
+        };
+
+        event
+    }
+
+    async fn subscribe(&mut self, topics: &[TopicName]) -> Result<(), KafkaChannelError> {
+        tracing::info!("subscribing to topics {topics:?}");
         self.client.load_topic_metadata(topics.iter()).await?;
         let topic_map = &self.client.borrow_cluster().metadata.topics;
         self.subscriptions = topics
@@ -63,20 +156,38 @@ impl Consumer {
             })
             .collect();
 
+        tracing::info!("subscribed to topics {topics:?}");
+
         Ok(())
     }
 
-    pub async fn poll(
-        &mut self,
-    ) -> Result<(Vec<ConsumerRecords>, Option<Duration>), KafkaChannelError> {
-        let will_have_records_next_poll = self.spawn_next().await?;
+    async fn handle_poll(&mut self) {
+        match self.poll().await {
+            Ok(records) => {
+                if self.tx.send(records).await.is_err() {
+                    // No one is listening for records. Shut down.
+                    self.next_event.replace(ConsumerTaskEvent::Shutdown);
+                }
+            }
+            Err(err) => {
+                tracing::error!("failed to poll for records: {err}");
+            }
+        }
+    }
+
+    async fn poll(&mut self) -> Result<Vec<ConsumerRecords>, KafkaChannelError> {
+        let may_have_records_next_poll = self.spawn_next().await?;
         let records = self.join_next().await?;
 
-        if !records.is_empty() || will_have_records_next_poll {
-            Ok((records, None))
-        } else {
-            Ok((records, Some(Duration::from_millis(500))))
+        if records.is_empty() && !may_have_records_next_poll {
+            // We are seeked to the end of all partitions. Delay the next poll.
+            let now = Instant::now();
+            // TODO config
+            let next_due = now.checked_add(Duration::from_millis(500)).unwrap_or(now);
+            self.next_poll_delayed_until.replace(next_due);
         }
+
+        Ok(records)
     }
 
     async fn spawn_next(&mut self) -> Result<bool, KafkaChannelError> {
@@ -89,7 +200,7 @@ impl Consumer {
         let mut broker_id_to_fetch_req = FnvHashMap::<i32, FetchRequest>::default();
         let mut broker_id_to_offset_req = FnvHashMap::<i32, ListOffsetsRequest>::default();
 
-        let mut will_have_records_next_poll = false;
+        let mut spanwed_offset_requests = false;
 
         let mut invalid_topics = HashSet::<&TopicName>::new();
 
@@ -152,7 +263,7 @@ impl Consumer {
                         offsets_partition
                     });
 
-                    will_have_records_next_poll = true;
+                    spanwed_offset_requests = true;
                 }
             }
 
@@ -160,6 +271,7 @@ impl Consumer {
                 let req = broker_id_to_fetch_req.entry(broker_id).or_insert_with(|| {
                     let mut req = FetchRequest::default();
                     req.cluster_id = cluster.metadata.cluster_id.clone();
+                    // TODO config
                     req.min_bytes = 4096;
                     req
                 });
@@ -191,7 +303,7 @@ impl Consumer {
                 .spawn(async move { c.send_to(KafkaRequest::from(req), broker_id).await });
         }
 
-        Ok(will_have_records_next_poll)
+        Ok(spanwed_offset_requests)
     }
 
     async fn join_next(&mut self) -> Result<Vec<ConsumerRecords>, KafkaChannelError> {
@@ -258,16 +370,19 @@ impl Consumer {
                             let largest_offset = part_records
                                 .iter()
                                 .max_by(|a, b| a.offset.cmp(&b.offset))
-                                .map(|record| record.offset + 1)
+                                .map(|record| record.offset + 1);
+
+                            let next_offset = largest_offset
                                 .or(state.offset)
                                 .unwrap_or(part.log_start_offset);
 
-                            state.offset.replace(largest_offset);
+                            state.offset.replace(next_offset);
 
                             if !part_records.is_empty() {
                                 records.push(ConsumerRecords {
                                     topic_partition,
                                     records: part_records,
+                                    largest_offset,
                                 });
                             }
                         }
@@ -300,5 +415,42 @@ impl Consumer {
         }
 
         Ok(records)
+    }
+}
+
+pub struct Consumer {
+    rx: mpsc::Receiver<Vec<ConsumerRecords>>,
+    tx: mpsc::UnboundedSender<ConsumerCommand>,
+}
+
+impl Consumer {
+    pub fn new(client: NetworkClient) -> Self {
+        let (tx_records, rx_records) = mpsc::channel(1);
+        let (tx_commands, rx_commands) = mpsc::unbounded_channel();
+
+        let task = ConsumerTask::new(client, tx_records, rx_commands);
+
+        // TODO: cancellation token
+        tokio::spawn(task.run());
+
+        Self {
+            rx: rx_records,
+            tx: tx_commands,
+        }
+    }
+
+    pub async fn subscribe(&self, topics: Vec<TopicName>) -> Result<(), KafkaChannelError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.tx.send(ConsumerCommand {
+            tx,
+            kind: ConsumerCommandKind::SubscribeTopics(topics),
+        })?;
+
+        rx.await?
+    }
+
+    pub async fn next(&mut self) -> Option<Vec<ConsumerRecords>> {
+        self.rx.recv().await
     }
 }
