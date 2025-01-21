@@ -88,6 +88,7 @@ impl<IO> KafkaChannelTask<IO> {
                             let api_key = message.versioned.request.as_api_key();
 
                             let record = RequestRecord {
+                                api_key,
                                 api_version: message.versioned.api_version,
                                 response_header_version: api_key
                                     .response_header_version(message.versioned.api_version),

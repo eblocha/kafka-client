@@ -5,4 +5,4 @@ pub mod host;
 pub mod selector;
 
 pub use channel::KafkaChannelError;
-pub use codec::sendable::Sendable;
+pub use codec::sendable::{DecodableResponse, Sendable};

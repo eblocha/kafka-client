@@ -8,16 +8,17 @@ use kafka_protocol::{
     messages::{
         fetch_request::{FetchPartition, FetchTopic},
         list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic},
-        FetchRequest, FetchResponse, ListOffsetsRequest, ListOffsetsResponse, TopicName,
+        FetchRequest, ListOffsetsRequest, ResponseKind, TopicName,
     },
     records::{Record, RecordBatchDecoder},
 };
 use tokio::task::JoinSet;
-use tokio_util::either::Either;
 use uuid::Uuid;
 
 use crate::{
-    clients::network::NetworkClient, conn::KafkaChannelError, proto::error_codes::ErrorCode,
+    clients::network::NetworkClient,
+    conn::KafkaChannelError,
+    proto::{error_codes::ErrorCode, request::KafkaRequest},
 };
 
 #[derive(Debug, Hash, PartialEq, PartialOrd, Eq, Ord, Clone)]
@@ -38,8 +39,7 @@ pub struct Consumer {
     client: NetworkClient,
     states: HashMap<TopicPartition, PartitionState>,
     subscriptions: HashMap<Uuid, TopicName>,
-    fetch_join_set: JoinSet<Result<FetchResponse, KafkaChannelError>>,
-    offsets_join_set: JoinSet<Result<ListOffsetsResponse, KafkaChannelError>>,
+    join_set: JoinSet<Result<ResponseKind, KafkaChannelError>>,
 }
 
 impl Consumer {
@@ -48,8 +48,7 @@ impl Consumer {
             client,
             states: Default::default(),
             subscriptions: Default::default(),
-            fetch_join_set: JoinSet::new(),
-            offsets_join_set: JoinSet::new(),
+            join_set: JoinSet::new(),
         }
     }
 
@@ -70,9 +69,8 @@ impl Consumer {
     pub async fn poll(
         &mut self,
     ) -> Result<(Vec<ConsumerRecords>, Option<Duration>), KafkaChannelError> {
-        self.spawn_next().await?;
+        let will_have_records_next_poll = self.spawn_next().await?;
         let records = self.join_next().await?;
-        let will_have_records_next_poll = !self.offsets_join_set.is_empty();
 
         if !records.is_empty() || will_have_records_next_poll {
             Ok((records, None))
@@ -81,7 +79,7 @@ impl Consumer {
         }
     }
 
-    async fn spawn_next(&mut self) -> Result<(), KafkaChannelError> {
+    async fn spawn_next(&mut self) -> Result<bool, KafkaChannelError> {
         self.client
             .load_topic_metadata(self.subscriptions.values())
             .await?;
@@ -90,6 +88,8 @@ impl Consumer {
 
         let mut broker_id_to_fetch_req = FnvHashMap::<i32, FetchRequest>::default();
         let mut broker_id_to_offset_req = FnvHashMap::<i32, ListOffsetsRequest>::default();
+
+        let mut will_have_records_next_poll = false;
 
         let mut invalid_topics = HashSet::<&TopicName>::new();
 
@@ -151,6 +151,8 @@ impl Consumer {
                         offsets_partition.timestamp = -1; // latest
                         offsets_partition
                     });
+
+                    will_have_records_next_poll = true;
                 }
             }
 
@@ -179,17 +181,17 @@ impl Consumer {
 
         for (broker_id, req) in broker_id_to_fetch_req {
             let c = self.client.clone();
-            self.fetch_join_set
-                .spawn(async move { c.send_to(req, broker_id).await });
+            self.join_set
+                .spawn(async move { c.send_to(KafkaRequest::from(req), broker_id).await });
         }
 
         for (broker_id, req) in broker_id_to_offset_req {
             let c = self.client.clone();
-            self.offsets_join_set
-                .spawn(async move { c.send_to(req, broker_id).await });
+            self.join_set
+                .spawn(async move { c.send_to(KafkaRequest::from(req), broker_id).await });
         }
 
-        Ok(())
+        Ok(will_have_records_next_poll)
     }
 
     async fn join_next(&mut self) -> Result<Vec<ConsumerRecords>, KafkaChannelError> {
@@ -199,20 +201,18 @@ impl Consumer {
 
         loop {
             let event = tokio::select! {
-                Some(fetch) = self.fetch_join_set.join_next() => Either::Left(fetch),
-                Some(offsets) = self.offsets_join_set.join_next() => Either::Right(offsets),
+                Some(response) = self.join_set.join_next() => response,
                 else => break
             };
 
             let event = match event {
-                Either::Left(Ok(Ok(fetch))) => Either::Left(fetch),
-                Either::Right(Ok(Ok(offsets))) => Either::Right(offsets),
-                Either::Left(Ok(Err(e))) | Either::Right(Ok(Err(e))) => return Err(e),
+                Ok(Ok(fetch)) => fetch,
+                Ok(Err(e)) => return Err(e),
                 _ => continue, // panic when sending request
             };
 
             match event {
-                Either::Left(fetch) => {
+                ResponseKind::FetchResponse(fetch) => {
                     for response in fetch.responses {
                         let topic_name = if !response.topic.is_empty() {
                             &response.topic
@@ -273,7 +273,7 @@ impl Consumer {
                         }
                     }
                 }
-                Either::Right(offsets) => {
+                ResponseKind::ListOffsetsResponse(offsets) => {
                     for top in offsets.topics {
                         for part in top.partitions {
                             // TODO handle error codes here
@@ -288,6 +288,9 @@ impl Consumer {
                             );
                         }
                     }
+                }
+                _ => {
+                    // unknown response
                 }
             }
         }

@@ -1,3 +1,5 @@
+use std::io;
+
 use derive_more::derive::From;
 use kafka_protocol::{
     messages::{
@@ -20,16 +22,19 @@ use kafka_protocol::{
         ListClientMetricsResourcesRequest, ListGroupsRequest, ListOffsetsRequest,
         ListPartitionReassignmentsRequest, ListTransactionsRequest, MetadataRequest,
         OffsetCommitRequest, OffsetDeleteRequest, OffsetFetchRequest, OffsetForLeaderEpochRequest,
-        ProduceRequest, PushTelemetryRequest, RenewDelegationTokenRequest, SaslAuthenticateRequest,
-        SaslHandshakeRequest, StopReplicaRequest, SyncGroupRequest, TxnOffsetCommitRequest,
-        UnregisterBrokerRequest, UpdateFeaturesRequest, UpdateMetadataRequest, VoteRequest,
-        WriteTxnMarkersRequest,
+        ProduceRequest, PushTelemetryRequest, RenewDelegationTokenRequest, ResponseKind,
+        SaslAuthenticateRequest, SaslHandshakeRequest, StopReplicaRequest, SyncGroupRequest,
+        TxnOffsetCommitRequest, UnregisterBrokerRequest, UpdateFeaturesRequest,
+        UpdateMetadataRequest, VoteRequest, WriteTxnMarkersRequest,
     },
     protocol::{buf::ByteBufMut, Encodable, Message, VersionRange},
 };
 use paste::paste;
 
-use crate::proto::ver::{max_intersecting_version, FromVersionRange, GetApiKey, Versionable};
+use crate::{
+    conn::{DecodableResponse, Sendable},
+    proto::ver::{max_intersecting_version, FromVersionRange, GetApiKey, Versionable},
+};
 
 macro_rules! requests {
     ($($name:ident),* $(,)?) => {
@@ -85,6 +90,16 @@ macro_rules! requests {
                     }
                 }
             )*
+
+            impl Sendable for KafkaRequest {
+                type Response = ResponseKind;
+
+                fn decode(response: DecodableResponse) -> Result<Self::Response, io::Error> {
+                    match response.record.api_key {
+                        $(ApiKey::[<$name Key>] => Ok(ResponseKind::[<$name Response>]([<$name Request>]::decode(response)?)),)*
+                    }
+                }
+            }
         }
     };
 }

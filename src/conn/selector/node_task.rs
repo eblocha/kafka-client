@@ -465,6 +465,7 @@ mod test {
 
     fn encode_response<R: Encodable + HeaderVersion>(
         response: R,
+        api_key: ApiKey,
         api_version: i16,
     ) -> DecodableResponse {
         let header = ResponseHeader::default();
@@ -477,6 +478,7 @@ mod test {
 
         DecodableResponse {
             record: RequestRecord {
+                api_key,
                 api_version,
                 response_header_version: header_version,
             },
@@ -571,6 +573,7 @@ mod test {
 
                 r
             },
+            ApiKey::MetadataKey,
             channel_msg.versioned.api_version,
         );
 
@@ -590,6 +593,7 @@ mod test {
 
         let response = encode_response(
             MetadataResponse::default(),
+            ApiKey::MetadataKey,
             channel_msg.versioned.api_version,
         );
 
@@ -635,6 +639,7 @@ mod test {
                 r.error_code = ErrorCode::UnsupportedVersion as i16;
                 r
             },
+            ApiKey::ApiVersionsKey,
             channel_msg.versioned.api_version,
         );
 

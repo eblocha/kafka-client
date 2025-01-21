@@ -2,7 +2,7 @@ use std::io;
 
 use bytes::BytesMut;
 use kafka_protocol::{
-    messages::ResponseHeader,
+    messages::{ApiKey, ResponseHeader},
     protocol::{Decodable, Request},
 };
 
@@ -16,6 +16,7 @@ fn into_invalid_data(error: anyhow::Error) -> io::Error {
 /// Request context for decoding into a response type
 #[derive(Debug, Clone)]
 pub struct RequestRecord {
+    pub api_key: ApiKey,
     pub api_version: i16,
     pub response_header_version: i16,
 }
@@ -57,13 +58,5 @@ impl<T: Request + Into<KafkaRequest>> Sendable for T {
         );
 
         Self::Response::decode(&mut frame, record.api_version).map_err(into_invalid_data)
-    }
-}
-
-impl Sendable for KafkaRequest {
-    type Response = DecodableResponse;
-
-    fn decode(response: DecodableResponse) -> Result<Self::Response, io::Error> {
-        Ok(response)
     }
 }
