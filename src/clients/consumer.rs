@@ -224,6 +224,18 @@ impl ConsumerTask {
             let mut broker_id_to_offset_topic = FnvHashMap::<i32, ListOffsetsTopic>::default();
 
             for part in meta.partitions.iter() {
+                let error_code: ErrorCode = meta.error_code.into();
+
+                if error_code != ErrorCode::None || part.leader_id.0 < 0 {
+                    tracing::error!(
+                        "error fetching metadata for topic partition {}:{}",
+                        topic_name.0.as_str(),
+                        part.partition_index
+                    );
+                    invalid_topics.insert(topic_name);
+                    continue;
+                }
+
                 let state = self
                     .states
                     .entry(TopicPartition(topic_name.clone(), part.partition_index))
