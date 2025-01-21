@@ -131,12 +131,8 @@ impl ConsumerTask {
 
         let event = tokio::select! {
             biased;
-            command = self.rx.recv() => {
-                let Some(cmd) = command else {
-                    return ConsumerTaskEvent::Shutdown;
-                };
-                ConsumerTaskEvent::Command(cmd)
-            },
+            _ = self.tx.closed() => ConsumerTaskEvent::Shutdown,
+            command = self.rx.recv() => command.map(ConsumerTaskEvent::Command).unwrap_or(ConsumerTaskEvent::Shutdown),
             _ = sleep_then_poll => ConsumerTaskEvent::Poll,
             else => ConsumerTaskEvent::Poll,
         };
@@ -183,8 +179,8 @@ impl ConsumerTask {
             // We are seeked to the end of all partitions. Delay the next poll.
             let now = Instant::now();
             // TODO config
-            let next_due = now.checked_add(Duration::from_millis(500)).unwrap_or(now);
-            self.next_poll_delayed_until.replace(next_due);
+            let next_due = now.checked_add(Duration::from_millis(500));
+            self.next_poll_delayed_until = next_due;
         }
 
         Ok(records)

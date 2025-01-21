@@ -11,7 +11,7 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
-    backoff::exponential_backoff,
+    backoff::{exponential_backoff, BackoffSession},
     conn::{
         config::{ConnectionManagerConfig, ConnectionRetryConfig, MetadataRefreshConfig},
         host::BrokerHost,
@@ -139,6 +139,8 @@ struct SelectorTask<Conn> {
     metadata_config: MetadataRefreshConfig,
     /// Receiver for requests to refresh metadata now
     rx_topic_metadata: mpsc::Receiver<RefreshMetadataRequest>,
+    /// Container to store metadata backoff state
+    metadata_backoff: BackoffSession<Option<RefreshMetadataRequest>>,
     /// Cancellation signal
     cancellation_token: CancellationToken,
     /// Used to create new tcp streams
@@ -159,12 +161,22 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         let mut metadata_interval = tokio::time::interval(self.metadata_config.interval);
         metadata_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        'outer: loop {
+        loop {
+            let metadata_fut = async {
+                if let Some(payload) = self.metadata_backoff.wait_next().await {
+                    return payload;
+                }
+
+                tokio::select! {
+                    _ = metadata_interval.tick() => None,
+                    Some(req) = self.rx_topic_metadata.recv() => Some(req),
+                }
+            };
+
             let event = tokio::select! {
                 biased;
                 _ = self.cancellation_token.cancelled() => break,
-                _ = metadata_interval.tick() => Event::Refresh(None),
-                Some(req) = self.rx_topic_metadata.recv() => Event::Refresh(Some(req)),
+                req = metadata_fut => Event::Refresh(req),
                 Some(result) = self.join_set.join_next() => match result {
                     Ok(node_died) => Event::NodeDied(node_died),
                     Err(join_err) => {
@@ -178,73 +190,60 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
 
             match event {
                 Event::Refresh(req) => {
-                    let (on_refresh, topics) = match req {
-                        Some(r) => (Some(r.tx), r.topics),
-                        _ => (
-                            None,
-                            // If this is not from a refresh-now request,
-                            // fetch for all previously-fetched topics.
-                            Some(
-                                self.tx
-                                    .borrow()
-                                    .metadata
-                                    .topics
-                                    .iter()
-                                    .map(metadata_request_topic_from_entry)
-                                    .collect(),
-                            ),
-                        ),
+                    let Some((host_for_refresh, handle_for_refresh)) =
+                        self.tx.borrow().broker_channels.get_best_connection()
+                    else {
+                        tracing::error!("no connections available for metadata refresh!");
+                        return;
                     };
 
-                    let mut retries = 0;
+                    tracing::info!(broker = ?host_for_refresh, "attempting to refresh metadata");
 
-                    loop {
-                        let Some((host_for_refresh, handle_for_refresh)) =
-                            self.tx.borrow().broker_channels.get_best_connection()
-                        else {
-                            tracing::error!("no connections available for metadata refresh!");
-                            return;
-                        };
+                    let topics = req.as_ref().map(|r| r.topics.clone()).unwrap_or_else(|| {
+                        Some(
+                            self.tx
+                                .borrow()
+                                .metadata
+                                .topics
+                                .iter()
+                                .map(metadata_request_topic_from_entry)
+                                .collect(),
+                        )
+                    });
 
-                        tracing::info!(broker = ?host_for_refresh, "attempting to refresh metadata");
+                    let metadata = handle_for_refresh
+                        .send(with_max_version(move |ver| {
+                            create_metadata_request(ver, topics)
+                        }))
+                        .await;
 
-                        let metadata = handle_for_refresh
-                            .send(with_max_version(|ver| {
-                                create_metadata_request(ver, topics.clone())
-                            }))
-                            .await;
+                    match metadata {
+                        Ok(metadata) => {
+                            // TODO respect throttle time
+                            self.update_metadata(metadata);
 
-                        match metadata {
-                            Ok(metadata) => {
-                                // TODO respect throttle time
+                            tracing::info!(
+                                "successfully updated metadata using broker {host_for_refresh:?}"
+                            );
 
-                                if self.update_metadata(metadata).is_none() {
-                                    break 'outer;
-                                }
+                            self.metadata_backoff.success();
 
-                                tracing::info!(
-                                    "successfully updated metadata using broker {host_for_refresh:?}"
-                                );
-                                break;
-                            }
-                            Err(e) => {
-                                let backoff = exponential_backoff(
-                                    self.metadata_config.min_backoff,
-                                    self.metadata_config.max_backoff,
-                                    retries,
-                                );
-                                retries += 1;
-                                tracing::error!(broker = ?host_for_refresh, "failed to get metadata: {e}, backing off for {backoff:?}, retries: {retries}");
-                                tokio::select! {
-                                    _ = tokio::time::sleep(backoff) => {},
-                                    _ = self.cancellation_token.cancelled() => break 'outer
-                                };
+                            if let Some(tx) = req.map(|r| r.tx) {
+                                let _ = tx.send(());
                             }
                         }
-                    }
+                        Err(e) => {
+                            let backoff = exponential_backoff(
+                                self.metadata_config.min_backoff,
+                                self.metadata_config.max_backoff,
+                                self.metadata_backoff.count(),
+                            );
 
-                    if let Some(tx) = on_refresh {
-                        let _ = tx.send(());
+                            self.metadata_backoff.failure(backoff, req);
+
+                            tracing::error!(broker = ?host_for_refresh, "failed to get metadata: {e}, backing off for {backoff:?}, retries: {}", self.metadata_backoff.count());
+                            continue;
+                        }
                     }
                 }
                 Event::NodeDied(mut dead_task) => {
@@ -284,10 +283,9 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         let _ = self.tx.send(Default::default());
     }
 
-    fn update_metadata(&mut self, mut metadata: MetadataResponse) -> Option<()> {
+    fn update_metadata(&mut self, mut metadata: MetadataResponse) {
         if metadata.brokers.is_empty() {
             tracing::warn!("metadata response has no brokers, ignoring");
-            return Some(());
         }
 
         // mapping of broker id to broker host information in the new metadata
@@ -346,8 +344,6 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             }
             cluster.metadata = metadata;
         });
-
-        Some(())
     }
 
     fn start_new_task(&mut self, broker_id: i32, host: BrokerHost) {
@@ -446,6 +442,7 @@ impl SelectorTaskHandle {
             join_set,
             retry_config: config.conn.retry,
             metadata_config: config.metadata,
+            metadata_backoff: Default::default(),
             cancellation_token: cancellation_token.clone(),
             connect,
         };
