@@ -15,11 +15,11 @@ use kafka_protocol::{
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinSet,
-    time::Instant,
 };
 use uuid::Uuid;
 
 use crate::{
+    backoff::{exponential_backoff, BackoffSession},
     clients::network::NetworkClient,
     conn::KafkaChannelError,
     proto::{error_codes::ErrorCode, request::KafkaRequest},
@@ -67,8 +67,7 @@ struct ConsumerTask {
     join_set: JoinSet<Result<ResponseKind, KafkaChannelError>>,
     tx: mpsc::Sender<Vec<ConsumerRecords>>,
     rx: mpsc::UnboundedReceiver<ConsumerCommand>,
-    next_event: Option<ConsumerTaskEvent>,
-    next_poll_delayed_until: Option<Instant>,
+    poll_backoff: BackoffSession<()>,
 }
 
 impl ConsumerTask {
@@ -84,8 +83,7 @@ impl ConsumerTask {
             states: HashMap::new(),
             subscriptions: HashMap::new(),
             join_set: JoinSet::new(),
-            next_event: None,
-            next_poll_delayed_until: None,
+            poll_backoff: Default::default(),
         }
     }
 
@@ -94,17 +92,21 @@ impl ConsumerTask {
             // This loop is roughly equivalent to "poll" in the Java impl
             let event = self.recv_next_event().await;
 
-            match event {
+            let result = match event {
                 ConsumerTaskEvent::Shutdown => break,
                 ConsumerTaskEvent::Command(command) => self.handle_command(command).await,
                 ConsumerTaskEvent::Poll => self.handle_poll().await,
+            };
+
+            if result.is_none() {
+                break;
             }
         }
     }
 
-    async fn handle_command(&mut self, command: ConsumerCommand) {
+    async fn handle_command(&mut self, command: ConsumerCommand) -> Option<()> {
         if command.tx.is_closed() {
-            return;
+            return Some(());
         }
 
         match command.kind {
@@ -116,28 +118,17 @@ impl ConsumerTask {
                 let _ = command.tx.send(result);
             }
         }
+
+        Some(())
     }
 
     async fn recv_next_event(&mut self) -> ConsumerTaskEvent {
-        if let Some(event) = self.next_event.take() {
-            return event;
-        }
-
-        let sleep_then_poll = async {
-            if let Some(instant) = self.next_poll_delayed_until {
-                tokio::time::sleep_until(instant).await;
-            }
-        };
-
-        let event = tokio::select! {
+        tokio::select! {
             biased;
             _ = self.tx.closed() => ConsumerTaskEvent::Shutdown,
             command = self.rx.recv() => command.map(ConsumerTaskEvent::Command).unwrap_or(ConsumerTaskEvent::Shutdown),
-            _ = sleep_then_poll => ConsumerTaskEvent::Poll,
-            else => ConsumerTaskEvent::Poll,
-        };
-
-        event
+            _ = self.poll_backoff.wait_next() => ConsumerTaskEvent::Poll,
+        }
     }
 
     async fn subscribe(&mut self, topics: &[TopicName]) -> Result<(), KafkaChannelError> {
@@ -157,30 +148,42 @@ impl ConsumerTask {
         Ok(())
     }
 
-    async fn handle_poll(&mut self) {
+    async fn handle_poll(&mut self) -> Option<()> {
         match self.poll().await {
             Ok(records) => {
                 if self.tx.send(records).await.is_err() {
                     // No one is listening for records. Shut down.
-                    self.next_event.replace(ConsumerTaskEvent::Shutdown);
+                    return None;
                 }
             }
             Err(err) => {
                 tracing::error!("failed to poll for records: {err}");
+                // TODO config
+                self.poll_backoff.failure(
+                    exponential_backoff(
+                        Duration::from_millis(100),
+                        Duration::from_secs(10),
+                        self.poll_backoff.count(),
+                    ),
+                    (),
+                );
             }
         }
+
+        Some(())
     }
 
     async fn poll(&mut self) -> Result<Vec<ConsumerRecords>, KafkaChannelError> {
         let may_have_records_next_poll = self.spawn_next().await?;
         let records = self.join_next().await?;
 
+        self.poll_backoff.success();
+
         if records.is_empty() && !may_have_records_next_poll {
             // We are seeked to the end of all partitions. Delay the next poll.
-            let now = Instant::now();
             // TODO config
-            let next_due = now.checked_add(Duration::from_millis(500));
-            self.next_poll_delayed_until = next_due;
+            self.poll_backoff
+                .schedule_next(Duration::from_millis(500), ());
         }
 
         Ok(records)
