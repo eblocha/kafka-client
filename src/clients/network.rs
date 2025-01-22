@@ -8,6 +8,7 @@ use crate::{
         selector::{Cluster, SelectorTaskHandle},
         KafkaChannelError, Sendable,
     },
+    error::KafkaError,
     proto::ver::{FromVersionRange, GetApiKey},
 };
 
@@ -40,12 +41,12 @@ impl NetworkClient {
     pub async fn send<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
         &self,
         req: F,
-    ) -> Result<R::Response, KafkaChannelError> {
+    ) -> Result<R::Response, KafkaError> {
         let handle = {
             // Closure is to prevent holding the cluster across an await point, which would make this non-Send.
             let Some((_, handle)) = self.borrow_cluster().broker_channels.get_best_connection()
             else {
-                return Err(KafkaChannelError::Closed);
+                return Err(KafkaChannelError::Closed.into());
             };
             handle
         };
@@ -58,13 +59,13 @@ impl NetworkClient {
         &self,
         req: F,
         broker_id: i32,
-    ) -> Result<R::Response, KafkaChannelError> {
+    ) -> Result<R::Response, KafkaError> {
         let handle = {
             // Closure is to prevent holding the cluster across an await point, which would make this non-Send.
             let cluster = self.borrow_cluster();
             let Some((_, handle)) = cluster.broker_channels.0.get(&broker_id) else {
                 tracing::error!("no broker handle for id {broker_id}");
-                return Err(KafkaChannelError::Closed);
+                return Err(KafkaChannelError::Closed.into());
             };
             handle.clone()
         };

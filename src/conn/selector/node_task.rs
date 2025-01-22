@@ -26,6 +26,7 @@ use crate::{
         host::BrokerHost,
         Sendable,
     },
+    error::KafkaError,
     proto::{
         error_codes::ErrorCode,
         ver::{FromVersionRange, GetApiKey},
@@ -64,6 +65,16 @@ enum ConnectAttemptError {
     Init(#[from] ConnectionInitError),
 }
 
+impl From<ConnectAttemptError> for ConnectionInitError {
+    fn from(value: ConnectAttemptError) -> Self {
+        match value {
+            ConnectAttemptError::Cancelled => Self::Closed,
+            ConnectAttemptError::Timeout => Self::Io(io::ErrorKind::TimedOut.into()),
+            ConnectAttemptError::Init(init) => init,
+        }
+    }
+}
+
 impl From<Elapsed> for ConnectAttemptError {
     fn from(_: Elapsed) -> Self {
         Self::Timeout
@@ -81,29 +92,12 @@ impl From<KafkaChannelError> for ConnectionInitError {
         match value {
             KafkaChannelError::Io(e) => Self::Io(e),
             KafkaChannelError::Closed => Self::Closed,
-            KafkaChannelError::Version => Self::Version,
-            KafkaChannelError::ErrorCode(error_code) => Self::NegotiationFailed(error_code),
-        }
-    }
-}
-
-impl From<ConnectAttemptError> for KafkaChannelError {
-    fn from(value: ConnectAttemptError) -> Self {
-        match value {
-            ConnectAttemptError::Cancelled => Self::Closed,
-            ConnectAttemptError::Timeout => Self::Io(io::Error::from(io::ErrorKind::TimedOut)),
-            ConnectAttemptError::Init(init) => match init {
-                ConnectionInitError::Io(error) => Self::Io(error),
-                ConnectionInitError::Closed => Self::Closed,
-                ConnectionInitError::NegotiationFailed(error_code) => Self::ErrorCode(error_code),
-                ConnectionInitError::Version => Self::Version,
-            },
         }
     }
 }
 
 pub struct NodeTaskMessage {
-    tx: oneshot::Sender<Result<Arc<VersionedConnection>, ConnectAttemptError>>,
+    tx: oneshot::Sender<Result<Arc<VersionedConnection>, ConnectionInitError>>,
 }
 
 /// A connection with versioning information
@@ -160,23 +154,13 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
                 let (min, max) = (self.retry_config.min_backoff, self.retry_config.max_backoff);
                 let backoff = exponential_backoff(min, max, self.backoff.count());
 
-                macro_rules! log_err {
-                    ($($msg:tt)*) => {
-                        tracing::error!(
-                            broker_id = self.broker_id,
-                            host = ?self.host,
-                            retries = self.backoff.count(),
-                            backoff = ?backoff,
-                            $($msg)*,
-                        )
-                    };
-                }
-
-                match e {
-                    ConnectAttemptError::Timeout => log_err!("connection timed out"),
-                    ConnectAttemptError::Init(e) => log_err!("failed to connect: {e:?}"),
-                    ConnectAttemptError::Cancelled => {}
-                }
+                tracing::error!(
+                    broker_id = self.broker_id,
+                    host = ?self.host,
+                    retries = self.backoff.count(),
+                    backoff = ?backoff,
+                    "failed to connect: {e}",
+                );
 
                 self.backoff.failure(backoff, ());
             } else {
@@ -225,7 +209,7 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
 
     async fn get_connection(
         &mut self,
-    ) -> Option<Result<Arc<VersionedConnection>, ConnectAttemptError>> {
+    ) -> Option<Result<Arc<VersionedConnection>, ConnectionInitError>> {
         if let Some(conn) = self
             .connection
             .load()
@@ -247,7 +231,7 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
         let conn = match self.try_connect().await {
             Ok(conn) => conn,
             Err(ConnectAttemptError::Cancelled) => return None,
-            Err(e) => return Some(Err(e)),
+            Err(e) => return Some(Err(e.into())),
         };
 
         let conn_arc = Arc::new(conn);
@@ -288,7 +272,7 @@ impl NodeTaskHandle {
     pub async fn send<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
         &self,
         req: F,
-    ) -> Result<R::Response, KafkaChannelError> {
+    ) -> Result<R::Response, KafkaError> {
         self.in_flight.fetch_add(1, Ordering::Acquire);
 
         let result = self.send_inner(req).await;
@@ -301,7 +285,7 @@ impl NodeTaskHandle {
     async fn send_inner<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
         &self,
         req: F,
-    ) -> Result<R::Response, KafkaChannelError> {
+    ) -> Result<R::Response, KafkaError> {
         let (tx, rx) = oneshot::channel();
 
         let msg = NodeTaskMessage { tx };
@@ -321,7 +305,7 @@ impl NodeTaskHandle {
         let api_key = req.key();
 
         let Some(broker_versions) = conn.versions.api_keys.get(&api_key) else {
-            return Err(KafkaChannelError::Version);
+            return Err(KafkaError::ErrorCode(ErrorCode::UnsupportedVersion));
         };
 
         let broker_range = VersionRange {
@@ -330,10 +314,10 @@ impl NodeTaskHandle {
         };
 
         let Some((req, version)) = req.from_version_range(broker_range) else {
-            return Err(KafkaChannelError::Version);
+            return Err(KafkaError::ErrorCode(ErrorCode::UnsupportedVersion));
         };
 
-        conn.connection.send(req, version).await
+        Ok(conn.connection.send(req, version).await?)
     }
 
     /// Determine if this node has an open connection to the host.

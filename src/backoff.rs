@@ -65,4 +65,18 @@ impl<T> BackoffSession<T> {
             payload,
         });
     }
+
+    /// Schedule a retry with no delay, and optionally reset the retry count.
+    ///
+    /// This is useful for handling connection init errors, as those errors are backed off in the broker connection task.
+    pub fn schedule_immediate(&mut self, payload: T, reset_count: bool) {
+        self.attempt = Some(BackoffAttempt {
+            delay_until: None,
+            payload,
+        });
+
+        if reset_count {
+            self.count = 0;
+        }
+    }
 }

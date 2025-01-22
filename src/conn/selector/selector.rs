@@ -19,6 +19,7 @@ use crate::{
         host::BrokerHost,
         KafkaChannelError,
     },
+    error::KafkaError,
     proto::ver::with_max_version,
 };
 
@@ -266,6 +267,13 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                             }
                         }
                         Err(e) => {
+                            if matches!(e, KafkaError::Init(_)) {
+                                // Error with establishing a connection, so don't back off and reset the attempts
+                                // The node task handles backoff and logging in this case.
+                                self.metadata_backoff.schedule_immediate(req, true);
+                                continue;
+                            }
+
                             let backoff = exponential_backoff(
                                 self.metadata_config.min_backoff,
                                 self.metadata_config.max_backoff,

@@ -11,7 +11,7 @@ use tokio::{
 };
 use tokio_util::{codec::Framed, sync::CancellationToken, task::TaskTracker};
 
-use crate::{conn::codec::sendable::RequestRecord, proto::error_codes::ErrorCode};
+use crate::conn::codec::sendable::RequestRecord;
 
 use super::{
     codec::{
@@ -30,14 +30,6 @@ pub enum KafkaChannelError {
     /// The client has stopped processing requests
     #[error("the connection is closed")]
     Closed,
-
-    /// The broker's version range does not intersect with the client
-    #[error("version mismatch")]
-    Version,
-
-    /// The message generated an error code.
-    #[error(transparent)]
-    ErrorCode(ErrorCode),
 }
 
 impl From<oneshot::error::RecvError> for KafkaChannelError {

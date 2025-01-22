@@ -22,6 +22,7 @@ use crate::{
     backoff::{exponential_backoff, BackoffSession},
     clients::network::NetworkClient,
     conn::KafkaChannelError,
+    error::KafkaError,
     proto::{error_codes::ErrorCode, request::KafkaRequest},
 };
 
@@ -64,7 +65,7 @@ struct ConsumerTask {
     client: NetworkClient,
     states: HashMap<TopicPartition, PartitionState>,
     subscriptions: HashMap<Uuid, TopicName>,
-    join_set: JoinSet<Result<ResponseKind, KafkaChannelError>>,
+    join_set: JoinSet<Result<ResponseKind, KafkaError>>,
     tx: mpsc::Sender<Vec<ConsumerRecords>>,
     rx: mpsc::UnboundedReceiver<ConsumerCommand>,
     poll_backoff: BackoffSession<()>,
@@ -173,7 +174,7 @@ impl ConsumerTask {
         Some(())
     }
 
-    async fn poll(&mut self) -> Result<Vec<ConsumerRecords>, KafkaChannelError> {
+    async fn poll(&mut self) -> Result<Vec<ConsumerRecords>, KafkaError> {
         let may_have_records_next_poll = self.spawn_next().await?;
         let records = self.join_next().await?;
 
@@ -189,7 +190,7 @@ impl ConsumerTask {
         Ok(records)
     }
 
-    async fn spawn_next(&mut self) -> Result<bool, KafkaChannelError> {
+    async fn spawn_next(&mut self) -> Result<bool, KafkaError> {
         self.client
             .load_topic_metadata(self.subscriptions.values())
             .await?;
@@ -317,7 +318,7 @@ impl ConsumerTask {
         Ok(spanwed_offset_requests)
     }
 
-    async fn join_next(&mut self) -> Result<Vec<ConsumerRecords>, KafkaChannelError> {
+    async fn join_next(&mut self) -> Result<Vec<ConsumerRecords>, KafkaError> {
         let mut records = Vec::<ConsumerRecords>::new();
 
         let mut invalid_topics = HashSet::<TopicName>::new();
