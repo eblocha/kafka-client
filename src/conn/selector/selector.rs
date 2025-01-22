@@ -50,8 +50,8 @@ fn least_in_flight(
 }
 
 fn least_failure_streak(
-    left: &(&BrokerHost, &NodeTaskHandle),
-    right: &(&BrokerHost, &NodeTaskHandle),
+    left: &(BrokerHost, NodeTaskHandle),
+    right: &(BrokerHost, NodeTaskHandle),
 ) -> Ordering {
     left.1.failure_streak().cmp(&right.1.failure_streak())
 }
@@ -65,8 +65,8 @@ impl BrokerMap {
         // prefer connected, non-saturated nodes with least in-flight requests
         let least_loaded_connected = self
             .0
-            .iter()
-            .filter_map(|(_, (broker, handle))| {
+            .values()
+            .filter_map(|(broker, handle)| {
                 if handle.capacity().is_some_and(|cap| cap > 0) {
                     Some((broker, handle))
                 } else {
@@ -82,8 +82,8 @@ impl BrokerMap {
         // next, prefer nodes with no failure streak and least in-flight requests
         let least_loaded_no_failures = self
             .0
-            .iter()
-            .filter_map(|(_, (broker, handle))| {
+            .values()
+            .filter_map(|(broker, handle)| {
                 if handle.failure_streak() == 0 {
                     Some((broker, handle))
                 } else {
@@ -98,9 +98,8 @@ impl BrokerMap {
 
         // lastly, prefer nodes with the lowest failure streak
         self.0
-            .iter()
-            .map(|(_, (broker, handle))| (broker, handle))
-            .min_by(least_failure_streak)
+            .values()
+            .min_by(|left, right| least_failure_streak(left, right))
             .map(|(host, handle)| (host.clone(), handle.clone()))
     }
 }
