@@ -45,12 +45,6 @@ pub type MetadataRefreshResult = (MetadataRefreshContext, Result<MetadataRespons
 
 impl MetadataRefreshTask {
     pub async fn run(self) -> MetadataRefreshResult {
-        tracing::info!(
-            broker_id = self.context.broker_id,
-            host = ?self.context.host,
-            "attempting to refresh metadata"
-        );
-
         let metadata = self
             .context
             .node_handle
