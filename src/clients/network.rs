@@ -103,7 +103,7 @@ impl NetworkClient {
                 .await?;
         }
 
-        return Ok(());
+        Ok(())
     }
 
     pub async fn shutdown(&self) {

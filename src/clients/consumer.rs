@@ -136,7 +136,7 @@ impl ConsumerTask {
         self.client.load_topic_metadata(topics.iter()).await?;
         let topic_map = &self.client.borrow_cluster().metadata.topics;
         self.subscriptions = topics
-            .into_iter()
+            .iter()
             .filter_map(|name| {
                 let metadata = topic_map.get(name);
                 metadata.map(|meta| (meta.topic_id, (*name).clone()))
@@ -247,7 +247,7 @@ impl ConsumerTask {
                         .or_insert_with(|| {
                             let mut fetch_topic = FetchTopic::default();
                             fetch_topic.topic = topic_name.clone();
-                            fetch_topic.topic_id = topic_id.clone();
+                            fetch_topic.topic_id = *topic_id;
                             fetch_topic
                         });
 

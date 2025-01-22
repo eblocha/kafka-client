@@ -43,13 +43,11 @@ impl<T> BackoffSession<T> {
     ///
     /// If there is a backoff scheduled, this will sleep until its deadline, then return the payload for the attempt.
     pub async fn wait_next(&mut self) -> Option<T> {
-        let Some(attempt) = self.take() else {
-            return None;
-        };
+        let attempt = self.take()?;
         if let Some(when) = attempt.delay_until {
             tokio::time::sleep_until(when).await;
         }
-        return Some(attempt.payload);
+        Some(attempt.payload)
     }
 
     /// Mark a failed attempt, and schedule a retry with the provided payload after `delay`.
