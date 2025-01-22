@@ -179,11 +179,7 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
             let _ = tx.send(conn_result);
         }
 
-        if let Some(conn) = self.connection.swap(None) {
-            conn.connection.shutdown().await;
-        }
-
-        self
+        self.shutdown_existing_connection().await
     }
 
     async fn try_connect(&mut self) -> Result<VersionedConnection, ConnectAttemptError> {
@@ -239,6 +235,20 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
         self.connection.store(Some(conn_arc.clone()));
 
         Some(Ok(conn_arc))
+    }
+
+    pub async fn shutdown_existing_connection(self) -> Self {
+        if let Some(conn) = self.connection.swap(None) {
+            conn.connection.shutdown().await;
+        }
+
+        tracing::debug!(
+            broker_id = self.broker_id,
+            host = ?self.host,
+            "shut down gracefully"
+        );
+
+        self
     }
 }
 

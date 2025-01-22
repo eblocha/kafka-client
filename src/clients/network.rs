@@ -44,7 +44,7 @@ impl NetworkClient {
     ) -> Result<R::Response, KafkaError> {
         let handle = {
             // Closure is to prevent holding the cluster across an await point, which would make this non-Send.
-            let Some((_, handle)) = self.borrow_cluster().broker_channels.get_best_connection()
+            let Some((_, _, handle)) = self.borrow_cluster().broker_channels.get_best_connection()
             else {
                 return Err(KafkaChannelError::Closed.into());
             };

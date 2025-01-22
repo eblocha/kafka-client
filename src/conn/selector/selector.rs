@@ -1,10 +1,10 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, collections::HashSet};
 
 use derive_more::derive::From;
 use fnv::FnvHashMap;
 use kafka_protocol::messages::{
     metadata_request::MetadataRequestTopic, metadata_response::MetadataResponseTopic,
-    MetadataRequest, MetadataResponse, TopicName,
+    MetadataResponse, TopicName,
 };
 use tokio::{
     sync::{mpsc, oneshot, watch},
@@ -17,13 +17,14 @@ use crate::{
     conn::{
         config::{ConnectionManagerConfig, ConnectionRetryConfig, MetadataRefreshConfig},
         host::BrokerHost,
+        selector::metadata::{MetadataRefreshContext, MetadataRefreshTask},
     },
     error::KafkaError,
-    proto::ver::with_max_version,
 };
 
 use super::{
     connect::{Connect, Tcp},
+    metadata::MetadataRefreshResult,
     node_task::{new_pair, NodeTask, NodeTaskHandle},
 };
 
@@ -43,17 +44,17 @@ pub struct Cluster {
 }
 
 fn least_in_flight(
-    left: &(&BrokerHost, &NodeTaskHandle),
-    right: &(&BrokerHost, &NodeTaskHandle),
+    left: &(&i32, &BrokerHost, &NodeTaskHandle),
+    right: &(&i32, &BrokerHost, &NodeTaskHandle),
 ) -> Ordering {
-    left.1.in_flight().cmp(&right.1.in_flight())
+    left.2.in_flight().cmp(&right.2.in_flight())
 }
 
 fn least_failure_streak(
-    left: &(BrokerHost, NodeTaskHandle),
-    right: &(BrokerHost, NodeTaskHandle),
+    left: &(&i32, &BrokerHost, &NodeTaskHandle),
+    right: &(&i32, &BrokerHost, &NodeTaskHandle),
 ) -> Ordering {
-    left.1.failure_streak().cmp(&right.1.failure_streak())
+    left.2.failure_streak().cmp(&right.2.failure_streak())
 }
 
 impl BrokerMap {
@@ -61,46 +62,47 @@ impl BrokerMap {
     ///
     /// This will prefer connected brokers with the minimum number of pending requests, then favor the minimum number of
     /// pending requests, connected or not.
-    pub fn get_best_connection(&self) -> Option<(BrokerHost, NodeTaskHandle)> {
+    pub fn get_best_connection(&self) -> Option<(i32, BrokerHost, NodeTaskHandle)> {
         // prefer connected, non-saturated nodes with least in-flight requests
         let least_loaded_connected = self
             .0
-            .values()
-            .filter_map(|(broker, handle)| {
+            .iter()
+            .filter_map(|(id, (broker, handle))| {
                 if handle.capacity().is_some_and(|cap| cap > 0) {
-                    Some((broker, handle))
+                    Some((id, broker, handle))
                 } else {
                     None
                 }
             })
             .min_by(least_in_flight);
 
-        if let Some((host, handle)) = least_loaded_connected {
-            return Some((host.clone(), handle.clone()));
+        if let Some((id, host, handle)) = least_loaded_connected {
+            return Some((*id, host.clone(), handle.clone()));
         }
 
         // next, prefer nodes with no failure streak and least in-flight requests
         let least_loaded_no_failures = self
             .0
-            .values()
-            .filter_map(|(broker, handle)| {
+            .iter()
+            .filter_map(|(id, (broker, handle))| {
                 if handle.failure_streak() == 0 {
-                    Some((broker, handle))
+                    Some((id, broker, handle))
                 } else {
                     None
                 }
             })
             .min_by(least_in_flight);
 
-        if let Some((host, handle)) = least_loaded_no_failures {
-            return Some((host.clone(), handle.clone()));
+        if let Some((id, host, handle)) = least_loaded_no_failures {
+            return Some((*id, host.clone(), handle.clone()));
         }
 
         // lastly, prefer nodes with the lowest failure streak
         self.0
-            .values()
-            .min_by(|left, right| least_failure_streak(left, right))
-            .map(|(host, handle)| (host.clone(), handle.clone()))
+            .iter()
+            .map(|(id, (host, handle))| (id, host, handle))
+            .min_by(least_failure_streak)
+            .map(|(id, host, handle)| (*id, host.clone(), handle.clone()))
     }
 }
 
@@ -114,29 +116,6 @@ pub struct RefreshMetadataRequest {
     pub topics: Option<Vec<MetadataRequestTopic>>,
     /// Channel which sends when the request has been executed
     pub tx: oneshot::Sender<()>,
-}
-
-fn create_metadata_request(
-    version: i16,
-    topics: Option<Vec<MetadataRequestTopic>>,
-) -> Option<MetadataRequest> {
-    let mut r = MetadataRequest::default();
-
-    if version >= 4 {
-        r.allow_auto_topic_creation = false;
-    }
-
-    if version >= 8 {
-        if version <= 10 {
-            r.include_cluster_authorized_operations = true;
-        }
-
-        r.include_topic_authorized_operations = true;
-    }
-
-    r.topics = topics;
-
-    Some(r)
 }
 
 fn metadata_request_topic_from_entry(
@@ -174,6 +153,7 @@ struct SelectorTask<Conn> {
     rx_topic_metadata: mpsc::Receiver<RefreshMetadataRequest>,
     /// Container to store metadata backoff state
     metadata_backoff: BackoffSession<Option<RefreshMetadataRequest>>,
+    metadata_refresh_task: JoinSet<MetadataRefreshResult>,
     /// Cancellation signal
     cancellation_token: CancellationToken,
     /// Used to create new tcp streams
@@ -183,7 +163,8 @@ struct SelectorTask<Conn> {
 enum Event<Conn> {
     /// Metadata changed, so re-configure connections. This is also invoked when a [`NodeTask`]
     /// panics or is aborted, because we no longer have access to the original channel in that case.
-    Refresh(Option<RefreshMetadataRequest>),
+    RefreshStart(Option<RefreshMetadataRequest>),
+    RefreshComplete(MetadataRefreshResult),
     /// A node stopped. Note this doesn't necessarily indicate that it should be running.
     /// The [`SelectorTask`] will restart it if it points to a valid broker in the cluster.
     NodeDied(NodeTask<Conn>),
@@ -195,26 +176,34 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         metadata_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
+            let allow_metadata_requests = self.metadata_refresh_task.is_empty();
             let metadata_fut = async {
-                if let Some(payload) = self.metadata_backoff.wait_next().await {
-                    return payload;
+                // We only allow one metadata refresh task to run at a time.
+                if !allow_metadata_requests {
+                    return None;
                 }
 
-                tokio::select! {
+                if let Some(payload) = self.metadata_backoff.wait_next().await {
+                    return Some(payload);
+                }
+
+                Some(tokio::select! {
                     _ = metadata_interval.tick() => None,
                     Some(req) = self.rx_topic_metadata.recv() => Some(req),
-                }
+                })
             };
 
             let event = tokio::select! {
                 biased;
                 _ = self.cancellation_token.cancelled() => break,
-                req = metadata_fut => Event::Refresh(req),
+                // An err here means it panicked. There's no way to recover the original context, so let it go.
+                Some(Ok(metadata_refreshed)) = self.metadata_refresh_task.join_next() => Event::RefreshComplete(metadata_refreshed),
+                Some(req) = metadata_fut => Event::RefreshStart(req),
                 Some(result) = self.join_set.join_next() => match result {
                     Ok(node_died) => Event::NodeDied(node_died),
                     Err(join_err) => {
                         tracing::error!("node connection task stopped unexpectedly, attempting to recover: {join_err:?}");
-                        Event::Refresh(None)
+                        Event::RefreshStart(None)
                     }
                 },
                 // Either all handles are dropped, or we have no nodes to connect to in the cluster.
@@ -222,15 +211,71 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             };
 
             match event {
-                Event::Refresh(req) => {
-                    let Some((host_for_refresh, handle_for_refresh)) =
+                Event::RefreshComplete((ctx, metadata)) => {
+                    match metadata {
+                        Ok(metadata) => {
+                            // TODO respect throttle time
+                            self.update_metadata(metadata);
+
+                            tracing::info!(
+                                broker_id = ctx.broker_id,
+                                host = ?ctx.host,
+                                "successfully updated metadata"
+                            );
+
+                            tracing::debug!(
+                                "new metadata {:?}",
+                                self.hosts
+                                    .0
+                                    .iter()
+                                    .map(|(id, (host, _))| (id, host))
+                                    .collect::<Vec<_>>()
+                            );
+
+                            self.metadata_backoff.success();
+
+                            if let Some(tx) = ctx.request.map(|r| r.tx) {
+                                let _ = tx.send(());
+                            }
+                        }
+                        Err(e) => {
+                            if matches!(e, KafkaError::Init(_)) {
+                                // Error with establishing a connection, so don't back off and reset the attempts
+                                // The node task handles backoff and logging in this case.
+                                self.metadata_backoff.schedule_immediate(ctx.request, true);
+                                continue;
+                            }
+
+                            let backoff = exponential_backoff(
+                                self.metadata_config.min_backoff,
+                                self.metadata_config.max_backoff,
+                                self.metadata_backoff.count(),
+                            );
+
+                            self.metadata_backoff.failure(backoff, ctx.request);
+
+                            tracing::error!(
+                                broker_id = ctx.broker_id,
+                                host = ?ctx.host,
+                                "failed to get metadata: {e}, backing off for {backoff:?}, retries: {}", self.metadata_backoff.count()
+                            );
+                            continue;
+                        }
+                    }
+                }
+                Event::RefreshStart(req) => {
+                    let Some((broker_id_for_refresh, host_for_refresh, handle_for_refresh)) =
                         self.tx.borrow().broker_channels.get_best_connection()
                     else {
                         tracing::error!("no connections available for metadata refresh!");
                         return;
                     };
 
-                    tracing::info!(broker = ?host_for_refresh, "attempting to refresh metadata");
+                    tracing::info!(
+                        broker_id = broker_id_for_refresh,
+                        host = ?host_for_refresh,
+                        "attempting to refresh metadata"
+                    );
 
                     let topics = req.as_ref().map(|r| r.topics.clone()).unwrap_or_else(|| {
                         Some(
@@ -244,73 +289,19 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                         )
                     });
 
-                    let metadata = handle_for_refresh
-                        .send(with_max_version(move |ver| {
-                            create_metadata_request(ver, topics)
-                        }))
-                        .await;
+                    let task = MetadataRefreshTask {
+                        context: MetadataRefreshContext {
+                            broker_id: broker_id_for_refresh,
+                            host: host_for_refresh,
+                            node_handle: handle_for_refresh,
+                            request: req,
+                        },
+                        topics,
+                    };
 
-                    match metadata {
-                        Ok(metadata) => {
-                            // TODO respect throttle time
-                            self.update_metadata(metadata);
-
-                            tracing::info!(
-                                "successfully updated metadata using broker {host_for_refresh:?}"
-                            );
-
-                            self.metadata_backoff.success();
-
-                            if let Some(tx) = req.map(|r| r.tx) {
-                                let _ = tx.send(());
-                            }
-                        }
-                        Err(e) => {
-                            if matches!(e, KafkaError::Init(_)) {
-                                // Error with establishing a connection, so don't back off and reset the attempts
-                                // The node task handles backoff and logging in this case.
-                                self.metadata_backoff.schedule_immediate(req, true);
-                                continue;
-                            }
-
-                            let backoff = exponential_backoff(
-                                self.metadata_config.min_backoff,
-                                self.metadata_config.max_backoff,
-                                self.metadata_backoff.count(),
-                            );
-
-                            self.metadata_backoff.failure(backoff, req);
-
-                            tracing::error!(broker = ?host_for_refresh, "failed to get metadata: {e}, backing off for {backoff:?}, retries: {}", self.metadata_backoff.count());
-                            continue;
-                        }
-                    }
+                    self.metadata_refresh_task.spawn(task.run());
                 }
-                Event::NodeDied(mut dead_task) => {
-                    // is this node supposed to be running?
-                    if let Some((host, mut handle)) = self.hosts.0.remove(&dead_task.broker_id) {
-                        tracing::debug!(
-                            "restarting connection handle to broker_id {}",
-                            dead_task.broker_id
-                        );
-
-                        // create new cancellation token to not immediately exit when the task starts
-                        let cancellation_token = CancellationToken::new();
-
-                        dead_task.cancellation_token = cancellation_token.clone();
-                        handle.cancellation_token = cancellation_token;
-
-                        // if the host is different, stop the existing connection
-                        if dead_task.host != host {
-                            dead_task.connection.store(None);
-                        }
-
-                        dead_task.host = host.clone();
-
-                        self.hosts.0.insert(dead_task.broker_id, (host, handle));
-                        self.join_set.spawn(dead_task.run());
-                    }
-                }
+                Event::NodeDied(dead_task) => self.restart_if_needed(dead_task).await,
             }
         }
 
@@ -340,12 +331,18 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             let keep = new_broker_ids.contains_key(id);
 
             if !keep {
-                tracing::info!("removing connection to broker {host:?} with id {id}");
+                tracing::debug!(
+                    broker_id = id,
+                    host = ?host,
+                    "removing connection to broker"
+                );
                 handle.cancellation_token.cancel();
             }
 
             keep
         });
+
+        let mut broker_ids_changing_hosts = HashSet::new();
 
         // spawn nodes that should be in the cluster
         for (broker_id, broker) in new_broker_ids {
@@ -361,11 +358,14 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                 // if the host is different, stop it (it will restart automatically with the new host)
                 else if host != &new_host {
                     tracing::debug!(
-                        "stopping connection to host {host:?} for broker_id {}",
-                        broker_id
+                        broker_id = broker_id,
+                        host = ?host,
+                        new_host = ?new_host,
+                        "changing hosts"
                     );
                     pair.1.cancellation_token.cancel();
                     pair.0 = new_host;
+                    broker_ids_changing_hosts.insert(broker_id);
                 }
             } else {
                 // we don't have a handle to the broker - create one
@@ -387,6 +387,12 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
     }
 
     fn start_new_task(&mut self, broker_id: i32, host: BrokerHost) {
+        tracing::debug!(
+            broker_id = broker_id,
+            host = ?host,
+            "creating new connection task"
+        );
+
         let (handle, task) = new_pair(
             broker_id,
             host.clone(),
@@ -397,6 +403,37 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         self.join_set.spawn(task.run());
 
         self.hosts.0.insert(broker_id, (host, handle));
+    }
+
+    async fn restart_if_needed(&mut self, mut dead_task: NodeTask<Conn>) {
+        if let Some((host, mut handle)) = self.hosts.0.remove(&dead_task.broker_id) {
+            tracing::debug!(
+                host = ?host,
+                broker_id = dead_task.broker_id,
+                "restarting connection handle",
+            );
+
+            // create new cancellation token to not immediately exit when the task starts
+            let cancellation_token = CancellationToken::new();
+
+            dead_task.cancellation_token = cancellation_token.clone();
+            handle.cancellation_token = cancellation_token;
+
+            // if the host is different, stop the existing connection
+            if dead_task.host != host {
+                tracing::debug!(
+                    host = ?dead_task.host,
+                    broker_id = dead_task.broker_id,
+                    "stopping existing connection"
+                );
+                dead_task = dead_task.shutdown_existing_connection().await;
+            }
+
+            dead_task.host = host.clone();
+
+            self.hosts.0.insert(dead_task.broker_id, (host, handle));
+            self.join_set.spawn(dead_task.run());
+        }
     }
 }
 
@@ -483,6 +520,7 @@ impl SelectorTaskHandle {
             retry_config: config.conn.retry,
             metadata_config: config.metadata,
             metadata_backoff: Default::default(),
+            metadata_refresh_task: JoinSet::new(),
             cancellation_token: cancellation_token.clone(),
             connect,
         };

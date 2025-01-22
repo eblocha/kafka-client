@@ -183,7 +183,7 @@ impl<IO> KafkaChannelTask<IO> {
             }
         }
 
-        tracing::debug!("closing io stream");
+        tracing::debug!("closed io stream");
     }
 }
 
