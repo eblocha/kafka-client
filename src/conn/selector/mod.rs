@@ -1,7 +1,7 @@
 pub mod connect;
 mod metadata;
 mod node_task;
-mod selector;
+mod task;
 
 pub use node_task::ConnectionInitError;
-pub use selector::*;
+pub use task::*;
