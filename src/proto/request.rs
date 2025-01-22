@@ -1,34 +1,7 @@
 use std::io;
 
 use derive_more::derive::From;
-use kafka_protocol::{
-    messages::{
-        AddOffsetsToTxnRequest, AddPartitionsToTxnRequest, AllocateProducerIdsRequest,
-        AlterClientQuotasRequest, AlterConfigsRequest, AlterPartitionReassignmentsRequest,
-        AlterPartitionRequest, AlterReplicaLogDirsRequest, AlterUserScramCredentialsRequest,
-        ApiKey, ApiVersionsRequest, AssignReplicasToDirsRequest, BeginQuorumEpochRequest,
-        BrokerHeartbeatRequest, BrokerRegistrationRequest, ConsumerGroupHeartbeatRequest,
-        ControlledShutdownRequest, ControllerRegistrationRequest, CreateAclsRequest,
-        CreateDelegationTokenRequest, CreatePartitionsRequest, CreateTopicsRequest,
-        DeleteAclsRequest, DeleteGroupsRequest, DeleteRecordsRequest, DeleteTopicsRequest,
-        DescribeAclsRequest, DescribeClientQuotasRequest, DescribeClusterRequest,
-        DescribeConfigsRequest, DescribeDelegationTokenRequest, DescribeGroupsRequest,
-        DescribeLogDirsRequest, DescribeProducersRequest, DescribeQuorumRequest,
-        DescribeTransactionsRequest, DescribeUserScramCredentialsRequest, ElectLeadersRequest,
-        EndQuorumEpochRequest, EndTxnRequest, EnvelopeRequest, ExpireDelegationTokenRequest,
-        FetchRequest, FetchSnapshotRequest, FindCoordinatorRequest,
-        GetTelemetrySubscriptionsRequest, HeartbeatRequest, IncrementalAlterConfigsRequest,
-        InitProducerIdRequest, JoinGroupRequest, LeaderAndIsrRequest, LeaveGroupRequest,
-        ListClientMetricsResourcesRequest, ListGroupsRequest, ListOffsetsRequest,
-        ListPartitionReassignmentsRequest, ListTransactionsRequest, MetadataRequest,
-        OffsetCommitRequest, OffsetDeleteRequest, OffsetFetchRequest, OffsetForLeaderEpochRequest,
-        ProduceRequest, PushTelemetryRequest, RenewDelegationTokenRequest, ResponseKind,
-        SaslAuthenticateRequest, SaslHandshakeRequest, StopReplicaRequest, SyncGroupRequest,
-        TxnOffsetCommitRequest, UnregisterBrokerRequest, UpdateFeaturesRequest,
-        UpdateMetadataRequest, VoteRequest, WriteTxnMarkersRequest,
-    },
-    protocol::{buf::ByteBufMut, Encodable, Message, VersionRange},
-};
+use kafka_protocol::protocol::VersionRange;
 use paste::paste;
 
 use crate::{
@@ -38,6 +11,8 @@ use crate::{
 
 macro_rules! requests {
     ($($name:ident),* $(,)?) => {
+        use ::kafka_protocol::protocol::{Message, Encodable};
+
         paste! {
             /// Enumeration of all possible Kafka message types. See https://kafka.apache.org/protocol#protocol_messages
             ///
@@ -45,58 +20,59 @@ macro_rules! requests {
             #[non_exhaustive]
             #[derive(Debug, Clone, From)]
             pub enum KafkaRequest {
-                $($name(#[from] [<$name Request>]),)*
+                $($name(#[from] ::kafka_protocol::messages::[<$name Request>]),)*
             }
 
             impl KafkaRequest {
                 /// Encode the request into a byte buffer given an API version.
-                pub fn encode<B: ByteBufMut>(&self, buf: &mut B, version: i16) -> anyhow::Result<()> {
+                pub fn encode<B: ::kafka_protocol::protocol::buf::ByteBufMut>(&self, buf: &mut B, version: i16) -> anyhow::Result<()> {
                     match self {
                         $(Self::$name(req) => req.encode(buf, version),)*
                     }
                 }
 
                 /// Get the api key associated with this request type.
-                pub fn as_api_key(&self) -> ApiKey {
+                pub fn as_api_key(&self) -> ::kafka_protocol::messages::ApiKey {
                     match self {
-                        $(Self::$name(_) => ApiKey::[<$name Key>],)*
+                        $(Self::$name(_) => ::kafka_protocol::messages::ApiKey::[<$name Key>],)*
                     }
                 }
             }
 
             impl Versionable for KafkaRequest {
+
                 fn versions(&self) -> ::kafka_protocol::protocol::VersionRange {
                     match self {
-                        $(Self::$name(_) => [<$name Request>]::VERSIONS,)*
+                        $(Self::$name(_) => ::kafka_protocol::messages::[<$name Request>]::VERSIONS,)*
                     }
                 }
             }
 
             $(
-                impl FromVersionRange for [<$name Request>] {
+                impl FromVersionRange for ::kafka_protocol::messages::[<$name Request>] {
                     type Req = Self;
 
-                    fn from_version_range(self, range: VersionRange) -> Option<(Self::Req, i16)> {
-                        let ver = max_intersecting_version(&[<$name Request>]::VERSIONS, &range)?;
+                    fn from_version_range(self, range: ::kafka_protocol::protocol::VersionRange) -> Option<(Self::Req, i16)> {
+                        let ver = max_intersecting_version(&::kafka_protocol::messages::[<$name Request>]::VERSIONS, &range)?;
                         Some((self, ver))
                     }
                 }
             )*
 
             $(
-                impl GetApiKey for [<$name Request>] {
+                impl GetApiKey for ::kafka_protocol::messages::[<$name Request>] {
                     fn key(&self) -> i16 {
-                        ApiKey::[<$name Key>] as i16
+                        ::kafka_protocol::messages::ApiKey::[<$name Key>] as i16
                     }
                 }
             )*
 
             impl Sendable for KafkaRequest {
-                type Response = ResponseKind;
+                type Response = ::kafka_protocol::messages::ResponseKind;
 
                 fn decode(response: DecodableResponse) -> Result<Self::Response, io::Error> {
                     match response.record.api_key {
-                        $(ApiKey::[<$name Key>] => Ok(ResponseKind::[<$name Response>]([<$name Request>]::decode(response)?)),)*
+                        $(::kafka_protocol::messages::ApiKey::[<$name Key>] => Ok(::kafka_protocol::messages::ResponseKind::[<$name Response>](::kafka_protocol::messages::[<$name Request>]::decode(response)?)),)*
                     }
                 }
             }
