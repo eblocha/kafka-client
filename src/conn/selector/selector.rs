@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use derive_more::derive::From;
 use fnv::FnvHashMap;
 use kafka_protocol::messages::{
@@ -40,13 +42,27 @@ pub struct Cluster {
     pub metadata: MetadataResponse,
 }
 
+fn least_in_flight(
+    left: &(&BrokerHost, &NodeTaskHandle),
+    right: &(&BrokerHost, &NodeTaskHandle),
+) -> Ordering {
+    left.1.in_flight().cmp(&right.1.in_flight())
+}
+
+fn least_failure_streak(
+    left: &(&BrokerHost, &NodeTaskHandle),
+    right: &(&BrokerHost, &NodeTaskHandle),
+) -> Ordering {
+    left.1.failure_streak().cmp(&right.1.failure_streak())
+}
+
 impl BrokerMap {
     /// Get the current "best" connection handle.
     ///
     /// This will prefer connected brokers with the minimum number of pending requests, then favor the minimum number of
     /// pending requests, connected or not.
     pub fn get_best_connection(&self) -> Option<(BrokerHost, NodeTaskHandle)> {
-        // prefer connected, non-saturated nodes with least waiting connections
+        // prefer connected, non-saturated nodes with least in-flight requests
         let least_loaded_connected = self
             .0
             .iter()
@@ -57,16 +73,34 @@ impl BrokerMap {
                     None
                 }
             })
-            .min_by(|left, right| left.1.in_flight().cmp(&right.1.in_flight()));
+            .min_by(least_in_flight);
 
         if let Some((host, handle)) = least_loaded_connected {
             return Some((host.clone(), handle.clone()));
         }
 
+        // next, prefer nodes with no failure streak and least in-flight requests
+        let least_loaded_no_failures = self
+            .0
+            .iter()
+            .filter_map(|(_, (broker, handle))| {
+                if handle.failure_streak() == 0 {
+                    Some((broker, handle))
+                } else {
+                    None
+                }
+            })
+            .min_by(least_in_flight);
+
+        if let Some((host, handle)) = least_loaded_no_failures {
+            return Some((host.clone(), handle.clone()));
+        }
+
+        // lastly, prefer nodes with the lowest failure streak
         self.0
             .iter()
             .map(|(_, (broker, handle))| (broker, handle))
-            .min_by(|left, right| left.1.in_flight().cmp(&right.1.in_flight()))
+            .min_by(least_failure_streak)
             .map(|(host, handle)| (host.clone(), handle.clone()))
     }
 }
