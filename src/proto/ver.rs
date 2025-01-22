@@ -25,6 +25,7 @@ pub trait FromVersionRange {
     /// Create a request and api version from the version range supported by a target broker.
     ///
     /// Returns None if no message can be constructed
+    #[allow(clippy::wrong_self_convention)]
     fn from_version_range(self, range: VersionRange) -> Option<(Self::Req, i16)>;
 }
 
