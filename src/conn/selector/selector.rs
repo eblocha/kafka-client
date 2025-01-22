@@ -17,7 +17,6 @@ use crate::{
     conn::{
         config::{ConnectionManagerConfig, ConnectionRetryConfig, MetadataRefreshConfig},
         host::BrokerHost,
-        KafkaChannelError,
     },
     error::KafkaError,
     proto::ver::with_max_version,
@@ -505,7 +504,7 @@ impl SelectorTaskHandle {
     pub async fn refresh_metadata_for_topics(
         &self,
         topics: Option<Vec<MetadataRequestTopic>>,
-    ) -> Result<(), KafkaChannelError> {
+    ) -> Result<(), KafkaError> {
         let (tx, rx) = oneshot::channel();
 
         self.tx_topic_metadata

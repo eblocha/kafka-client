@@ -1,6 +1,8 @@
 //! Configuration options for the Kafka client
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
+
+use kafka_protocol::protocol::StrBytes;
 
 use crate::config::KafkaConfig;
 
@@ -8,7 +10,7 @@ use crate::config::KafkaConfig;
 #[derive(Debug, Clone)]
 pub struct KafkaConnectionConfig {
     /// Client id to include with every request.
-    pub client_id: Option<Arc<str>>,
+    pub client_id: Option<StrBytes>,
     /// Size of the request send buffer. Further requests will experience backpressure.
     pub send_buffer_size: usize,
     /// Maximum frame length allowed in the transport layer. If a request is larger than this, an error is returned.
@@ -28,7 +30,7 @@ impl Default for KafkaConnectionConfig {
 impl From<&KafkaConfig> for KafkaConnectionConfig {
     fn from(value: &KafkaConfig) -> Self {
         Self {
-            client_id: value.client_id.clone(),
+            client_id: value.client_id.clone().map(StrBytes::from_string),
             send_buffer_size: value.send_buffer_size,
             max_frame_length: value.max_frame_length,
         }

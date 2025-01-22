@@ -84,7 +84,7 @@ impl NetworkClient {
     pub async fn load_topic_metadata<'a>(
         &self,
         topic_names: impl Iterator<Item = &'a TopicName>,
-    ) -> Result<(), KafkaChannelError> {
+    ) -> Result<(), KafkaError> {
         let missing_topic_names = {
             // Closure is to prevent holding the cluster across an await point, which would make this non-Send.
             let cluster_state = self.borrow_cluster();

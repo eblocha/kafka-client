@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use crate::conn::config::ConnectionManagerConfig;
 
@@ -7,7 +7,7 @@ pub struct KafkaConfig {
     /// Client id to include with every request.
     ///
     /// Default None
-    pub client_id: Option<Arc<str>>,
+    pub client_id: Option<String>,
     /// Size of the request send buffer. Further requests will experience backpressure.
     ///
     /// Default 512
@@ -52,7 +52,7 @@ impl Default for KafkaConfig {
         let mgr = ConnectionManagerConfig::default();
 
         Self {
-            client_id: mgr.conn.io.client_id,
+            client_id: mgr.conn.io.client_id.map(|s| s.to_string()),
             send_buffer_size: mgr.conn.io.send_buffer_size,
             max_frame_length: mgr.conn.io.max_frame_length,
             connection_max_retries: mgr.conn.retry.max_retries,

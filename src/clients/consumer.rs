@@ -21,7 +21,6 @@ use uuid::Uuid;
 use crate::{
     backoff::{exponential_backoff, BackoffSession},
     clients::network::NetworkClient,
-    conn::KafkaChannelError,
     error::KafkaError,
     proto::{error_codes::ErrorCode, request::KafkaRequest},
 };
@@ -51,7 +50,7 @@ enum ConsumerCommandKind {
 
 struct ConsumerCommand {
     /// Emits when the command has been executed successfully. Drop to abort.
-    tx: oneshot::Sender<Result<(), KafkaChannelError>>,
+    tx: oneshot::Sender<Result<(), KafkaError>>,
     kind: ConsumerCommandKind,
 }
 
@@ -132,7 +131,7 @@ impl ConsumerTask {
         }
     }
 
-    async fn subscribe(&mut self, topics: &[TopicName]) -> Result<(), KafkaChannelError> {
+    async fn subscribe(&mut self, topics: &[TopicName]) -> Result<(), KafkaError> {
         tracing::info!("subscribing to topics {topics:?}");
         self.client.load_topic_metadata(topics.iter()).await?;
         let topic_map = &self.client.borrow_cluster().metadata.topics;
@@ -451,7 +450,7 @@ impl Consumer {
         }
     }
 
-    pub async fn subscribe(&self, topics: Vec<TopicName>) -> Result<(), KafkaChannelError> {
+    pub async fn subscribe(&self, topics: Vec<TopicName>) -> Result<(), KafkaError> {
         let (tx, rx) = oneshot::channel();
 
         self.tx.send(ConsumerCommand {
