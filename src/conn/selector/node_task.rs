@@ -296,13 +296,7 @@ impl NodeTaskHandle {
         &self,
         req: F,
     ) -> Result<R::Response, KafkaError> {
-        let (tx, rx) = oneshot::channel();
-
-        let msg = NodeTaskMessage { tx };
-
-        self.tx.send(msg).await?;
-
-        let conn_result = rx.await?;
+        let conn_result = self.get_connection().await;
 
         if conn_result.is_err() {
             self.failure_streak.fetch_add(1, Ordering::Relaxed);
@@ -328,6 +322,25 @@ impl NodeTaskHandle {
         };
 
         Ok(conn.connection.send(req, version).await?)
+    }
+
+    async fn get_connection(&self) -> Result<Arc<VersionedConnection>, KafkaError> {
+        if let Some(conn) = self
+            .connection
+            .load()
+            .as_ref()
+            .filter(|conn| !conn.connection.sender().is_closed())
+        {
+            return Ok(conn.clone());
+        }
+
+        let (tx, rx) = oneshot::channel();
+
+        let msg = NodeTaskMessage { tx };
+
+        self.tx.send(msg).await?;
+
+        Ok(rx.await??)
     }
 
     /// Determine if this node has an open connection to the host.

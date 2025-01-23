@@ -153,7 +153,8 @@ struct SelectorTask<Conn> {
     rx_topic_metadata: mpsc::Receiver<RefreshMetadataRequest>,
     /// Container to store metadata backoff state
     metadata_backoff: BackoffSession<Option<RefreshMetadataRequest>>,
-    metadata_refresh_task: JoinSet<MetadataRefreshResult>,
+    /// Join set for the metadata refresh task. This should only have one task spawned at any time.
+    metadata_join_set: JoinSet<MetadataRefreshResult>,
     /// Cancellation signal
     cancellation_token: CancellationToken,
     /// Used to create new tcp streams
@@ -161,9 +162,10 @@ struct SelectorTask<Conn> {
 }
 
 enum Event<Conn> {
-    /// Metadata changed, so re-configure connections. This is also invoked when a [`NodeTask`]
+    /// Start a refresh of metadata. This is also invoked when a [`NodeTask`]
     /// panics or is aborted, because we no longer have access to the original channel in that case.
     RefreshStart(Option<RefreshMetadataRequest>),
+    /// Metadata refresh completed with success or failure.
     RefreshComplete(MetadataRefreshResult),
     /// A node stopped. Note this doesn't necessarily indicate that it should be running.
     /// The [`SelectorTask`] will restart it if it points to a valid broker in the cluster.
@@ -176,7 +178,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         metadata_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
-            let allow_metadata_requests = self.metadata_refresh_task.is_empty();
+            let allow_metadata_requests = self.metadata_join_set.is_empty();
             let metadata_fut = async {
                 // We only allow one metadata refresh task to run at a time.
                 if !allow_metadata_requests {
@@ -197,7 +199,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                 biased;
                 _ = self.cancellation_token.cancelled() => break,
                 // An err here means it panicked. There's no way to recover the original context, so let it go.
-                Some(Ok(metadata_refreshed)) = self.metadata_refresh_task.join_next() => Event::RefreshComplete(metadata_refreshed),
+                Some(Ok(metadata_refreshed)) = self.metadata_join_set.join_next() => Event::RefreshComplete(metadata_refreshed),
                 Some(req) = metadata_fut => Event::RefreshStart(req),
                 Some(result) = self.join_set.join_next() => match result {
                     Ok(node_died) => Event::NodeDied(node_died),
@@ -299,7 +301,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                         topics,
                     };
 
-                    self.metadata_refresh_task.spawn(task.run());
+                    self.metadata_join_set.spawn(task.run());
                 }
                 Event::NodeDied(dead_task) => self.restart_if_needed(dead_task).await,
             }
@@ -520,7 +522,7 @@ impl SelectorTaskHandle {
             retry_config: config.conn.retry,
             metadata_config: config.metadata,
             metadata_backoff: Default::default(),
-            metadata_refresh_task: JoinSet::new(),
+            metadata_join_set: JoinSet::new(),
             cancellation_token: cancellation_token.clone(),
             connect,
         };
