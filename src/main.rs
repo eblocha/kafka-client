@@ -12,6 +12,7 @@ use clap::{Parser, Subcommand};
 use clients::{consumer::Consumer, network::NetworkClient};
 use cmd::{admin::AdminCommands, producer::produce_from_file, Run};
 use config::KafkaConfig;
+use conn::host::try_parse_hosts;
 use kafka_protocol::{messages::TopicName, protocol::StrBytes};
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
@@ -58,7 +59,8 @@ pub async fn main() -> anyhow::Result<()> {
 
     let cfg = KafkaConfig::default();
 
-    let manager = NetworkClient::try_new(&cli.bootstrap_servers, (&cfg).into()).await?;
+    let manager =
+        NetworkClient::try_new(&try_parse_hosts(&cli.bootstrap_servers)?, (&cfg).into()).await?;
 
     match cli.client {
         Client::Admin(cmd) => cmd.run(&manager).await?,

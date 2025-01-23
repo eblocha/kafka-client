@@ -40,11 +40,6 @@ impl From<&KafkaConfig> for KafkaConnectionConfig {
 /// Controls how reconnection attempts are handled.
 #[derive(Debug, Clone)]
 pub struct ConnectionRetryConfig {
-    /// Maximum number of connection retry attempts before returning an error.
-    /// If None, the retries are infinite.
-    ///
-    /// Default None
-    pub max_retries: Option<u32>,
     /// Minimum time to wait between connection attempts.
     ///
     /// Default 10ms
@@ -62,7 +57,6 @@ pub struct ConnectionRetryConfig {
 impl Default for ConnectionRetryConfig {
     fn default() -> Self {
         Self {
-            max_retries: None,
             min_backoff: Duration::from_millis(10),
             max_backoff: Duration::from_secs(30),
             connection_timeout: Duration::from_secs(10),
@@ -73,7 +67,6 @@ impl Default for ConnectionRetryConfig {
 impl From<&KafkaConfig> for ConnectionRetryConfig {
     fn from(value: &KafkaConfig) -> Self {
         Self {
-            max_retries: value.connection_max_retries,
             min_backoff: value.connection_min_backoff,
             max_backoff: value.connection_max_backoff,
             connection_timeout: value.connection_timeout,
@@ -108,6 +101,11 @@ pub struct MetadataRefreshConfig {
     pub min_backoff: Duration,
     /// If refresh fails, the maximum time to wait before retrying
     pub max_backoff: Duration,
+    /// Maximum number of bootstrap retry attempts before returning an error.
+    /// If None, the retries are infinite.
+    ///
+    /// Default None
+    pub max_retries: Option<u32>,
 }
 
 impl From<&KafkaConfig> for MetadataRefreshConfig {
@@ -116,6 +114,7 @@ impl From<&KafkaConfig> for MetadataRefreshConfig {
             interval: value.metadata_refresh_interval,
             min_backoff: value.connection_min_backoff,
             max_backoff: value.connection_max_backoff,
+            max_retries: value.bootstrap_max_retries,
         }
     }
 }
@@ -126,6 +125,7 @@ impl Default for MetadataRefreshConfig {
             interval: Duration::from_secs(5 * 60),
             min_backoff: Duration::from_millis(10),
             max_backoff: Duration::from_secs(30),
+            max_retries: None,
         }
     }
 }

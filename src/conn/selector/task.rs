@@ -1,4 +1,8 @@
-use std::{cmp::Ordering, collections::HashSet};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use derive_more::derive::From;
 use fnv::FnvHashMap;
@@ -115,7 +119,7 @@ pub struct RefreshMetadataRequest {
     /// If Some(vec![]), this will only refresh the cluster metadata
     pub topics: Option<Vec<MetadataRequestTopic>>,
     /// Channel which sends when the request has been executed
-    pub tx: oneshot::Sender<()>,
+    pub tx: oneshot::Sender<Result<(), KafkaError>>,
 }
 
 fn metadata_request_topic_from_entry(
@@ -151,8 +155,8 @@ struct SelectorTask<Conn> {
     metadata_config: MetadataRefreshConfig,
     /// Receiver for requests to refresh metadata now
     rx_topic_metadata: mpsc::Receiver<RefreshMetadataRequest>,
-    /// Container to store metadata backoff state
-    metadata_backoff: BackoffSession<Option<RefreshMetadataRequest>>,
+    /// Container to store metadata backoff state per-broker
+    metadata_backoff: HashMap<BrokerHost, BackoffSession<()>>,
     /// Join set for the metadata refresh task. This should only have one task spawned at any time.
     metadata_join_set: JoinSet<MetadataRefreshResult>,
     /// Cancellation signal
@@ -173,9 +177,12 @@ enum Event<Conn> {
 }
 
 impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
-    async fn run(mut self) {
+    async fn run(mut self) -> Result<(), KafkaError> {
         let mut metadata_interval = tokio::time::interval(self.metadata_config.interval);
         metadata_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        let mut bootstrap_sucessful = false;
+        let mut retry_metadata_immediately = false;
 
         loop {
             let allow_metadata_requests = self.metadata_join_set.is_empty();
@@ -185,8 +192,8 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                     return None;
                 }
 
-                if let Some(payload) = self.metadata_backoff.wait_next().await {
-                    return Some(payload);
+                if retry_metadata_immediately {
+                    return Some(None);
                 }
 
                 Some(tokio::select! {
@@ -204,7 +211,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                 Some(result) = self.join_set.join_next() => match result {
                     Ok(node_died) => Event::NodeDied(node_died),
                     Err(join_err) => {
-                        tracing::error!("node connection task stopped unexpectedly, attempting to recover: {join_err:?}");
+                        tracing::error!("node connection task stopped unexpectedly, attempting to recover: {join_err}");
                         Event::RefreshStart(None)
                     }
                 },
@@ -213,10 +220,17 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             };
 
             match event {
-                Event::RefreshComplete((ctx, metadata)) => {
+                Event::RefreshComplete((mut ctx, metadata)) => {
+                    let tx = ctx.request.map(|r| r.tx);
+
                     match metadata {
                         Ok(metadata) => {
-                            // TODO respect throttle time
+                            bootstrap_sucessful = true;
+                            retry_metadata_immediately = false;
+
+                            let throttle_ms: u64 =
+                                metadata.throttle_time_ms.try_into().unwrap_or_default();
+
                             self.update_metadata(metadata);
 
                             tracing::info!(
@@ -226,7 +240,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                             );
 
                             tracing::debug!(
-                                "new metadata {:?}",
+                                "new broker mapping {:?}",
                                 self.hosts
                                     .0
                                     .iter()
@@ -234,33 +248,68 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                                     .collect::<Vec<_>>()
                             );
 
-                            self.metadata_backoff.success();
+                            ctx.backoff.success();
 
-                            if let Some(tx) = ctx.request.map(|r| r.tx) {
-                                let _ = tx.send(());
+                            if throttle_ms > 0 {
+                                ctx.backoff
+                                    .schedule_next(Duration::from_millis(throttle_ms), ());
+                            }
+
+                            self.metadata_backoff.insert(ctx.host, ctx.backoff);
+
+                            if let Some(tx) = tx {
+                                let _ = tx.send(Ok(()));
                             }
                         }
                         Err(e) => {
+                            // Check if we've exceeded our limit for bootstrap retries
+                            if !bootstrap_sucessful
+                                && self
+                                    .metadata_config
+                                    .max_retries
+                                    .is_some_and(|max| ctx.backoff.count() >= max)
+                            {
+                                tracing::error!(
+                                    broker_id = ctx.broker_id,
+                                    host = ?ctx.host,
+                                    "retries exhausted while bootstrapping: {e}, retries: {}", ctx.backoff.count()
+                                );
+                                return Err(e);
+                            }
+
+                            // Send another attempt immediately if this is not from an upstream request.
+                            // The task handles backoff.
+                            retry_metadata_immediately = tx.is_none();
+
                             if matches!(e, KafkaError::Init(_)) {
                                 // Error with establishing a connection, so don't back off and reset the attempts
                                 // The node task handles backoff and logging in this case.
-                                self.metadata_backoff.schedule_immediate(ctx.request, true);
+                                ctx.backoff.schedule_immediate((), true);
+                                if let Some(tx) = tx {
+                                    let _ = tx.send(Err(e));
+                                }
                                 continue;
                             }
 
                             let backoff = exponential_backoff(
                                 self.metadata_config.min_backoff,
                                 self.metadata_config.max_backoff,
-                                self.metadata_backoff.count(),
+                                ctx.backoff.count(),
                             );
 
-                            self.metadata_backoff.failure(backoff, ctx.request);
+                            ctx.backoff.failure(backoff, ());
 
                             tracing::error!(
                                 broker_id = ctx.broker_id,
                                 host = ?ctx.host,
-                                "failed to get metadata: {e}, backing off for {backoff:?}, retries: {}", self.metadata_backoff.count()
+                                "failed to get metadata: {e}, backing off for {backoff:?}, retries: {}", ctx.backoff.count()
                             );
+
+                            self.metadata_backoff.insert(ctx.host, ctx.backoff);
+
+                            if let Some(tx) = tx {
+                                let _ = tx.send(Err(e));
+                            }
                             continue;
                         }
                     }
@@ -270,7 +319,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                         self.tx.borrow().broker_channels.get_best_connection()
                     else {
                         tracing::error!("no connections available for metadata refresh!");
-                        return;
+                        break;
                     };
 
                     tracing::info!(
@@ -291,12 +340,18 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                         )
                     });
 
+                    let backoff = self
+                        .metadata_backoff
+                        .remove(&host_for_refresh)
+                        .unwrap_or_default();
+
                     let task = MetadataRefreshTask {
                         context: MetadataRefreshContext {
                             broker_id: broker_id_for_refresh,
                             host: host_for_refresh,
                             node_handle: handle_for_refresh,
                             request: req,
+                            backoff,
                         },
                         topics,
                     };
@@ -314,6 +369,8 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         while self.join_set.join_next().await.is_some() {}
 
         let _ = self.tx.send(Default::default());
+
+        Ok(())
     }
 
     fn update_metadata(&mut self, mut metadata: MetadataResponse) {
@@ -327,6 +384,16 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             .iter()
             .map(|(id, broker)| (id.0, broker))
             .collect();
+
+        let new_broker_hosts: HashSet<BrokerHost> = metadata
+            .brokers
+            .iter()
+            .map(|(_, broker)| broker.into())
+            .collect();
+
+        // remove backoff state for nodes not in the cluster
+        self.metadata_backoff
+            .retain(|host, _| new_broker_hosts.contains(host));
 
         // remove nodes that are not in the cluster
         self.hosts.0.retain(|id, (host, handle)| {
@@ -462,8 +529,11 @@ pub(crate) struct SelectorTaskHandle {
 
 impl SelectorTaskHandle {
     /// Create a new selector task handle using TCP without TLS.
-    pub async fn new_tcp(bootstrap: &[BrokerHost], config: ConnectionManagerConfig) -> Self {
-        Self::new_with_connect(
+    pub async fn try_new_tcp(
+        bootstrap: &[BrokerHost],
+        config: ConnectionManagerConfig,
+    ) -> Result<Self, KafkaError> {
+        Self::try_new_with_connect(
             bootstrap,
             config.clone(),
             Tcp {
@@ -480,11 +550,11 @@ impl SelectorTaskHandle {
         self.task_tracker.wait().await;
     }
 
-    async fn new_with_connect<Conn: Connect + Clone + Send + 'static>(
+    async fn try_new_with_connect<Conn: Connect + Clone + Send + 'static>(
         bootstrap: &[BrokerHost],
         config: ConnectionManagerConfig,
         connect: Conn,
-    ) -> Self {
+    ) -> Result<Self, KafkaError> {
         let mut hosts: BrokerMap = Default::default();
         let mut join_set = JoinSet::new();
 
@@ -527,18 +597,22 @@ impl SelectorTaskHandle {
             connect,
         };
 
-        task_tracker.spawn(selector_task.run());
+        let join_handle = task_tracker.spawn(selector_task.run());
 
-        // wait for metadata refresh
-        let _ = cluster_rx.changed().await;
+        tokio::select! {
+            // wait for metadata refresh (bootstrap)
+            _ = cluster_rx.changed() => Ok(()),
+            // or failure to bootstrap
+            result = join_handle => result.unwrap(), // TODO handle join error
+        }?;
 
-        Self {
+        Ok(Self {
             cluster: cluster_rx,
             tx_topic_metadata,
             cancellation_token,
             task_tracker,
             tx_cluster: cluster_tx,
-        }
+        })
     }
 
     pub async fn refresh_metadata_for_topics(
@@ -551,7 +625,7 @@ impl SelectorTaskHandle {
             .send(RefreshMetadataRequest { topics, tx })
             .await?;
 
-        rx.await?;
+        rx.await??;
 
         Ok(())
     }

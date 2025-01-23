@@ -16,11 +16,6 @@ pub struct KafkaConfig {
     ///
     /// Default 8 MiB
     pub max_frame_length: usize,
-    /// Maximum number of connection retry attempts before returning an error.
-    /// If None, the retries are infinite.
-    ///
-    /// Default None
-    pub connection_max_retries: Option<u32>,
     /// Minimum time to wait between connection attempts.
     ///
     /// Default 10ms
@@ -33,6 +28,11 @@ pub struct KafkaConfig {
     ///
     /// Default 10s
     pub connection_timeout: Duration,
+    /// Maximum number of bootstrap retry attempts per-broker before returning an error.
+    /// If None, the retries are infinite.
+    ///
+    /// Default None
+    pub bootstrap_max_retries: Option<u32>,
     /// How often to refresh cluster metadata
     ///
     /// Default 5min
@@ -55,13 +55,13 @@ impl Default for KafkaConfig {
             client_id: mgr.conn.io.client_id.map(|s| s.to_string()),
             send_buffer_size: mgr.conn.io.send_buffer_size,
             max_frame_length: mgr.conn.io.max_frame_length,
-            connection_max_retries: mgr.conn.retry.max_retries,
             connection_min_backoff: mgr.conn.retry.min_backoff,
             connection_max_backoff: mgr.conn.retry.max_backoff,
             connection_timeout: mgr.conn.retry.connection_timeout,
             metadata_refresh_interval: mgr.metadata.interval,
             metadata_refresh_max_backoff: mgr.metadata.max_backoff,
             metadata_refresh_min_backoff: mgr.metadata.min_backoff,
+            bootstrap_max_retries: mgr.metadata.max_retries,
         }
     }
 }

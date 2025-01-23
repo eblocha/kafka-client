@@ -2,7 +2,10 @@ use kafka_protocol::messages::{
     metadata_request::MetadataRequestTopic, MetadataRequest, MetadataResponse,
 };
 
-use crate::{conn::host::BrokerHost, error::KafkaError, proto::ver::with_max_version};
+use crate::{
+    backoff::BackoffSession, conn::host::BrokerHost, error::KafkaError,
+    proto::ver::with_max_version,
+};
 
 use super::{node_task::NodeTaskHandle, RefreshMetadataRequest};
 
@@ -34,6 +37,7 @@ pub struct MetadataRefreshContext {
     pub host: BrokerHost,
     pub node_handle: NodeTaskHandle,
     pub request: Option<RefreshMetadataRequest>,
+    pub backoff: BackoffSession<()>,
 }
 
 pub struct MetadataRefreshTask {
@@ -44,7 +48,9 @@ pub struct MetadataRefreshTask {
 pub type MetadataRefreshResult = (MetadataRefreshContext, Result<MetadataResponse, KafkaError>);
 
 impl MetadataRefreshTask {
-    pub async fn run(self) -> MetadataRefreshResult {
+    pub async fn run(mut self) -> MetadataRefreshResult {
+        self.context.backoff.wait_next().await;
+
         let metadata = self
             .context
             .node_handle

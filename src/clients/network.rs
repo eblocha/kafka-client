@@ -4,7 +4,7 @@ use tokio::sync::watch::Ref;
 use crate::{
     conn::{
         config::ConnectionManagerConfig,
-        host::{try_parse_hosts, BrokerHost},
+        host::BrokerHost,
         selector::{Cluster, SelectorTaskHandle},
         KafkaChannelError, Sendable,
     },
@@ -20,20 +20,13 @@ pub struct NetworkClient {
 
 impl NetworkClient {
     /// Create a new client with bootstrap servers
-    ///
-    /// This can fail if the broker hostnames are not valid.
     pub async fn try_new(
-        brokers: &[String],
+        brokers: &[BrokerHost],
         config: ConnectionManagerConfig,
-    ) -> Result<Self, url::ParseError> {
-        Ok(Self::new_with_hosts(&try_parse_hosts(brokers)?, config).await)
-    }
+    ) -> Result<Self, KafkaError> {
+        let selector = SelectorTaskHandle::try_new_tcp(brokers, config).await?;
 
-    /// Create a new client with bootstrap servers
-    pub async fn new_with_hosts(brokers: &[BrokerHost], config: ConnectionManagerConfig) -> Self {
-        let selector = SelectorTaskHandle::new_tcp(brokers, config).await;
-
-        Self { selector }
+        Ok(Self { selector })
     }
 
     /// Send a message to any available broker.
