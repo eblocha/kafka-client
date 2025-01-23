@@ -262,13 +262,13 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
 #[derive(Debug, Clone)]
 pub struct NodeTaskHandle {
     /// Transmitter to send messages to the underlying connection
-    pub tx: mpsc::Sender<NodeTaskMessage>,
-    // The kafka channel with version information.
-    // This will be None if no connection has ever been established.
-    pub connection: Arc<ArcSwapOption<VersionedConnection>>,
+    pub(super) tx: mpsc::Sender<NodeTaskMessage>,
     /// Token to stop the running task. This is not exposed, because on the [`crate::conn::selector::SelectorTask`]
     /// should stop the connection.
     pub(super) cancellation_token: CancellationToken,
+    // The kafka channel with version information.
+    // This will be None if no connection has ever been established.
+    connection: Arc<ArcSwapOption<VersionedConnection>>,
     /// Number of requests waiting for a response
     in_flight: Arc<AtomicUsize>,
     /// Number of failed connect attempts in a row
