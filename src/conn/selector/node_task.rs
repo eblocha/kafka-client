@@ -526,7 +526,7 @@ mod test {
     /// Start a task to a fake broker, and send a metadata request to it.
     ///
     /// Returns a reciever for messages that the broker would receive from the client.
-    fn fire_and_forget_request() -> mpsc::Receiver<KafkaChannelMessage> {
+    fn start_task() -> (mpsc::Receiver<KafkaChannelMessage>, NodeTaskHandle) {
         let (tx, rx) = mpsc::channel(1);
         let task_tracker = TaskTracker::new();
         let cancellation_token = CancellationToken::new();
@@ -539,6 +539,15 @@ mod test {
         );
 
         tokio::spawn(task.run());
+
+        (rx, handle)
+    }
+
+    /// Start a task to a fake broker, and send a metadata request to it.
+    ///
+    /// Returns a reciever for messages that the broker would receive from the client.
+    fn fire_and_forget_request() -> mpsc::Receiver<KafkaChannelMessage> {
+        let (rx, handle) = start_task();
         tokio::spawn(async move { handle.send(MetadataRequest::default()).await });
 
         rx
@@ -642,26 +651,25 @@ mod test {
         assert_ok!(response);
     }
 
-    // TODO
-    #[ignore]
     #[tokio::test(start_paused = true)]
     #[traced_test]
-    async fn retry_on_fail() {
-        let mut rx = fire_and_forget_request();
+    async fn propagates_failure() {
+        let (mut rx, handle) = start_task();
+
+        let handle_clone = handle.clone();
+
+        let join = tokio::spawn(async move { handle_clone.send(MetadataRequest::default()).await });
 
         let channel_msg = rx.recv().await.unwrap();
 
         let _ = channel_msg.tx.send(Err(io::Error::other("test")));
 
-        // It will wait for backoff, then try to reconnect
-        tokio::time::advance(ConnectionRetryConfig::default().min_backoff).await;
-
-        let channel_msg = rx.recv().await.unwrap();
+        let result = join.await.unwrap();
 
         assert!(
-            matches!(channel_msg.versioned.request, KafkaRequest::ApiVersions(_)),
-            "expected an ApiVersionsRequest, got {:?}",
-            channel_msg.versioned.request
+            matches!(result, Err(KafkaError::Init(ConnectionInitError::Io(_)))),
+            "expected an io error, got {:?}",
+            result
         );
     }
 
@@ -698,11 +706,9 @@ mod test {
         );
     }
 
-    // TODO
-    #[ignore]
     #[tokio::test(start_paused = true)]
     #[traced_test]
-    async fn retry_on_timeout() {
+    async fn error_on_timeout() {
         #[derive(Debug, Clone)]
         struct RetryCountingConnect {
             attempts: watch::Sender<usize>,
@@ -732,16 +738,20 @@ mod test {
 
         let h_clone = handle.clone();
 
-        tokio::spawn(async move { h_clone.send(MetadataRequest::default()).await });
+        let result = tokio::spawn(async move { h_clone.send(MetadataRequest::default()).await });
 
         let _ = rx.changed().await;
 
-        // wait for timeout and backoff period
+        // wait for timeout
         tokio::time::advance(retry_config.connection_timeout).await;
-        tokio::time::advance(retry_config.min_backoff).await;
 
-        let _ = rx.changed().await;
+        // We should get an error
+        let result = result.await.unwrap();
 
-        assert_eq!(rx.borrow().clone(), 2);
+        assert!(
+            matches!(result, Err(KafkaError::Init(ConnectionInitError::Io(_))),),
+            "expected an io error, got {:?}",
+            result
+        );
     }
 }
