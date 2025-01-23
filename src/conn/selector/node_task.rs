@@ -277,8 +277,6 @@ pub struct NodeTaskHandle {
 
 impl NodeTaskHandle {
     /// Send a request to the broker and wait for a response.
-    ///
-    /// Note that this will wait across reconnect retry loops.
     pub async fn send<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
         &self,
         req: F,
