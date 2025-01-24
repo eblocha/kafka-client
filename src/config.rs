@@ -8,6 +8,7 @@ pub struct KafkaConfig {
     ///
     /// Default None
     pub client_id: Option<String>,
+
     /// Size of the request send buffer. Further requests will experience backpressure.
     ///
     /// Default 512
@@ -24,6 +25,7 @@ pub struct KafkaConfig {
     ///
     /// Default 30s
     pub connection_max_backoff: Duration,
+
     /// Timeout to establish a connection before retrying.
     ///
     /// Default 10s
@@ -53,11 +55,13 @@ impl Default for KafkaConfig {
 
         Self {
             client_id: mgr.conn.io.client_id.map(|s| s.to_string()),
+
             send_buffer_size: mgr.conn.io.send_buffer_size,
             max_frame_length: mgr.conn.io.max_frame_length,
             connection_min_backoff: mgr.conn.retry.min_backoff,
             connection_max_backoff: mgr.conn.retry.max_backoff,
             connection_timeout: mgr.conn.retry.connection_timeout,
+
             metadata_refresh_interval: mgr.metadata.interval,
             metadata_refresh_max_backoff: mgr.metadata.max_backoff,
             metadata_refresh_min_backoff: mgr.metadata.min_backoff,

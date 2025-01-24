@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::bail;
 use clap::Subcommand;
 
-use crate::{
+use kafka_client::{
     clients::{
         admin::{AdminClient, AutoAssignmentNewTopic, NewTopic},
         network::NetworkClient,

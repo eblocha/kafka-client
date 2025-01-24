@@ -1,20 +1,11 @@
-mod backoff;
-pub mod clients;
 mod cmd;
-pub mod common;
-pub mod config;
-mod conn;
-pub mod error;
-mod proto;
 
 use std::{io, path::PathBuf};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use clients::network::NetworkClient;
 use cmd::{admin::AdminCommands, consumer::EchoTopics, producer::produce_from_file, Run};
-use common::try_parse_hosts;
-use config::KafkaConfig;
+use kafka_client::{clients::network::NetworkClient, common::try_parse_hosts, config::KafkaConfig};
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 

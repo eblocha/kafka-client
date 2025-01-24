@@ -1,4 +1,4 @@
-use crate::clients::network::NetworkClient;
+use kafka_client::clients::network::NetworkClient;
 
 pub mod admin;
 pub mod consumer;

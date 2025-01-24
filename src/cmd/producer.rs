@@ -19,7 +19,7 @@ use tokio::{
     io::{self, AsyncBufReadExt},
 };
 
-use crate::{clients::network::NetworkClient, proto::error_codes::ErrorCode};
+use kafka_client::{clients::network::NetworkClient, error::ErrorCode};
 
 pub async fn produce_from_file(
     client: &NetworkClient,

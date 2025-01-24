@@ -1,7 +1,7 @@
 use anyhow::Context;
 use kafka_protocol::{messages::TopicName, protocol::StrBytes};
 
-use crate::clients::{consumer::Consumer, network::NetworkClient};
+use kafka_client::clients::{consumer::Consumer, network::NetworkClient};
 
 use super::Run;
 
