@@ -4,7 +4,7 @@ use std::{io, path::PathBuf};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use cmd::{admin::AdminCommands, consumer::EchoTopics, Run};
+use cmd::{admin::AdminCommands, consumer::EchoTopics, producer::ProduceFromFile, Run};
 use kafka_client::{clients::network::NetworkClient, common::try_parse_hosts, config::KafkaConfig};
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
@@ -57,7 +57,7 @@ pub async fn main() -> anyhow::Result<()> {
 
     match cli.client {
         Client::Admin(cmd) => cmd.run(manager).await?,
-        Client::Producer { file, topic } => todo!(),
+        Client::Producer { file, topic } => ProduceFromFile { file, topic }.run(manager).await?,
         Client::Consumer { topics } => EchoTopics { topics }.run(manager).await?,
     }
 

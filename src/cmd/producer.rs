@@ -1,134 +1,54 @@
-use std::{
-    path::PathBuf,
-    time::{Instant, SystemTime, UNIX_EPOCH},
-};
+use std::{path::PathBuf, time::Instant};
 
-use anyhow::bail;
-use bytes::{Bytes, BytesMut};
-use kafka_protocol::{
-    indexmap::IndexMap,
-    messages::{
-        produce_request::{PartitionProduceData, TopicProduceData},
-        ProduceRequest, TopicName,
-    },
-    protocol::StrBytes,
-    records::{self, Record, RecordBatchEncoder, RecordEncodeOptions},
-};
 use tokio::{
     fs::File,
     io::{self, AsyncBufReadExt},
 };
 
-use kafka_client::{clients::network::NetworkClient, error::ErrorCode};
+use kafka_client::clients::{
+    network::NetworkClient,
+    producer::{Producer, ProducerRecord},
+};
 
-pub async fn produce_from_file(
-    client: &NetworkClient,
-    topic: String,
-    file: PathBuf,
-) -> anyhow::Result<()> {
-    let file = File::open(file).await?;
+use super::Run;
 
-    let mut reader = io::BufReader::new(file).lines();
+pub struct ProduceFromFile {
+    pub topic: String,
+    pub file: PathBuf,
+}
 
-    let topic = TopicName(StrBytes::from_string(topic));
+impl Run for ProduceFromFile {
+    type Response = ();
 
-    client.load_topic_metadata([&topic].into_iter()).await?;
+    async fn run(self, client: NetworkClient) -> anyhow::Result<Self::Response> {
+        let file = File::open(self.file).await?;
 
-    let topic_map = &client.borrow_cluster().metadata.topics;
+        let mut reader = io::BufReader::new(file).lines();
 
-    let topic_data = topic_map
-        .get(&topic)
-        .ok_or(ErrorCode::UnknownTopicOrPartition)?;
+        let mut producer = Producer::new(client);
 
-    let error_code: ErrorCode = topic_data.error_code.into();
+        let now = Instant::now();
+        let mut iter = 0;
 
-    if error_code != ErrorCode::None {
-        bail!(error_code);
-    }
+        while let Some(line) = reader.next_line().await? {
+            producer
+                .send(ProducerRecord {
+                    headers: Default::default(),
+                    key: None,
+                    partition: None,
+                    timestamp: None,
+                    topic: self.topic.clone(),
+                    value: Some(line.into()),
+                })
+                .await?;
 
-    let partition = &topic_data.partitions[0];
-
-    let leader_epoch = partition.leader_epoch;
-    let leader_id = partition.leader_id.0;
-    let mut iter: i32 = 0;
-
-    let mut record_vec = Vec::new();
-    let mut records = BytesMut::new();
-
-    while let Some(line) = reader.next_line().await? {
-        let start = SystemTime::now();
-        let since_the_epoch = start
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards");
-
-        let timestamp =
-            since_the_epoch.as_secs() * 1000 + since_the_epoch.subsec_nanos() as u64 / 1_000_000;
-
-        let record = Record {
-            transactional: false,
-            control: false,
-            partition_leader_epoch: leader_epoch,
-            producer_id: -1,
-            producer_epoch: -1,
-            timestamp_type: records::TimestampType::Creation,
-            offset: iter as i64,
-            sequence: iter,
-            timestamp: timestamp as i64,
-            key: None,
-            value: Some(Bytes::from(line)),
-            headers: Default::default(),
-        };
-
-        record_vec.push(record);
-
-        iter += 1;
-    }
-
-    let now = Instant::now();
-
-    RecordBatchEncoder::encode(
-        &mut records,
-        record_vec.iter(),
-        &RecordEncodeOptions {
-            version: 2,
-            compression: records::Compression::None,
-        },
-    )?;
-
-    let mut data = TopicProduceData::default();
-
-    data.partition_data = vec![{
-        let mut d = PartitionProduceData::default();
-        d.index = partition.partition_index;
-        d.records = Some(records.into());
-        d
-    }];
-
-    let req = {
-        let mut r = ProduceRequest::default();
-        r.acks = 1;
-        r.timeout_ms = 1000;
-        r.transactional_id = None;
-        r.topic_data = IndexMap::from_iter([(topic.clone(), data)]);
-        r
-    };
-
-    let res = client.send_to(req, leader_id).await?;
-
-    for (_, response) in res.responses {
-        for response in response.partition_responses {
-            let error_code = ErrorCode::from(response.error_code);
-
-            if error_code != ErrorCode::None {
-                println!("error: {error_code:?}");
-                return Ok(());
-            }
+            iter += 1;
         }
+
+        let finish = now.elapsed();
+
+        println!("produced {iter} messages in {finish:?}");
+
+        Ok(())
     }
-
-    let finish = now.elapsed();
-
-    println!("produced {iter} messages in {finish:?}");
-
-    Ok(())
 }
