@@ -21,7 +21,10 @@ use crate::{
     common::{BrokerHost, Node},
     conn::{
         config::{ConnectionManagerConfig, ConnectionRetryConfig, MetadataRefreshConfig},
-        selector::metadata::{MetadataRefreshContext, MetadataRefreshTask},
+        selector::{
+            metadata::{MetadataRefreshContext, MetadataRefreshTask},
+            ConnectionInitError,
+        },
     },
     error::KafkaError,
 };
@@ -617,7 +620,10 @@ impl SelectorTaskHandle {
             // wait for metadata refresh (bootstrap)
             _ = cluster_rx.changed() => Ok(()),
             // or failure to bootstrap
-            result = join_handle => result.unwrap(), // TODO handle join error
+            result = join_handle => result.map_err(|join_err| {
+                tracing::error!("bootstrapping stopped unexpectedly: {join_err}");
+                KafkaError::Init(ConnectionInitError::Closed)
+            })?,
         }?;
 
         Ok(Self {
