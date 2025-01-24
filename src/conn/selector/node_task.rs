@@ -20,10 +20,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     backoff::{exponential_backoff, BackoffSession},
+    common::BrokerHost,
     conn::{
         channel::{KafkaChannel, KafkaChannelError},
         config::ConnectionRetryConfig,
-        host::BrokerHost,
         Sendable,
     },
     error::KafkaError,
@@ -493,7 +493,6 @@ mod test {
             channel::{KafkaChannel, KafkaChannelMessage},
             codec::sendable::{DecodableResponse, RequestRecord},
             config::ConnectionRetryConfig,
-            host::BrokerHost,
         },
         proto::request::KafkaRequest,
     };

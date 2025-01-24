@@ -2,9 +2,9 @@ use kafka_protocol::messages::{metadata_request::MetadataRequestTopic, TopicName
 use tokio::sync::watch::Ref;
 
 use crate::{
+    common::BrokerHost,
     conn::{
         config::ConnectionManagerConfig,
-        host::BrokerHost,
         selector::{Cluster, SelectorTaskHandle},
         KafkaChannelError, Sendable,
     },
@@ -37,11 +37,10 @@ impl NetworkClient {
     ) -> Result<R::Response, KafkaError> {
         let handle = {
             // Closure is to prevent holding the cluster across an await point, which would make this non-Send.
-            let Some((_, _, handle)) = self.borrow_cluster().broker_channels.get_best_connection()
-            else {
+            let Some(entry) = self.borrow_cluster().broker_channels.get_best_connection() else {
                 return Err(KafkaChannelError::Closed.into());
             };
-            handle
+            entry.handle
         };
 
         handle.send(req).await
@@ -56,11 +55,11 @@ impl NetworkClient {
         let handle = {
             // Closure is to prevent holding the cluster across an await point, which would make this non-Send.
             let cluster = self.borrow_cluster();
-            let Some((_, handle)) = cluster.broker_channels.0.get(&broker_id) else {
+            let Some(entry) = cluster.broker_channels.0.get(&broker_id) else {
                 tracing::error!("no broker handle for id {broker_id}");
                 return Err(KafkaChannelError::Closed.into());
             };
-            handle.clone()
+            entry.handle.clone()
         };
 
         handle.send(req).await

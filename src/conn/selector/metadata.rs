@@ -2,12 +2,9 @@ use kafka_protocol::messages::{
     metadata_request::MetadataRequestTopic, MetadataRequest, MetadataResponse,
 };
 
-use crate::{
-    backoff::BackoffSession, conn::host::BrokerHost, error::KafkaError,
-    proto::ver::with_max_version,
-};
+use crate::{backoff::BackoffSession, error::KafkaError, proto::ver::with_max_version};
 
-use super::{node_task::NodeTaskHandle, RefreshMetadataRequest};
+use super::{BrokerMapEntry, RefreshMetadataRequest};
 
 fn create_metadata_request(
     version: i16,
@@ -33,9 +30,7 @@ fn create_metadata_request(
 }
 
 pub struct MetadataRefreshContext {
-    pub broker_id: i32,
-    pub host: BrokerHost,
-    pub node_handle: NodeTaskHandle,
+    pub entry: BrokerMapEntry,
     pub request: Option<RefreshMetadataRequest>,
     pub backoff: BackoffSession<()>,
 }
@@ -53,7 +48,8 @@ impl MetadataRefreshTask {
 
         let metadata = self
             .context
-            .node_handle
+            .entry
+            .handle
             .send(with_max_version(move |ver| {
                 create_metadata_request(ver, self.topics)
             }))

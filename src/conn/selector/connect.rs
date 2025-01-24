@@ -1,7 +1,10 @@
 use std::{future::Future, io, sync::Arc};
 use tokio::net::TcpStream;
 
-use crate::conn::{channel::KafkaChannel, config::KafkaConnectionConfig, host::BrokerHost};
+use crate::{
+    common::BrokerHost,
+    conn::{channel::KafkaChannel, config::KafkaConnectionConfig},
+};
 
 /// Creates a new async stream for the connection to a broker.
 pub trait Connect {

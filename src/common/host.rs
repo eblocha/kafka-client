@@ -1,6 +1,8 @@
 use std::{fmt::Debug, sync::Arc};
 
-use kafka_protocol::messages::metadata_response::MetadataResponseBroker;
+use kafka_protocol::messages::{
+    describe_cluster_response::DescribeClusterBroker, metadata_response::MetadataResponseBroker,
+};
 use url::Url;
 
 /// A cheap-to-clone host:port pair for a Kafka broker
@@ -15,6 +17,12 @@ impl Debug for BrokerHost {
 
 impl From<&MetadataResponseBroker> for BrokerHost {
     fn from(broker: &MetadataResponseBroker) -> Self {
+        BrokerHost(Arc::from(broker.host.as_str()), broker.port as u16)
+    }
+}
+
+impl From<&DescribeClusterBroker> for BrokerHost {
+    fn from(broker: &DescribeClusterBroker) -> Self {
         BrokerHost(Arc::from(broker.host.as_str()), broker.port as u16)
     }
 }
@@ -36,7 +44,7 @@ impl TryFrom<&str> for BrokerHost {
     }
 }
 
-/// Try to parse a slice of string-like items into a `Vec` of [`BrokerHost`].
+/// Try to parse a slice of string-like items into a [`Vec`] of [`BrokerHost`].
 ///
 /// Fails if any hosts are invalid.
 pub fn try_parse_hosts<S: AsRef<str>>(brokers: &[S]) -> Result<Vec<BrokerHost>, url::ParseError> {

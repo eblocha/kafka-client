@@ -7,7 +7,7 @@ use std::{
 use derive_more::derive::From;
 use fnv::FnvHashMap;
 use kafka_protocol::messages::{
-    metadata_request::MetadataRequestTopic, metadata_response::MetadataResponseTopic,
+    metadata_request::MetadataRequestTopic, metadata_response::MetadataResponseTopic, BrokerId,
     MetadataResponse, TopicName,
 };
 use tokio::{
@@ -18,9 +18,9 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     backoff::{exponential_backoff, BackoffSession},
+    common::{BrokerHost, Node},
     conn::{
         config::{ConnectionManagerConfig, ConnectionRetryConfig, MetadataRefreshConfig},
-        host::BrokerHost,
         selector::metadata::{MetadataRefreshContext, MetadataRefreshTask},
     },
     error::KafkaError,
@@ -32,33 +32,39 @@ use super::{
     node_task::{new_pair, NodeTask, NodeTaskHandle},
 };
 
-/// Mapping of broker id to [`BrokerHost`] and [`NodeTaskHandle`].
+#[derive(Debug, Clone)]
+pub struct BrokerMapEntry {
+    pub node: Node,
+    pub handle: NodeTaskHandle,
+}
+
+/// Mapping of broker id to [`BrokerMapEntry`].
 ///
 /// Used to send requests to specific brokers, or the current least-loaded broker.
 #[derive(Debug, Clone, From, Default)]
-pub struct BrokerMap(#[from] pub FnvHashMap<i32, (BrokerHost, NodeTaskHandle)>);
+pub struct BrokerMap(#[from] pub FnvHashMap<i32, BrokerMapEntry>);
 
 /// Current cluster state since the last metadata refresh.
 #[derive(Debug, Default, Clone)]
 pub struct Cluster {
-    /// Mapping of broker id to the [`BrokerHost`] and [`NodeTaskHandle`] to send requests to it.
+    /// Mapping of broker id to the [`BrokerMapEntry`] to send requests to it.
     pub broker_channels: BrokerMap,
     /// Metadata response last recieved from a refresh.
     pub metadata: MetadataResponse,
 }
 
-fn least_in_flight(
-    left: &(&i32, &BrokerHost, &NodeTaskHandle),
-    right: &(&i32, &BrokerHost, &NodeTaskHandle),
-) -> Ordering {
-    left.2.in_flight().cmp(&right.2.in_flight())
+fn least_in_flight(left: &(&i32, &BrokerMapEntry), right: &(&i32, &BrokerMapEntry)) -> Ordering {
+    left.1.handle.in_flight().cmp(&right.1.handle.in_flight())
 }
 
 fn least_failure_streak(
-    left: &(&i32, &BrokerHost, &NodeTaskHandle),
-    right: &(&i32, &BrokerHost, &NodeTaskHandle),
+    left: &(&i32, &BrokerMapEntry),
+    right: &(&i32, &BrokerMapEntry),
 ) -> Ordering {
-    left.2.failure_streak().cmp(&right.2.failure_streak())
+    left.1
+        .handle
+        .failure_streak()
+        .cmp(&right.1.handle.failure_streak())
 }
 
 impl BrokerMap {
@@ -66,47 +72,46 @@ impl BrokerMap {
     ///
     /// This will prefer connected brokers with the minimum number of pending requests, then favor the minimum number of
     /// pending requests, connected or not.
-    pub fn get_best_connection(&self) -> Option<(i32, BrokerHost, NodeTaskHandle)> {
+    pub fn get_best_connection(&self) -> Option<BrokerMapEntry> {
         // prefer connected, non-saturated nodes with least in-flight requests
         let least_loaded_connected = self
             .0
             .iter()
-            .filter_map(|(id, (broker, handle))| {
-                if handle.capacity().is_some_and(|cap| cap > 0) {
-                    Some((id, broker, handle))
+            .filter_map(|(id, entry)| {
+                if entry.handle.capacity().is_some_and(|cap| cap > 0) {
+                    Some((id, entry))
                 } else {
                     None
                 }
             })
             .min_by(least_in_flight);
 
-        if let Some((id, host, handle)) = least_loaded_connected {
-            return Some((*id, host.clone(), handle.clone()));
+        if let Some((_, entry)) = least_loaded_connected {
+            return Some(entry.clone());
         }
 
         // next, prefer nodes with no failure streak and least in-flight requests
         let least_loaded_no_failures = self
             .0
             .iter()
-            .filter_map(|(id, (broker, handle))| {
-                if handle.failure_streak() == 0 {
-                    Some((id, broker, handle))
+            .filter_map(|(id, entry)| {
+                if entry.handle.failure_streak() == 0 {
+                    Some((id, entry))
                 } else {
                     None
                 }
             })
             .min_by(least_in_flight);
 
-        if let Some((id, host, handle)) = least_loaded_no_failures {
-            return Some((*id, host.clone(), handle.clone()));
+        if let Some((_, entry)) = least_loaded_no_failures {
+            return Some(entry.clone());
         }
 
         // lastly, prefer nodes with the lowest failure streak
         self.0
             .iter()
-            .map(|(id, (host, handle))| (id, host, handle))
             .min_by(least_failure_streak)
-            .map(|(id, host, handle)| (*id, host.clone(), handle.clone()))
+            .map(|(_, entry)| entry.clone())
     }
 }
 
@@ -234,8 +239,8 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                             self.update_metadata(metadata);
 
                             tracing::info!(
-                                broker_id = ctx.broker_id,
-                                host = ?ctx.host,
+                                broker_id = ctx.entry.node.id,
+                                host = ?ctx.entry.node.host,
                                 "successfully updated metadata"
                             );
 
@@ -244,7 +249,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                                 self.hosts
                                     .0
                                     .iter()
-                                    .map(|(id, (host, _))| (id, host))
+                                    .map(|(_, entry)| &entry.node)
                                     .collect::<Vec<_>>()
                             );
 
@@ -255,7 +260,8 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                                     .schedule_next(Duration::from_millis(throttle_ms), ());
                             }
 
-                            self.metadata_backoff.insert(ctx.host, ctx.backoff);
+                            self.metadata_backoff
+                                .insert(ctx.entry.node.host, ctx.backoff);
 
                             if let Some(tx) = tx {
                                 let _ = tx.send(Ok(()));
@@ -270,8 +276,8 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                                     .is_some_and(|max| ctx.backoff.count() >= max)
                             {
                                 tracing::error!(
-                                    broker_id = ctx.broker_id,
-                                    host = ?ctx.host,
+                                    broker_id = ctx.entry.node.id,
+                                    host = ?ctx.entry.node.host,
                                     "retries exhausted while bootstrapping: {e}, retries: {}", ctx.backoff.count()
                                 );
                                 return Err(e);
@@ -300,12 +306,13 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                             ctx.backoff.failure(backoff, ());
 
                             tracing::error!(
-                                broker_id = ctx.broker_id,
-                                host = ?ctx.host,
+                                broker_id = ctx.entry.node.id,
+                                host = ?ctx.entry.node.host,
                                 "failed to get metadata: {e}, backing off for {backoff:?}, retries: {}", ctx.backoff.count()
                             );
 
-                            self.metadata_backoff.insert(ctx.host, ctx.backoff);
+                            self.metadata_backoff
+                                .insert(ctx.entry.node.host, ctx.backoff);
 
                             if let Some(tx) = tx {
                                 let _ = tx.send(Err(e));
@@ -315,7 +322,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                     }
                 }
                 Event::RefreshStart(req) => {
-                    let Some((broker_id_for_refresh, host_for_refresh, handle_for_refresh)) =
+                    let Some(entry_for_refresh) =
                         self.tx.borrow().broker_channels.get_best_connection()
                     else {
                         tracing::error!("no connections available for metadata refresh!");
@@ -323,8 +330,8 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                     };
 
                     tracing::info!(
-                        broker_id = broker_id_for_refresh,
-                        host = ?host_for_refresh,
+                        broker_id = entry_for_refresh.node.id,
+                        host = ?entry_for_refresh.node.host,
                         "attempting to refresh metadata"
                     );
 
@@ -342,14 +349,12 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
 
                     let backoff = self
                         .metadata_backoff
-                        .remove(&host_for_refresh)
+                        .remove(&entry_for_refresh.node.host)
                         .unwrap_or_default();
 
                     let task = MetadataRefreshTask {
                         context: MetadataRefreshContext {
-                            broker_id: broker_id_for_refresh,
-                            host: host_for_refresh,
-                            node_handle: handle_for_refresh,
+                            entry: entry_for_refresh,
                             request: req,
                             backoff,
                         },
@@ -362,8 +367,8 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             }
         }
 
-        for (_, (_, handle)) in self.hosts.0.drain() {
-            handle.cancellation_token.cancel();
+        for (_, entry) in self.hosts.0.drain() {
+            entry.handle.cancellation_token.cancel();
         }
 
         while self.join_set.join_next().await.is_some() {}
@@ -396,16 +401,16 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             .retain(|host, _| new_broker_hosts.contains(host));
 
         // remove nodes that are not in the cluster
-        self.hosts.0.retain(|id, (host, handle)| {
+        self.hosts.0.retain(|id, entry| {
             let keep = new_broker_ids.contains_key(id);
 
             if !keep {
                 tracing::debug!(
                     broker_id = id,
-                    host = ?host,
+                    host = ?entry.node.host,
                     "removing connection to broker"
                 );
-                handle.cancellation_token.cancel();
+                entry.handle.cancellation_token.cancel();
             }
 
             keep
@@ -415,30 +420,30 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
 
         // spawn nodes that should be in the cluster
         for (broker_id, broker) in new_broker_ids {
-            let new_host = BrokerHost(broker.host.as_str().into(), broker.port as u16);
+            let new_node = Node::from((BrokerId(broker_id), broker));
 
-            if let Some(pair) = self.hosts.0.get_mut(&broker_id) {
-                let host = &pair.0;
+            if let Some(entry) = self.hosts.0.get_mut(&broker_id) {
+                let host = &entry.node.host;
 
-                if pair.1.tx.is_closed() {
+                if entry.handle.tx.is_closed() {
                     // the node is not running, and the receiver dropped - it likely panicked
-                    self.start_new_task(broker_id, new_host);
+                    self.start_new_task(broker_id, new_node);
                 }
                 // if the host is different, stop it (it will restart automatically with the new host)
-                else if host != &new_host {
+                else if host != &new_node.host {
                     tracing::debug!(
                         broker_id = broker_id,
                         host = ?host,
-                        new_host = ?new_host,
+                        new_host = ?new_node.host,
                         "changing hosts"
                     );
-                    pair.1.cancellation_token.cancel();
-                    pair.0 = new_host;
+                    entry.handle.cancellation_token.cancel();
+                    entry.node = new_node;
                     broker_ids_changing_hosts.insert(broker_id);
                 }
             } else {
                 // we don't have a handle to the broker - create one
-                self.start_new_task(broker_id, new_host);
+                self.start_new_task(broker_id, new_node);
             }
         }
 
@@ -455,30 +460,32 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         });
     }
 
-    fn start_new_task(&mut self, broker_id: i32, host: BrokerHost) {
+    fn start_new_task(&mut self, broker_id: i32, node: Node) {
         tracing::debug!(
             broker_id = broker_id,
-            host = ?host,
+            host = ?node.host,
             "creating new connection task"
         );
 
         let (handle, task) = new_pair(
             broker_id,
-            host.clone(),
+            node.host.clone(),
             self.retry_config.clone(),
             self.connect.clone(),
         );
 
         self.join_set.spawn(task.run());
 
-        self.hosts.0.insert(broker_id, (host, handle));
+        self.hosts
+            .0
+            .insert(broker_id, BrokerMapEntry { node, handle });
     }
 
     async fn restart_if_needed(&mut self, mut dead_task: NodeTask<Conn>) {
-        if let Some((host, mut handle)) = self.hosts.0.remove(&dead_task.broker_id) {
+        if let Some(mut entry) = self.hosts.0.remove(&dead_task.broker_id) {
             tracing::debug!(
-                host = ?host,
                 broker_id = dead_task.broker_id,
+                host = ?entry.node.host,
                 "restarting connection handle",
             );
 
@@ -486,10 +493,10 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             let cancellation_token = CancellationToken::new();
 
             dead_task.cancellation_token = cancellation_token.clone();
-            handle.cancellation_token = cancellation_token;
+            entry.handle.cancellation_token = cancellation_token;
 
             // if the host is different, stop the existing connection
-            if dead_task.host != host {
+            if dead_task.host != entry.node.host {
                 tracing::debug!(
                     host = ?dead_task.host,
                     broker_id = dead_task.broker_id,
@@ -498,9 +505,9 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                 dead_task = dead_task.shutdown_existing_connection().await;
             }
 
-            dead_task.host = host.clone();
+            dead_task.host = entry.node.host.clone();
 
-            self.hosts.0.insert(dead_task.broker_id, (host, handle));
+            self.hosts.0.insert(dead_task.broker_id, entry);
             self.join_set.spawn(dead_task.run());
         }
     }
@@ -559,16 +566,23 @@ impl SelectorTaskHandle {
         let mut join_set = JoinSet::new();
 
         for (id, host) in bootstrap.iter().enumerate() {
-            let (handle, task) = new_pair(
-                id as i32,
-                host.clone(),
-                config.conn.retry.clone(),
-                connect.clone(),
-            );
+            let id = id as i32;
+            let (handle, task) =
+                new_pair(id, host.clone(), config.conn.retry.clone(), connect.clone());
 
             join_set.spawn(task.run());
 
-            hosts.0.insert(id as i32, (host.clone(), handle));
+            hosts.0.insert(
+                id,
+                BrokerMapEntry {
+                    node: Node {
+                        id,
+                        host: host.clone(),
+                        rack: None,
+                    },
+                    handle,
+                },
+            );
         }
 
         let cancellation_token = CancellationToken::new();

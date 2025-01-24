@@ -1,6 +1,7 @@
 mod backoff;
 pub mod clients;
 mod cmd;
+pub mod common;
 pub mod config;
 mod conn;
 pub mod error;
@@ -11,8 +12,8 @@ use std::{io, path::PathBuf};
 use clap::{Parser, Subcommand};
 use clients::{consumer::Consumer, network::NetworkClient};
 use cmd::{admin::AdminCommands, producer::produce_from_file, Run};
+use common::try_parse_hosts;
 use config::KafkaConfig;
-use conn::host::try_parse_hosts;
 use kafka_protocol::{messages::TopicName, protocol::StrBytes};
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
@@ -63,7 +64,7 @@ pub async fn main() -> anyhow::Result<()> {
         NetworkClient::try_new(&try_parse_hosts(&cli.bootstrap_servers)?, (&cfg).into()).await?;
 
     match cli.client {
-        Client::Admin(cmd) => cmd.run(&manager).await?,
+        Client::Admin(cmd) => cmd.run(manager.clone()).await?,
         Client::Producer { file, topic } => produce_from_file(&manager, topic, file).await?,
         Client::Consumer { topic } => {
             let mut consumer = Consumer::new(manager.clone());

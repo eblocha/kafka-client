@@ -1,16 +1,10 @@
-use clap::Subcommand;
-use kafka_protocol::{
-    indexmap::IndexMap,
-    messages::{create_topics_request::CreatableTopic, CreateTopicsRequest, TopicName},
-    protocol::StrBytes,
-};
+use std::sync::Arc;
 
-use crate::{
-    clients::{
-        admin::{describe_cluster::DescribeCluster, list_topics::ListTopics},
-        network::NetworkClient,
-    },
-    proto::error_codes::ErrorCode,
+use clap::Subcommand;
+
+use crate::clients::{
+    admin::{AdminClient, AutoAssignmentNewTopic, NewTopic},
+    network::NetworkClient,
 };
 
 use super::Run;
@@ -20,6 +14,10 @@ pub enum AdminCommands {
     ListTopics {
         #[arg(long, default_value_t = false)]
         exclude_internal: bool,
+    },
+    DescribeTopics {
+        #[arg(short, long, value_delimiter = ',', num_args = 1.., required = true)]
+        topics: Vec<String>,
     },
     DescribeCluster {},
     CreateTopic {
@@ -35,44 +33,93 @@ pub enum AdminCommands {
 impl Run for AdminCommands {
     type Response = ();
 
-    async fn run(self, conn: &NetworkClient) -> anyhow::Result<Self::Response> {
+    async fn run(self, conn: NetworkClient) -> anyhow::Result<Self::Response> {
+        let client = AdminClient::new(conn);
+
         match self {
             AdminCommands::ListTopics { exclude_internal } => {
-                let res = conn.list_topics().await?;
+                let topics = client.list_topics().await?;
 
-                for (name, topic) in res.topics {
+                for topic in topics {
                     if !topic.is_internal || !exclude_internal {
                         println!(
-                            "{}: {} {} {}",
-                            name.0.as_str(),
-                            topic.partitions.len(),
-                            if topic.partitions.len() == 1 {
-                                "partition"
-                            } else {
-                                "partitions"
-                            },
+                            "{}{}",
+                            topic.name,
                             if topic.is_internal { " (internal)" } else { "" }
                         );
                     }
                 }
             }
-            AdminCommands::DescribeCluster {} => {
-                let res = conn.describe_cluster().await?;
+            AdminCommands::DescribeTopics { topics } => {
+                let descriptions = client.describe_topics(topics).await?;
 
-                println!("Cluster ID: {}", res.cluster_id.as_str());
+                for topic in descriptions {
+                    let id_text = match topic.id {
+                        Some(id) => format!(" (id: {})", id),
+                        None => "".to_owned(),
+                    };
 
-                for (broker_id, broker) in res.brokers {
                     println!(
-                        "Broker {}: {}:{}{}",
-                        broker_id.0,
-                        broker.host.as_str(),
-                        broker.port,
-                        if broker_id == res.controller_id {
+                        "{}{}{}",
+                        topic.name,
+                        id_text,
+                        if topic.is_internal { " (internal)" } else { "" }
+                    );
+
+                    let acl_text = match topic.authorized_operations {
+                        Some(acl) => format!("{:?}", acl),
+                        None => "None".to_owned(),
+                    };
+
+                    println!("    authorized ops: {}", acl_text);
+
+                    for partition in topic.partitions.into_iter() {
+                        let leader_text = match partition.leader {
+                            Some(node) => format!("{}", node),
+                            None => "Unknown".to_owned(),
+                        };
+
+                        println!(
+                            "    partition {}, leader: {}",
+                            partition.partition, leader_text
+                        );
+                        println!(
+                            "        replicas: {}",
+                            partition
+                                .replicas
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        println!(
+                            "        isr: {}",
+                            partition
+                                .isr
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
+                }
+            }
+            AdminCommands::DescribeCluster {} => {
+                let cluster = client.describe_cluster().await?;
+
+                let controller_id = cluster.controller.map(|node| node.id);
+
+                println!("Cluster id: {}", cluster.cluster_id);
+
+                for node in cluster.nodes {
+                    println!(
+                        "{node}{}",
+                        if Some(node.id) == controller_id {
                             " (controller)"
                         } else {
                             ""
                         }
-                    );
+                    )
                 }
             }
             AdminCommands::CreateTopic {
@@ -80,36 +127,25 @@ impl Run for AdminCommands {
                 partitions,
                 replication_factor,
             } => {
-                let res = conn
-                    .send({
-                        let mut topic = CreatableTopic::default();
-                        topic.num_partitions = partitions.unwrap_or(-1);
-                        topic.replication_factor = replication_factor.unwrap_or(-1);
-
-                        let mut r = CreateTopicsRequest::default();
-                        r.timeout_ms = 5000;
-                        r.topics =
-                            IndexMap::from_iter([(TopicName(StrBytes::from_string(name)), topic)]);
-                        r.validate_only = false;
-                        r
-                    })
+                let mut results = client
+                    .create_topics(vec![NewTopic::AutoAssignment(AutoAssignmentNewTopic {
+                        name: name.clone(),
+                        partitions,
+                        replication_factor,
+                    })])
                     .await?;
 
-                for (name, topic_result) in res.topics {
-                    let error_code = ErrorCode::from(topic_result.error_code);
+                let result = results.remove(&Arc::from(name.as_str())).unwrap()?;
 
-                    if error_code != ErrorCode::None {
-                        println!("topic: {}: creation failed: {error_code:?}", name.as_str());
-                        continue;
-                    }
+                let id_text = match result.id {
+                    Some(id) => format!(" (id: {})", id),
+                    None => "".to_owned(),
+                };
 
-                    println!(
-                        "Created topic {} with {} partitions and factor {}",
-                        name.as_str(),
-                        topic_result.num_partitions,
-                        topic_result.replication_factor
-                    );
-                }
+                println!(
+                    "Created topic: {}{} with partitions {} and replication factor {}",
+                    name, id_text, result.partitions, result.replication_factor
+                );
             }
         }
 
