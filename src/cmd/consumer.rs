@@ -8,12 +8,8 @@ pub struct EchoTopics {
     pub topics: Vec<String>,
 }
 
-impl Run for EchoTopics {
-    type Response = ();
-
-    async fn run(self, client: NetworkClient) -> anyhow::Result<Self::Response> {
-        let mut consumer = Consumer::new(client);
-
+impl EchoTopics {
+    async fn run_inner(self, consumer: &mut Consumer) -> anyhow::Result<()> {
         consumer
             .subscribe(self.topics)
             .await
@@ -36,8 +32,20 @@ impl Run for EchoTopics {
             }
         }
 
+        Ok(())
+    }
+}
+
+impl Run for EchoTopics {
+    type Response = ();
+
+    async fn run(self, client: NetworkClient) -> anyhow::Result<Self::Response> {
+        let mut consumer = Consumer::new(client);
+
+        let result = self.run_inner(&mut consumer).await;
+
         consumer.shutdown().await;
 
-        Ok(())
+        result
     }
 }

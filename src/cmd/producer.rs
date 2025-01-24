@@ -17,15 +17,9 @@ pub struct ProduceFromFile {
     pub file: PathBuf,
 }
 
-impl Run for ProduceFromFile {
-    type Response = ();
-
-    async fn run(self, client: NetworkClient) -> anyhow::Result<Self::Response> {
-        let file = File::open(self.file).await?;
-
+impl ProduceFromFile {
+    async fn run_inner(producer: &mut Producer, file: File, topic: String) -> anyhow::Result<()> {
         let mut reader = io::BufReader::new(file).lines();
-
-        let mut producer = Producer::new(client);
 
         let now = Instant::now();
         let mut iter = 0;
@@ -37,7 +31,7 @@ impl Run for ProduceFromFile {
                     key: None,
                     partition: None,
                     timestamp: None,
-                    topic: self.topic.clone(),
+                    topic: topic.clone(),
                     value: Some(line.into()),
                 })
                 .await?;
@@ -50,5 +44,20 @@ impl Run for ProduceFromFile {
         println!("produced {iter} messages in {finish:?}");
 
         Ok(())
+    }
+}
+
+impl Run for ProduceFromFile {
+    type Response = ();
+
+    async fn run(self, client: NetworkClient) -> anyhow::Result<Self::Response> {
+        let file = File::open(self.file).await?;
+        let mut producer = Producer::new(client);
+
+        let result = Self::run_inner(&mut producer, file, self.topic).await;
+
+        producer.shutdown().await;
+
+        result
     }
 }

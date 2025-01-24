@@ -142,4 +142,12 @@ impl Producer {
 
         Ok(())
     }
+
+    pub async fn shutdown(&self) {
+        self.client.shutdown().await
+    }
+
+    pub async fn await_shutdown(&self) {
+        self.client.await_shutdown().await
+    }
 }

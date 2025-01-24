@@ -36,12 +36,8 @@ pub enum AdminCommands {
     },
 }
 
-impl Run for AdminCommands {
-    type Response = ();
-
-    async fn run(self, conn: NetworkClient) -> anyhow::Result<Self::Response> {
-        let client = AdminClient::new(conn);
-
+impl AdminCommands {
+    async fn run_inner(self, client: &AdminClient) -> anyhow::Result<()> {
         match self {
             AdminCommands::ListTopics { exclude_internal } => {
                 let topics = client.list_topics().await?;
@@ -121,7 +117,7 @@ impl Run for AdminCommands {
                 }
 
                 if some_failed {
-                    bail!("failed to describe all topics");
+                    bail!("failed to describe all topics")
                 }
             }
             AdminCommands::DescribeCluster {} => {
@@ -201,8 +197,20 @@ impl Run for AdminCommands {
             }
         }
 
+        Ok(())
+    }
+}
+
+impl Run for AdminCommands {
+    type Response = ();
+
+    async fn run(self, conn: NetworkClient) -> anyhow::Result<Self::Response> {
+        let client = AdminClient::new(conn);
+
+        let result = self.run_inner(&client).await;
+
         client.shutdown().await;
 
-        Ok(())
+        result
     }
 }
