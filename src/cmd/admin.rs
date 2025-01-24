@@ -1,10 +1,14 @@
 use std::sync::Arc;
 
+use anyhow::bail;
 use clap::Subcommand;
 
-use crate::clients::{
-    admin::{AdminClient, AutoAssignmentNewTopic, NewTopic},
-    network::NetworkClient,
+use crate::{
+    clients::{
+        admin::{AdminClient, AutoAssignmentNewTopic, NewTopic},
+        network::NetworkClient,
+    },
+    common::TopicCollection,
 };
 
 use super::Run;
@@ -20,13 +24,17 @@ pub enum AdminCommands {
         topics: Vec<String>,
     },
     DescribeCluster {},
-    CreateTopic {
+    CreateTopics {
         #[arg(long, required = true)]
         name: String,
         #[arg(short, long)]
         partitions: Option<i32>,
         #[arg(short, long)]
         replication_factor: Option<i16>,
+    },
+    DeleteTopics {
+        #[arg(short, long, value_delimiter = ',', num_args = 1.., required = true)]
+        topics: Vec<String>,
     },
 }
 
@@ -122,7 +130,7 @@ impl Run for AdminCommands {
                     )
                 }
             }
-            AdminCommands::CreateTopic {
+            AdminCommands::CreateTopics {
                 name,
                 partitions,
                 replication_factor,
@@ -146,6 +154,24 @@ impl Run for AdminCommands {
                     "Created topic: {}{} with partitions {} and replication factor {}",
                     name, id_text, result.partitions, result.replication_factor
                 );
+            }
+            AdminCommands::DeleteTopics { topics } => {
+                let mut some_failed = false;
+                let results = client.delete_topics(TopicCollection::Names(topics)).await?;
+
+                for (name, result) in results.into_iter() {
+                    some_failed = result.is_err();
+                    let message_text = match result {
+                        Ok(_) => "OK".to_owned(),
+                        Err(e) => format!("ERROR: {e}"),
+                    };
+
+                    println!("{}: {}", name, message_text);
+                }
+
+                if some_failed {
+                    bail!("some topics failed to be deleted")
+                }
             }
         }
 

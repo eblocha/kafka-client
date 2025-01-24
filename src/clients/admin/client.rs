@@ -3,17 +3,24 @@ use std::sync::Arc;
 use kafka_protocol::{
     messages::{
         create_topics_request::{CreatableReplicaAssignment, CreatableTopic},
+        delete_topics_request::DeleteTopicState,
         metadata_request::MetadataRequestTopic,
-        BrokerId, CreateTopicsRequest, DescribeClusterRequest, MetadataRequest, TopicName,
+        BrokerId, CreateTopicsRequest, DeleteTopicsRequest, DescribeClusterRequest,
+        MetadataRequest, TopicName,
     },
     protocol::StrBytes,
 };
 
-use crate::{clients::network::NetworkClient, error::KafkaError, proto::ver::with_max_version};
+use crate::{
+    clients::{admin::delete_topic_result::DeletedTopic, network::NetworkClient},
+    common::TopicCollection,
+    error::KafkaError,
+    proto::ver::with_max_version,
+};
 
 use super::{
-    ClusterDescription, CreateTopicsResult, NewTopic, TopicDescription, TopicListing,
-    TopicMetadataAndConfig,
+    delete_topic_result::DeleteTopicsResult, ClusterDescription, CreateTopicsResult, NewTopic,
+    TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 
 #[derive(Clone)]
@@ -161,6 +168,58 @@ impl AdminClient {
                     TopicMetadataAndConfig::try_from(result),
                 )
             })
+            .collect())
+    }
+
+    pub async fn delete_topics(
+        &self,
+        topics: TopicCollection,
+    ) -> Result<DeleteTopicsResult, KafkaError> {
+        let response = self
+            .client
+            .send(with_max_version(move |ver| {
+                let mut req = DeleteTopicsRequest::default();
+                req.timeout_ms = 5000; // TODO config
+
+                if matches!(topics, TopicCollection::Ids(_)) && ver < 6 {
+                    return None;
+                }
+
+                match topics {
+                    TopicCollection::Ids(ids) => {
+                        for id in ids.into_iter() {
+                            req.topics.push({
+                                let mut topic = DeleteTopicState::default();
+                                topic.topic_id = id;
+                                topic
+                            });
+                        }
+                    }
+                    TopicCollection::Names(names) => {
+                        if ver < 6 {
+                            for name in names.into_iter() {
+                                req.topic_names.push(TopicName(StrBytes::from_string(name)));
+                            }
+                        } else {
+                            for name in names.into_iter() {
+                                req.topics.push({
+                                    let mut topic = DeleteTopicState::default();
+                                    topic.name = Some(TopicName(StrBytes::from_string(name)));
+                                    topic
+                                });
+                            }
+                        }
+                    }
+                }
+
+                Some(req)
+            }))
+            .await?;
+
+        Ok(response
+            .responses
+            .into_iter()
+            .map(|(name, result)| (Arc::from(name.as_str()), DeletedTopic::try_from(result)))
             .collect())
     }
 

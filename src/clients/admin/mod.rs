@@ -2,6 +2,7 @@ mod client;
 
 mod cluster_description;
 mod create_topics_result;
+mod delete_topic_result;
 mod new_topic;
 mod topic_description;
 mod topic_listing;

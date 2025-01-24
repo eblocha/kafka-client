@@ -4,7 +4,7 @@ use fnv::FnvHashMap;
 use kafka_protocol::messages::create_topics_response::CreatableTopicResult;
 use uuid::Uuid;
 
-use crate::proto::error_codes::ErrorCode;
+use crate::{common::uuid::UuidExt, proto::error_codes::ErrorCode};
 
 pub struct TopicMetadataAndConfig {
     pub id: Option<Uuid>,
@@ -24,14 +24,8 @@ impl TryFrom<CreatableTopicResult> for TopicMetadataAndConfig {
             return Err(value.error_code.into());
         }
 
-        let id = if value.topic_id.is_nil() {
-            None
-        } else {
-            Some(value.topic_id)
-        };
-
         Ok(Self {
-            id,
+            id: value.topic_id.as_optional(),
             partitions: value.num_partitions,
             replication_factor: value.replication_factor,
         })

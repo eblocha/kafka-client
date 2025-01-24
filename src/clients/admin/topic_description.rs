@@ -11,7 +11,10 @@ use kafka_protocol::{
 use uuid::Uuid;
 
 use crate::{
-    common::acl::{acl_from_bitfield, AclOperation},
+    common::{
+        acl::{acl_from_bitfield, AclOperation},
+        uuid::UuidExt,
+    },
     proto::error_codes::ErrorCode,
 };
 
@@ -48,11 +51,7 @@ impl<'m> TryFrom<ToTopicDescription<'m>> for TopicDescription {
             .collect::<Result<Vec<TopicPartitionInfo>, ErrorCode>>()?;
 
         Ok(Self {
-            id: if topic.topic_id == Uuid::nil() {
-                None
-            } else {
-                Some(topic.topic_id)
-            },
+            id: topic.topic_id.as_optional(),
             is_internal: topic.is_internal,
             name: Arc::from(name.as_str()),
             partitions,
