@@ -5,6 +5,8 @@ use kafka_protocol::messages::{
 };
 use url::Url;
 
+use crate::util::StrBytesExt;
+
 /// A cheap-to-clone host:port pair for a Kafka broker
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BrokerHost(pub Arc<str>, pub u16);
@@ -17,13 +19,13 @@ impl Debug for BrokerHost {
 
 impl From<&MetadataResponseBroker> for BrokerHost {
     fn from(broker: &MetadataResponseBroker) -> Self {
-        BrokerHost(Arc::from(broker.host.as_str()), broker.port as u16)
+        BrokerHost(broker.host.as_arc_str(), broker.port as u16)
     }
 }
 
 impl From<&DescribeClusterBroker> for BrokerHost {
     fn from(broker: &DescribeClusterBroker) -> Self {
-        BrokerHost(Arc::from(broker.host.as_str()), broker.port as u16)
+        BrokerHost(broker.host.as_arc_str(), broker.port as u16)
     }
 }
 

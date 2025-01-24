@@ -1,5 +1,3 @@
-use fnv::FnvHashMap;
-
 #[derive(Debug, Clone)]
 pub struct AutoAssignmentNewTopic {
     /// The topic name
@@ -15,7 +13,7 @@ pub struct ExplicitAssignmentNewTopic {
     /// The topic name
     pub name: String,
     /// Mapping of partition id to broker ids that will serve as replicas for the partition.
-    pub replicas_assignments: FnvHashMap<i32, Vec<i32>>,
+    pub replicas_assignments: indexmap::IndexMap<i32, Vec<i32>>,
 }
 
 #[derive(Debug, Clone)]

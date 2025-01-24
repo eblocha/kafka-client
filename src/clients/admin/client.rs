@@ -1,14 +1,9 @@
-use std::sync::Arc;
-
-use kafka_protocol::{
-    messages::{
-        create_topics_request::{CreatableReplicaAssignment, CreatableTopic},
-        delete_topics_request::DeleteTopicState,
-        metadata_request::MetadataRequestTopic,
-        BrokerId, CreateTopicsRequest, DeleteTopicsRequest, DescribeClusterRequest,
-        MetadataRequest, TopicName,
-    },
-    protocol::StrBytes,
+use kafka_protocol::messages::{
+    create_topics_request::{CreatableReplicaAssignment, CreatableTopic},
+    delete_topics_request::DeleteTopicState,
+    metadata_request::MetadataRequestTopic,
+    BrokerId, CreateTopicsRequest, DeleteTopicsRequest, DescribeClusterRequest, MetadataRequest,
+    TopicName,
 };
 
 use crate::{
@@ -16,11 +11,12 @@ use crate::{
     common::TopicCollection,
     error::KafkaError,
     proto::ver::with_max_version,
+    util::{StrBytesExt, TopicNameExt},
 };
 
 use super::{
-    delete_topic_result::DeleteTopicsResult, ClusterDescription, CreateTopicsResult, NewTopic,
-    TopicDescription, TopicListing, TopicMetadataAndConfig,
+    delete_topic_result::DeleteTopicsResult, ClusterDescription, CreateTopicsResult,
+    DescribeTopicsResult, NewTopic, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 
 #[derive(Clone)]
@@ -68,7 +64,7 @@ impl AdminClient {
     pub async fn describe_topics(
         &self,
         topics: Vec<String>,
-    ) -> Result<Vec<TopicDescription>, KafkaError> {
+    ) -> Result<DescribeTopicsResult, KafkaError> {
         let response = self
             .client
             .send(with_max_version(|ver| {
@@ -85,7 +81,7 @@ impl AdminClient {
                 req.topics = Some(
                     topics
                         .into_iter()
-                        .map(|name| TopicName(StrBytes::from_string(name)))
+                        .map(|name| TopicName::from_string(name))
                         .map(|name| {
                             let mut topic = MetadataRequestTopic::default();
                             topic.name = Some(name);
@@ -97,13 +93,16 @@ impl AdminClient {
             }))
             .await?;
 
-        response
+        Ok(response
             .topics
             .into_iter()
             .map(|(name, topic)| {
-                TopicDescription::try_from((name, topic, &response.brokers)).map_err(Into::into)
+                (
+                    name.as_arc_str(),
+                    TopicDescription::try_from((name, topic, &response.brokers)),
+                )
             })
-            .collect()
+            .collect())
     }
 
     pub async fn create_topics(
@@ -133,7 +132,7 @@ impl AdminClient {
                             }
 
                             req.topics
-                                .insert(TopicName(StrBytes::from_string(auto.name)), new_topic);
+                                .insert(TopicName::from_string(auto.name), new_topic);
                         }
                         NewTopic::ExplicitAssignment(explicit) => {
                             new_topic.assignments = explicit
@@ -150,7 +149,7 @@ impl AdminClient {
                                 .collect();
 
                             req.topics
-                                .insert(TopicName(StrBytes::from_string(explicit.name)), new_topic);
+                                .insert(TopicName::from_string(explicit.name), new_topic);
                         }
                     }
                 }
@@ -162,12 +161,7 @@ impl AdminClient {
         Ok(response
             .topics
             .into_iter()
-            .map(|(name, result)| {
-                (
-                    Arc::from(name.as_str()),
-                    TopicMetadataAndConfig::try_from(result),
-                )
-            })
+            .map(|(name, result)| (name.as_arc_str(), TopicMetadataAndConfig::try_from(result)))
             .collect())
     }
 
@@ -198,13 +192,13 @@ impl AdminClient {
                     TopicCollection::Names(names) => {
                         if ver < 6 {
                             for name in names.into_iter() {
-                                req.topic_names.push(TopicName(StrBytes::from_string(name)));
+                                req.topic_names.push(TopicName::from_string(name));
                             }
                         } else {
                             for name in names.into_iter() {
                                 req.topics.push({
                                     let mut topic = DeleteTopicState::default();
-                                    topic.name = Some(TopicName(StrBytes::from_string(name)));
+                                    topic.name = Some(TopicName::from_string(name));
                                     topic
                                 });
                             }
@@ -219,7 +213,7 @@ impl AdminClient {
         Ok(response
             .responses
             .into_iter()
-            .map(|(name, result)| (Arc::from(name.as_str()), DeletedTopic::try_from(result)))
+            .map(|(name, result)| (name.as_arc_str(), DeletedTopic::try_from(result)))
             .collect())
     }
 

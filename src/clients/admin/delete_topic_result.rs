@@ -1,15 +1,15 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use kafka_protocol::messages::delete_topics_response::DeletableTopicResult;
 use uuid::Uuid;
 
-use crate::{common::uuid::UuidExt, proto::error_codes::ErrorCode};
+use crate::{proto::error_codes::ErrorCode, util::UuidExt};
 
 pub struct DeletedTopic {
     pub id: Option<Uuid>,
 }
 
-pub type DeleteTopicsResult = HashMap<Arc<str>, Result<DeletedTopic, ErrorCode>>;
+pub type DeleteTopicsResult = indexmap::IndexMap<Arc<str>, Result<DeletedTopic, ErrorCode>>;
 
 impl TryFrom<DeletableTopicResult> for DeletedTopic {
     type Error = ErrorCode;

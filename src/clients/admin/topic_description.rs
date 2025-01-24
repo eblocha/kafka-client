@@ -11,11 +11,9 @@ use kafka_protocol::{
 use uuid::Uuid;
 
 use crate::{
-    common::{
-        acl::{acl_from_bitfield, AclOperation},
-        uuid::UuidExt,
-    },
+    common::acl::{acl_from_bitfield, AclOperation},
     proto::error_codes::ErrorCode,
+    util::{StrBytesExt, UuidExt},
 };
 
 use super::TopicPartitionInfo;
@@ -29,6 +27,8 @@ pub struct TopicDescription {
     pub authorized_operations: Option<FnvHashSet<AclOperation>>,
     pub id: Option<Uuid>,
 }
+
+pub type DescribeTopicsResult = indexmap::IndexMap<Arc<str>, Result<TopicDescription, ErrorCode>>;
 
 pub type ToTopicDescription<'m> = (
     TopicName,
@@ -53,7 +53,7 @@ impl<'m> TryFrom<ToTopicDescription<'m>> for TopicDescription {
         Ok(Self {
             id: topic.topic_id.as_optional(),
             is_internal: topic.is_internal,
-            name: Arc::from(name.as_str()),
+            name: name.as_arc_str(),
             partitions,
             authorized_operations: acl_from_bitfield(topic.topic_authorized_operations),
         })

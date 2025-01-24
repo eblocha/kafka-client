@@ -5,3 +5,4 @@ pub mod config;
 mod conn;
 pub mod error;
 mod proto;
+mod util;

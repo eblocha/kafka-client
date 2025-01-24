@@ -342,6 +342,7 @@ impl NodeTaskHandle {
     }
 
     /// Determine if this node has an open connection to the host.
+    #[cfg(test)]
     pub fn is_connected(&self) -> bool {
         self.connection
             .load()

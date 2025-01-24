@@ -8,11 +8,6 @@ use kafka_protocol::{
 
 use crate::{common::Node, proto::error_codes::ErrorCode};
 
-pub type ToTopicPartitionInfo<'m> = (
-    MetadataResponsePartition,
-    &'m IndexMap<BrokerId, MetadataResponseBroker>,
-);
-
 #[derive(Debug, Clone)]
 pub struct TopicPartitionInfo {
     pub partition: i32,
@@ -20,6 +15,11 @@ pub struct TopicPartitionInfo {
     pub replicas: Vec<Node>,
     pub isr: Vec<Node>,
 }
+
+pub type ToTopicPartitionInfo<'m> = (
+    MetadataResponsePartition,
+    &'m IndexMap<BrokerId, MetadataResponseBroker>,
+);
 
 impl<'m> TryFrom<ToTopicPartitionInfo<'m>> for TopicPartitionInfo {
     type Error = ErrorCode;

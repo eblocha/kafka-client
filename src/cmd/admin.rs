@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use anyhow::bail;
 use clap::Subcommand;
 
@@ -59,9 +57,19 @@ impl Run for AdminCommands {
                 }
             }
             AdminCommands::DescribeTopics { topics } => {
-                let descriptions = client.describe_topics(topics).await?;
+                let mut some_failed = false;
+                let results = client.describe_topics(topics).await?;
 
-                for topic in descriptions {
+                for (name, result) in results {
+                    some_failed = result.is_err();
+                    let topic = match result {
+                        Ok(topic) => topic,
+                        Err(e) => {
+                            println!("{}: ERROR: {}", name, e);
+                            continue;
+                        }
+                    };
+
                     let id_text = match topic.id {
                         Some(id) => format!(" (id: {})", id),
                         None => "".to_owned(),
@@ -111,6 +119,10 @@ impl Run for AdminCommands {
                         );
                     }
                 }
+
+                if some_failed {
+                    bail!("failed to describe all topics");
+                }
             }
             AdminCommands::DescribeCluster {} => {
                 let cluster = client.describe_cluster().await?;
@@ -135,7 +147,8 @@ impl Run for AdminCommands {
                 partitions,
                 replication_factor,
             } => {
-                let mut results = client
+                let mut some_failed = false;
+                let results = client
                     .create_topics(vec![NewTopic::AutoAssignment(AutoAssignmentNewTopic {
                         name: name.clone(),
                         partitions,
@@ -143,17 +156,30 @@ impl Run for AdminCommands {
                     })])
                     .await?;
 
-                let result = results.remove(&Arc::from(name.as_str())).unwrap()?;
+                for (name, result) in results {
+                    some_failed = result.is_err();
+                    let result = match result {
+                        Ok(result) => result,
+                        Err(e) => {
+                            println!("topic {name}: ERROR: {e}");
+                            continue;
+                        }
+                    };
 
-                let id_text = match result.id {
-                    Some(id) => format!(" (id: {})", id),
-                    None => "".to_owned(),
-                };
+                    let id_text = match result.id {
+                        Some(id) => format!(" (id: {})", id),
+                        None => "".to_owned(),
+                    };
 
-                println!(
-                    "Created topic: {}{} with partitions {} and replication factor {}",
-                    name, id_text, result.partitions, result.replication_factor
-                );
+                    println!(
+                        "Created topic: {}{} with partitions {} and replication factor {}",
+                        name, id_text, result.partitions, result.replication_factor
+                    );
+                }
+
+                if some_failed {
+                    bail!("failed to create some topics")
+                }
             }
             AdminCommands::DeleteTopics { topics } => {
                 let mut some_failed = false;
@@ -170,7 +196,7 @@ impl Run for AdminCommands {
                 }
 
                 if some_failed {
-                    bail!("some topics failed to be deleted")
+                    bail!("failed to delete some topics")
                 }
             }
         }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use kafka_protocol::messages::{metadata_response::MetadataResponseTopic, TopicName};
 
-use crate::proto::error_codes::ErrorCode;
+use crate::{proto::error_codes::ErrorCode, util::StrBytesExt};
 
 #[derive(Debug, Clone)]
 pub struct TopicListing {
@@ -19,7 +19,7 @@ impl TryFrom<(TopicName, MetadataResponseTopic)> for TopicListing {
         }
 
         Ok(Self {
-            name: Arc::from(name.as_str()),
+            name: name.as_arc_str(),
             is_internal: topic.is_internal,
         })
     }

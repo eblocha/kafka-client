@@ -5,6 +5,8 @@ use kafka_protocol::messages::{
     BrokerId,
 };
 
+use crate::util::StrBytesExt;
+
 use super::BrokerHost;
 
 #[derive(Debug, Clone)]
@@ -38,7 +40,7 @@ impl From<(BrokerId, &MetadataResponseBroker)> for Node {
         Self {
             id: id.0,
             host: BrokerHost::from(broker),
-            rack: broker.rack.clone().map(|s| Arc::from(s.as_str())),
+            rack: broker.rack.clone().map(|s| s.as_arc_str()),
         }
     }
 }
@@ -48,7 +50,7 @@ impl From<(BrokerId, &DescribeClusterBroker)> for Node {
         Self {
             id: id.0,
             host: BrokerHost::from(broker),
-            rack: broker.rack.clone().map(|s| Arc::from(s.as_str())),
+            rack: broker.rack.clone().map(|s| s.as_arc_str()),
         }
     }
 }

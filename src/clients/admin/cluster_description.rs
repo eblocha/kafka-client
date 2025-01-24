@@ -9,6 +9,7 @@ use crate::{
         Node,
     },
     proto::error_codes::ErrorCode,
+    util::StrBytesExt,
 };
 
 pub struct ClusterDescription {
@@ -39,7 +40,7 @@ impl TryFrom<DescribeClusterResponse> for ClusterDescription {
 
         Ok(Self {
             authorized_operations: acl_from_bitfield(value.cluster_authorized_operations),
-            cluster_id: Arc::from(value.cluster_id.as_str()),
+            cluster_id: value.cluster_id.as_arc_str(),
             controller,
             nodes,
         })

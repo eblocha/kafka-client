@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
-use fnv::FnvHashMap;
 use kafka_protocol::messages::create_topics_response::CreatableTopicResult;
 use uuid::Uuid;
 
-use crate::{common::uuid::UuidExt, proto::error_codes::ErrorCode};
+use crate::{proto::error_codes::ErrorCode, util::UuidExt};
 
 pub struct TopicMetadataAndConfig {
     pub id: Option<Uuid>,
@@ -14,7 +13,8 @@ pub struct TopicMetadataAndConfig {
 }
 
 /// Mapping of topic name to the create result for the topic
-pub type CreateTopicsResult = FnvHashMap<Arc<str>, Result<TopicMetadataAndConfig, ErrorCode>>;
+pub type CreateTopicsResult =
+    indexmap::IndexMap<Arc<str>, Result<TopicMetadataAndConfig, ErrorCode>>;
 
 impl TryFrom<CreatableTopicResult> for TopicMetadataAndConfig {
     type Error = ErrorCode;

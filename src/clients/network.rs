@@ -65,7 +65,10 @@ impl NetworkClient {
         handle.send(req).await
     }
 
-    pub fn invalidate_topic_metadata<'a>(&self, topic_names: impl Iterator<Item = &'a TopicName>) {
+    pub(crate) fn invalidate_topic_metadata<'a>(
+        &self,
+        topic_names: impl Iterator<Item = &'a TopicName>,
+    ) {
         self.selector.tx_cluster.send_modify(|cluster| {
             for topic_name in topic_names {
                 cluster.metadata.topics.swap_remove(topic_name);
@@ -73,7 +76,7 @@ impl NetworkClient {
         });
     }
 
-    pub async fn load_topic_metadata<'a>(
+    pub(crate) async fn load_topic_metadata<'a>(
         &self,
         topic_names: impl Iterator<Item = &'a TopicName>,
     ) -> Result<(), KafkaError> {
@@ -99,7 +102,7 @@ impl NetworkClient {
         Ok(())
     }
 
-    pub fn borrow_cluster(&self) -> Ref<'_, Cluster> {
+    pub(crate) fn borrow_cluster(&self) -> Ref<'_, Cluster> {
         self.selector.cluster.borrow()
     }
 

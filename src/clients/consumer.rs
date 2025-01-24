@@ -428,7 +428,9 @@ impl ConsumerTask {
                     }
                 }
                 response => {
-                    tracing::warn!("consumer decoded an expected response: {response:?}. ignoring");
+                    tracing::warn!(
+                        "consumer decoded an unexpected response: {response:?}. ignoring"
+                    );
                 }
             }
         }
