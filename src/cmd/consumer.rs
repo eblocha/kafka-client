@@ -1,5 +1,4 @@
 use anyhow::Context;
-use kafka_protocol::{messages::TopicName, protocol::StrBytes};
 
 use kafka_client::clients::{consumer::Consumer, network::NetworkClient};
 
@@ -16,12 +15,7 @@ impl Run for EchoTopics {
         let mut consumer = Consumer::new(client);
 
         consumer
-            .subscribe(
-                self.topics
-                    .into_iter()
-                    .map(|name| TopicName(StrBytes::from_string(name)))
-                    .collect(),
-            )
+            .subscribe(self.topics)
             .await
             .context("failed to subscribe to topics")?;
 

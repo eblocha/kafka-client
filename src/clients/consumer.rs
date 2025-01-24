@@ -23,6 +23,7 @@ use crate::{
     clients::network::NetworkClient,
     error::KafkaError,
     proto::{error_codes::ErrorCode, request::KafkaRequest},
+    util::TopicNameExt,
 };
 
 #[derive(Debug, Hash, PartialEq, PartialOrd, Eq, Ord, Clone)]
@@ -465,8 +466,13 @@ impl Consumer {
         }
     }
 
-    pub async fn subscribe(&self, topics: Vec<TopicName>) -> Result<(), KafkaError> {
+    pub async fn subscribe(&self, topics: Vec<String>) -> Result<(), KafkaError> {
         let (tx, rx) = oneshot::channel();
+
+        let topics = topics
+            .into_iter()
+            .map(|name| TopicName::from_string(name))
+            .collect();
 
         self.tx.send(ConsumerCommand {
             tx,
