@@ -402,10 +402,19 @@ impl ConsumerTask {
                 ResponseKind::ListOffsetsResponse(offsets) => {
                     for top in offsets.topics {
                         for part in top.partitions {
-                            // TODO handle error codes here
+                            if part.error_code != ErrorCode::None as i16 {
+                                tracing::error!(
+                                    "failed to determine existing offsets for {}:{}, error: {}",
+                                    top.name.as_str(),
+                                    part.partition_index,
+                                    ErrorCode::from(part.error_code)
+                                );
+                                continue;
+                            }
 
                             let topic_partition =
                                 TopicPartition(top.name.clone(), part.partition_index);
+
                             self.states.insert(
                                 topic_partition,
                                 PartitionState {
@@ -415,8 +424,8 @@ impl ConsumerTask {
                         }
                     }
                 }
-                _ => {
-                    // unknown response
+                response => {
+                    tracing::warn!("consumer decoded an expected response: {response:?}. ignoring");
                 }
             }
         }
