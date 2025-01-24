@@ -241,14 +241,10 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
 
                             self.update_metadata(metadata);
 
-                            tracing::info!(
+                            tracing::debug!(
                                 broker_id = ctx.entry.node.id,
                                 host = ?ctx.entry.node.host,
-                                "successfully updated metadata"
-                            );
-
-                            tracing::debug!(
-                                "new broker mapping {:?}",
+                                "successfully updated metadata {:?}",
                                 self.hosts
                                     .0
                                     .iter()
@@ -332,7 +328,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                         break;
                     };
 
-                    tracing::info!(
+                    tracing::debug!(
                         broker_id = entry_for_refresh.node.id,
                         host = ?entry_for_refresh.node.host,
                         "attempting to refresh metadata"
@@ -374,9 +370,35 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             entry.handle.cancellation_token.cancel();
         }
 
-        while self.join_set.join_next().await.is_some() {}
+        let mut clean_shutdown = true;
+
+        self.metadata_join_set.abort_all();
+
+        while let Some(result) = self.metadata_join_set.join_next().await {
+            if let Err(join_err) = result {
+                if join_err.is_panic() {
+                    clean_shutdown = false;
+                    tracing::error!("metadata refresh task stopped with an error: {join_err}")
+                }
+            }
+        }
+
+        while let Some(result) = self.join_set.join_next().await {
+            if let Err(join_err) = result {
+                if join_err.is_panic() {
+                    clean_shutdown = false;
+                    tracing::error!("a broker connection task stopped with an error: {join_err}")
+                }
+            }
+        }
 
         let _ = self.tx.send(Default::default());
+
+        if clean_shutdown {
+            tracing::info!("shut down gracefully");
+        } else {
+            tracing::warn!("shut down with errors");
+        }
 
         Ok(())
     }
@@ -554,10 +576,14 @@ impl SelectorTaskHandle {
         .await
     }
 
+    pub async fn await_shutdown(&self) {
+        self.task_tracker.wait().await;
+    }
+
     pub async fn shutdown(&self) {
         self.task_tracker.close();
         self.cancellation_token.cancel();
-        self.task_tracker.wait().await;
+        self.await_shutdown().await
     }
 
     async fn try_new_with_connect<Conn: Connect + Clone + Send + 'static>(

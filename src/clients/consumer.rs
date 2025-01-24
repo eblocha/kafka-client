@@ -102,6 +102,8 @@ impl ConsumerTask {
                 break;
             }
         }
+
+        tracing::debug!("consumer shut down gracefully");
     }
 
     async fn handle_command(&mut self, command: ConsumerCommand) -> Option<()> {
@@ -125,6 +127,7 @@ impl ConsumerTask {
     async fn recv_next_event(&mut self) -> ConsumerTaskEvent {
         tokio::select! {
             biased;
+            _ = self.client.await_shutdown() => ConsumerTaskEvent::Shutdown,
             _ = self.tx.closed() => ConsumerTaskEvent::Shutdown,
             command = self.rx.recv() => command.map(ConsumerTaskEvent::Command).unwrap_or(ConsumerTaskEvent::Shutdown),
             _ = self.poll_backoff.wait_next() => ConsumerTaskEvent::Poll,
@@ -441,6 +444,7 @@ impl ConsumerTask {
 pub struct Consumer {
     rx: mpsc::Receiver<Vec<ConsumerRecords>>,
     tx: mpsc::UnboundedSender<ConsumerCommand>,
+    client: NetworkClient,
 }
 
 impl Consumer {
@@ -448,14 +452,14 @@ impl Consumer {
         let (tx_records, rx_records) = mpsc::channel(1);
         let (tx_commands, rx_commands) = mpsc::unbounded_channel();
 
-        let task = ConsumerTask::new(client, tx_records, rx_commands);
+        let task = ConsumerTask::new(client.clone(), tx_records, rx_commands);
 
-        // TODO: cancellation token
         tokio::spawn(task.run());
 
         Self {
             rx: rx_records,
             tx: tx_commands,
+            client,
         }
     }
 
@@ -472,5 +476,13 @@ impl Consumer {
 
     pub async fn next(&mut self) -> Option<Vec<ConsumerRecords>> {
         self.rx.recv().await
+    }
+
+    pub async fn shutdown(&self) {
+        self.client.shutdown().await
+    }
+
+    pub async fn await_shutdown(&self) {
+        self.client.await_shutdown().await
     }
 }

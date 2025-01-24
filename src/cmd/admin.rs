@@ -149,6 +149,8 @@ impl Run for AdminCommands {
             }
         }
 
+        client.shutdown().await;
+
         Ok(())
     }
 }

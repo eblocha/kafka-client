@@ -9,12 +9,12 @@ mod proto;
 
 use std::{io, path::PathBuf};
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
-use clients::{consumer::Consumer, network::NetworkClient};
-use cmd::{admin::AdminCommands, producer::produce_from_file, Run};
+use clients::network::NetworkClient;
+use cmd::{admin::AdminCommands, consumer::EchoTopics, producer::produce_from_file, Run};
 use common::try_parse_hosts;
 use config::KafkaConfig;
-use kafka_protocol::{messages::TopicName, protocol::StrBytes};
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
@@ -40,8 +40,8 @@ enum Client {
         topic: String,
     },
     Consumer {
-        #[arg(short, long)]
-        topic: String,
+        #[arg(short, long, value_delimiter = ',', num_args = 1.., required = true)]
+        topics: Vec<String>,
     },
 }
 
@@ -60,33 +60,15 @@ pub async fn main() -> anyhow::Result<()> {
 
     let cfg = KafkaConfig::default();
 
-    let manager =
-        NetworkClient::try_new(&try_parse_hosts(&cli.bootstrap_servers)?, (&cfg).into()).await?;
+    let manager = NetworkClient::try_new(&try_parse_hosts(&cli.bootstrap_servers)?, (&cfg).into())
+        .await
+        .context("failed to bootstrap client")?;
 
     match cli.client {
-        Client::Admin(cmd) => cmd.run(manager.clone()).await?,
+        Client::Admin(cmd) => cmd.run(manager).await?,
         Client::Producer { file, topic } => produce_from_file(&manager, topic, file).await?,
-        Client::Consumer { topic } => {
-            let mut consumer = Consumer::new(manager.clone());
-            consumer
-                .subscribe(vec![TopicName(StrBytes::from_string(topic))])
-                .await?;
-
-            while let Some(batch) = consumer.next().await {
-                for set in batch.iter() {
-                    for record in set.records.iter() {
-                        if let Some(ref value) = record.value {
-                            if let Ok(value) = String::from_utf8(value.to_vec()) {
-                                println!("{}", value);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        Client::Consumer { topics } => EchoTopics { topics }.run(manager).await?,
     }
-
-    manager.shutdown().await;
 
     Ok(())
 }

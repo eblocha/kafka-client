@@ -99,11 +99,15 @@ impl NetworkClient {
         Ok(())
     }
 
+    pub fn borrow_cluster(&self) -> Ref<'_, Cluster> {
+        self.selector.cluster.borrow()
+    }
+
     pub async fn shutdown(&self) {
         self.selector.shutdown().await;
     }
 
-    pub fn borrow_cluster(&self) -> Ref<'_, Cluster> {
-        self.selector.cluster.borrow()
+    pub async fn await_shutdown(&self) {
+        self.selector.await_shutdown().await
     }
 }
