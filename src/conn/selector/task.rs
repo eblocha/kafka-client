@@ -246,9 +246,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                                 host = ?ctx.entry.node.host,
                                 "successfully updated metadata {:?}",
                                 self.hosts
-                                    .0
-                                    .iter()
-                                    .map(|(_, entry)| &entry.node)
+                                    .0.values().map(|entry| &entry.node)
                                     .collect::<Vec<_>>()
                             );
 

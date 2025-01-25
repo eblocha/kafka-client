@@ -75,13 +75,13 @@ impl AdminClient {
                 }
 
                 if ver >= 8 {
-                    req.include_cluster_authorized_operations;
+                    req.include_cluster_authorized_operations = true;
                 }
 
                 req.topics = Some(
                     topics
                         .into_iter()
-                        .map(|name| TopicName::from_string(name))
+                        .map(TopicName::from_string)
                         .map(|name| {
                             let mut topic = MetadataRequestTopic::default();
                             topic.name = Some(name);

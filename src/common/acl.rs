@@ -43,7 +43,7 @@ pub fn acl_from_bitfield(bits: i32) -> Option<FnvHashSet<AclOperation>> {
 
     for i in MIN..=MAX {
         if (bits >> 1) & 1 != 0 {
-            set.insert((i as u8).into());
+            set.insert(i.into());
         }
     }
 

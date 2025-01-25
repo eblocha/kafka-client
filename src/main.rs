@@ -1,10 +1,10 @@
 mod cmd;
 
-use std::{io, path::PathBuf};
+use std::io;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use cmd::{admin::AdminCommands, consumer::EchoTopics, producer::ProduceFromFile, Run};
+use cmd::{admin::AdminCommands, consumer::EchoTopics, producer::ProducerCommands, Run};
 use kafka_client::{clients::network::NetworkClient, common::try_parse_hosts, config::KafkaConfig};
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
@@ -24,12 +24,8 @@ struct Cli {
 enum Client {
     #[command(subcommand)]
     Admin(AdminCommands),
-    Producer {
-        #[arg(short, long)]
-        file: PathBuf,
-        #[arg(short, long)]
-        topic: String,
-    },
+    #[command(subcommand)]
+    Producer(ProducerCommands),
     Consumer {
         #[arg(short, long, value_delimiter = ',', num_args = 1.., required = true)]
         topics: Vec<String>,
@@ -57,7 +53,7 @@ pub async fn main() -> anyhow::Result<()> {
 
     match cli.client {
         Client::Admin(cmd) => cmd.run(manager).await?,
-        Client::Producer { file, topic } => ProduceFromFile { file, topic }.run(manager).await?,
+        Client::Producer(cmd) => cmd.run(manager).await?,
         Client::Consumer { topics } => EchoTopics { topics }.run(manager).await?,
     }
 

@@ -471,7 +471,7 @@ impl Consumer {
 
         let topics = topics
             .into_iter()
-            .map(|name| TopicName::from_string(name))
+            .map(TopicName::from_string)
             .collect();
 
         self.tx.send(ConsumerCommand {

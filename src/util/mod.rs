@@ -11,7 +11,7 @@ pub impl Uuid {
         if self.is_nil() {
             None
         } else {
-            Some(self.clone())
+            Some(*self)
         }
     }
 }

@@ -26,7 +26,6 @@ use tokio_util::task::TaskTracker;
 use crate::{
     error::{ErrorCode, KafkaError},
     proto::ver::with_max_version,
-    util::TopicNameExt,
 };
 
 use super::network::NetworkClient;
@@ -36,7 +35,7 @@ use super::network::NetworkClient;
 struct TopicPartition(TopicName, i32);
 
 pub struct ProducerRecord {
-    pub topic: String,
+    pub topic: TopicName,
     pub partition: Option<i32>,
     pub timestamp: Option<i64>,
     pub key: Option<Bytes>,
@@ -63,6 +62,9 @@ struct ProducerTask {
     client: NetworkClient,
 }
 
+const CHUNK_SIZE: usize = 2000;
+const CHUNK_TIMEOUT: Duration = Duration::from_millis(500);
+
 impl ProducerTask {
     fn new(client: NetworkClient) -> Self {
         Self {
@@ -72,7 +74,7 @@ impl ProducerTask {
     }
 
     async fn run(mut self, rx: mpsc::Receiver<ProducerTaskMessage>) {
-        let record_stream = ReceiverStream::new(rx).chunks_timeout(100, Duration::from_millis(500));
+        let record_stream = ReceiverStream::new(rx).chunks_timeout(CHUNK_SIZE, CHUNK_TIMEOUT);
 
         tokio::pin!(record_stream);
 
@@ -87,7 +89,7 @@ impl ProducerTask {
     async fn send_chunk(&mut self, chunk: Vec<ProducerTaskMessage>) -> Result<(), KafkaError> {
         let topic_names = chunk
             .iter()
-            .map(|msg| TopicName::from_string(msg.record.topic.clone()))
+            .map(|msg| msg.record.topic.clone())
             .collect::<Vec<_>>();
 
         let mut partitions = chunk
@@ -157,25 +159,7 @@ impl ProducerTask {
                 context_map.insert(tp, contexts);
             }
 
-            let res = self
-                .client
-                .send_to(
-                    with_max_version(|_ver| {
-                        // TODO config
-                        req.acks = 1;
-                        req.timeout_ms = 1000;
-                        req.transactional_id = None;
-
-                        Some(req)
-                    }),
-                    leader_id,
-                )
-                .await;
-
-            match res {
-                Ok(response) => self.handle_produce_response(response, context_map),
-                Err(_e) => todo!(),
-            }
+            self.send(req, leader_id, context_map).await;
         }
 
         Ok(())
@@ -272,7 +256,7 @@ impl ProducerTask {
                 start
                     .duration_since(UNIX_EPOCH)
                     .map(|ts| ts.as_millis() as i64)
-                    .unwrap_or_else(|e| -1 * (e.duration().as_millis() as i64))
+                    .unwrap_or_else(|e| -(e.duration().as_millis() as i64))
             });
 
             let part_map = mapping.entry(partition.leader_id.0).or_default();
@@ -336,6 +320,33 @@ impl ProducerTask {
             }
         }
     }
+
+    async fn send(
+        &self,
+        mut req: ProduceRequest,
+        leader_id: i32,
+        context_map: HashMap<TopicPartition, Vec<ProduceContext>>,
+    ) {
+        let res = self
+            .client
+            .send_to(
+                with_max_version(|_ver| {
+                    // TODO config
+                    req.acks = 1;
+                    req.timeout_ms = 1000;
+                    req.transactional_id = None;
+
+                    Some(req)
+                }),
+                leader_id,
+            )
+            .await;
+
+        match res {
+            Ok(response) => self.handle_produce_response(response, context_map),
+            Err(_e) => todo!(),
+        }
+    }
 }
 
 pub struct Producer {
@@ -364,7 +375,7 @@ impl Future for ProduceFuture {
 
 impl Producer {
     pub fn new(client: NetworkClient) -> Self {
-        let (tx, rx) = mpsc::channel(100);
+        let (tx, rx) = mpsc::channel(CHUNK_SIZE);
 
         let task = ProducerTask::new(client.clone());
 
