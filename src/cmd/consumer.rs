@@ -2,6 +2,8 @@ use anyhow::Context;
 
 use kafka_client::clients::{consumer::Consumer, network::NetworkClient};
 
+use crate::shutdown::shutdown_signal;
+
 use super::Run;
 
 pub struct EchoTopics {
@@ -42,7 +44,10 @@ impl Run for EchoTopics {
     async fn run(self, client: NetworkClient) -> anyhow::Result<Self::Response> {
         let mut consumer = Consumer::new(client);
 
-        let result = self.run_inner(&mut consumer).await;
+        let result = tokio::select! {
+            result = self.run_inner(&mut consumer) => result,
+            _ = shutdown_signal() => Ok(())
+        };
 
         consumer.shutdown().await;
 
