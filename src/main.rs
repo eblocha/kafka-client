@@ -5,7 +5,7 @@ use std::io;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use cmd::{admin::AdminCommands, consumer::EchoTopics, producer::ProducerCommands, Run};
-use kafka_client::{clients::network::NetworkClient, common::try_parse_hosts, config::KafkaConfig};
+use kafka_client::{clients::network::NetworkClient, common::BrokerHost, config::KafkaConfig};
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
@@ -17,7 +17,7 @@ struct Cli {
     client: Client,
 
     #[arg(short, long, value_delimiter = ',', num_args = 1.., required = true, help = "bootstrap servers (required)")]
-    bootstrap_servers: Vec<String>,
+    bootstrap_servers: Vec<BrokerHost>,
 }
 
 #[derive(Subcommand)]
@@ -47,7 +47,7 @@ pub async fn main() -> anyhow::Result<()> {
 
     let cfg = KafkaConfig::default();
 
-    let manager = NetworkClient::try_new(&try_parse_hosts(&cli.bootstrap_servers)?, (&cfg).into())
+    let manager = NetworkClient::try_new(&cli.bootstrap_servers, (&cfg).into())
         .await
         .context("failed to bootstrap client")?;
 
