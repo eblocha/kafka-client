@@ -467,6 +467,16 @@ impl Producer {
         Ok(ProduceFuture { rx })
     }
 
+    /// Flush all pending messages, but do not close any connections.
+    ///
+    /// This is useful if you are running multiple producers using a shared network client to have more control over
+    /// when messages are flushed.
+    pub async fn flush_and_close(self) {
+        drop(self.tx);
+        self.task_tracker.close();
+        self.task_tracker.wait().await;
+    }
+
     /// Flush all pending messages, then shut down the client after the producer has sent them all.
     pub async fn flush_and_shutdown(self) {
         drop(self.tx);
