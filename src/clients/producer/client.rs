@@ -335,6 +335,41 @@ impl ProducerTask {
         mapping
     }
 
+    async fn send(
+        &self,
+        mut req: ProduceRequest,
+        leader_id: i32,
+        context_map: HashMap<TopicPartition, Vec<ProduceContext>>,
+    ) {
+        let res = self
+            .client
+            .send_to(
+                with_max_version(|_ver| {
+                    // TODO config
+                    req.acks = 1;
+                    req.timeout_ms = 1000;
+                    req.transactional_id = None;
+
+                    Some(req)
+                }),
+                leader_id,
+            )
+            .await;
+
+        match res {
+            Ok(response) => self.handle_produce_response(response, context_map),
+            Err(e) => {
+                tracing::error!("failed to send produce request: {e}");
+
+                for contexts in context_map.into_values() {
+                    for context in contexts.into_iter() {
+                        let _ = context.tx.send(Err(e.representative_clone()));
+                    }
+                }
+            }
+        }
+    }
+
     fn handle_produce_response(
         &self,
         response: ProduceResponse,
@@ -365,33 +400,6 @@ impl ProducerTask {
                     let _ = ctx.tx.send(Ok(RecordMetadata {}));
                 }
             }
-        }
-    }
-
-    async fn send(
-        &self,
-        mut req: ProduceRequest,
-        leader_id: i32,
-        context_map: HashMap<TopicPartition, Vec<ProduceContext>>,
-    ) {
-        let res = self
-            .client
-            .send_to(
-                with_max_version(|_ver| {
-                    // TODO config
-                    req.acks = 1;
-                    req.timeout_ms = 1000;
-                    req.transactional_id = None;
-
-                    Some(req)
-                }),
-                leader_id,
-            )
-            .await;
-
-        match res {
-            Ok(response) => self.handle_produce_response(response, context_map),
-            Err(_e) => todo!("handle errors from the channel itself"),
         }
     }
 }

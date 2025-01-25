@@ -38,3 +38,24 @@ impl From<oneshot::error::RecvError> for KafkaError {
         KafkaChannelError::Closed.into()
     }
 }
+
+impl KafkaError {
+    /// Clone a simpler representation of this [`KafkaError`], which removes the non-cloneable parts.
+    pub fn representative_clone(&self) -> Self {
+        match self {
+            KafkaError::Channel(channel) => KafkaError::Channel(match channel {
+                KafkaChannelError::Io(error) => KafkaChannelError::Io(error.kind().into()),
+                KafkaChannelError::Closed => KafkaChannelError::Closed,
+            }),
+            KafkaError::Init(init) => KafkaError::Init(match init {
+                ConnectionInitError::Io(error) => ConnectionInitError::Io(error.kind().into()),
+                ConnectionInitError::Closed => ConnectionInitError::Closed,
+                ConnectionInitError::NegotiationFailed(error_code) => {
+                    ConnectionInitError::NegotiationFailed(*error_code)
+                }
+                ConnectionInitError::Version => ConnectionInitError::Version,
+            }),
+            KafkaError::ErrorCode(error_code) => KafkaError::ErrorCode(*error_code),
+        }
+    }
+}
