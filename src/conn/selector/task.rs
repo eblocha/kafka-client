@@ -76,6 +76,7 @@ impl BrokerMap {
     /// This will prefer connected brokers with the minimum number of pending requests, then favor the minimum number of
     /// pending requests, connected or not.
     pub fn get_best_connection(&self) -> Option<BrokerMapEntry> {
+        // TODO shuffle before selecting
         // prefer connected, non-saturated nodes with least in-flight requests
         let least_loaded_connected = self
             .0

@@ -24,15 +24,11 @@ use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tokio_util::task::TaskTracker;
 
 use crate::{
+    clients::network::NetworkClient,
+    common::TopicPartition,
     error::{ErrorCode, KafkaError},
     proto::ver::with_max_version,
 };
-
-use super::network::NetworkClient;
-
-// TODO merge with type in consumer
-#[derive(Debug, Hash, PartialEq, PartialOrd, Eq, Ord, Clone)]
-struct TopicPartition(TopicName, i32);
 
 pub struct ProducerRecord {
     pub topic: TopicName,
@@ -128,12 +124,7 @@ impl ProducerTask {
                         compression: Compression::None, // TODO config
                     },
                 ) {
-                    tracing::error!(
-                        "failed to encode record batch for topic {}:{}: {}",
-                        tp.0.as_str(),
-                        tp.1,
-                        e
-                    );
+                    tracing::error!("failed to encode record batch for topic {tp}: {e}");
 
                     for ctx in contexts.into_iter() {
                         let _ = ctx.tx.send(Err(KafkaError::Channel(
@@ -144,13 +135,13 @@ impl ProducerTask {
                 }
 
                 req.topic_data
-                    .entry(tp.0.clone())
+                    .entry(tp.name().clone())
                     .or_default()
                     .partition_data
                     .push({
                         let mut partition_data = PartitionProduceData::default();
 
-                        partition_data.index = tp.1;
+                        partition_data.index = tp.partition();
                         partition_data.records = Some(records.into());
 
                         partition_data
@@ -262,7 +253,7 @@ impl ProducerTask {
             let part_map = mapping.entry(partition.leader_id.0).or_default();
 
             let records = part_map
-                .entry(TopicPartition(topic_name.clone(), partition_index))
+                .entry(TopicPartition::new(topic_name.clone(), partition_index))
                 .or_default();
 
             let record = Record {
@@ -293,13 +284,11 @@ impl ProducerTask {
     ) {
         for (topic_name, response) in response.responses.into_iter() {
             for part_response in response.partition_responses.into_iter() {
-                let tp = TopicPartition(topic_name.clone(), part_response.index);
+                let tp = TopicPartition::new(topic_name.clone(), part_response.index);
 
                 let Some(contexts) = context_map.remove(&tp) else {
                     tracing::warn!(
-                        "got a produce response for a partition we did not send data to: {}:{}",
-                        tp.0.as_str(),
-                        tp.1
+                        "got a produce response for a partition we did not send data to: {tp}"
                     );
                     continue;
                 };

@@ -21,13 +21,11 @@ use uuid::Uuid;
 use crate::{
     backoff::{exponential_backoff, BackoffSession},
     clients::network::NetworkClient,
+    common::TopicPartition,
     error::KafkaError,
     proto::{error_codes::ErrorCode, request::KafkaRequest},
     util::TopicNameExt,
 };
-
-#[derive(Debug, Hash, PartialEq, PartialOrd, Eq, Ord, Clone)]
-pub struct TopicPartition(TopicName, i32);
 
 /// A set of records from a topic partition
 #[derive(Debug, Clone)]
@@ -242,7 +240,10 @@ impl ConsumerTask {
 
                 let state = self
                     .states
-                    .entry(TopicPartition(topic_name.clone(), part.partition_index))
+                    .entry(TopicPartition::new(
+                        topic_name.clone(),
+                        part.partition_index,
+                    ))
                     .or_default();
 
                 if let Some(offset) = state.offset {
@@ -369,7 +370,7 @@ impl ConsumerTask {
                             }
 
                             let topic_partition =
-                                TopicPartition(topic_name.clone(), part.partition_index);
+                                TopicPartition::new(topic_name.clone(), part.partition_index);
 
                             let Some(mut part_records) = part.records else {
                                 continue;
@@ -417,7 +418,7 @@ impl ConsumerTask {
                             }
 
                             let topic_partition =
-                                TopicPartition(top.name.clone(), part.partition_index);
+                                TopicPartition::new(top.name.clone(), part.partition_index);
 
                             self.states.insert(
                                 topic_partition,
@@ -469,10 +470,7 @@ impl Consumer {
     pub async fn subscribe(&self, topics: Vec<String>) -> Result<(), KafkaError> {
         let (tx, rx) = oneshot::channel();
 
-        let topics = topics
-            .into_iter()
-            .map(TopicName::from_string)
-            .collect();
+        let topics = topics.into_iter().map(TopicName::from_string).collect();
 
         self.tx.send(ConsumerCommand {
             tx,
