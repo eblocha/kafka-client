@@ -14,7 +14,7 @@ impl TryFrom<(TopicName, MetadataResponseTopic)> for TopicListing {
     type Error = ErrorCode;
 
     fn try_from((name, topic): (TopicName, MetadataResponseTopic)) -> Result<Self, Self::Error> {
-        if topic.error_code != 0 {
+        if topic.error_code != ErrorCode::None as i16 {
             return Err(topic.error_code.into());
         }
 

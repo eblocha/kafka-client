@@ -49,7 +49,10 @@ struct ProduceContext {
 }
 
 #[non_exhaustive]
-pub struct RecordMetadata {}
+pub struct RecordMetadata {
+    pub topic_partition: TopicPartition,
+    pub base_offset: i64,
+}
 
 struct ProduceChunk<'p, P> {
     messages: Vec<ProducerTaskMessage>,
@@ -393,7 +396,10 @@ impl ProducerTask {
                 }
 
                 for ctx in contexts.into_iter() {
-                    let _ = ctx.tx.send(Ok(RecordMetadata {}));
+                    let _ = ctx.tx.send(Ok(RecordMetadata {
+                        topic_partition: tp.clone(),
+                        base_offset: part_response.base_offset,
+                    }));
                 }
             }
         }
