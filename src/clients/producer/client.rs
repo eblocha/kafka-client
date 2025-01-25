@@ -128,7 +128,8 @@ impl ProducerTask {
 
                     for ctx in contexts.into_iter() {
                         let _ = ctx.tx.send(Err(KafkaError::Channel(
-                            io::Error::from(io::ErrorKind::InvalidInput).into(),
+                            io::Error::new(io::ErrorKind::Other, "record batch failed to encode")
+                                .into(),
                         )));
                     }
                     continue;
