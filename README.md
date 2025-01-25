@@ -16,13 +16,12 @@ It uses [kafka-protocol](https://github.com/tychedelia/kafka-protocol-rs) for th
 
 ## To Do
 
-- Get the producer working similarly to the Java client
+- Producer
 
-  - It will buffer records to a partition up to a size or time limit (official client has a race condition related to partition selection here - investigate)
-  - It lazily fetches metadata per-partition, because there can be thousands of topics/partitions, so it's not always feasible to use the scheduled metadata refresh for this
-  - Offer interface for partition selection
-  - Unanswered questions:
-    - What happens if the partition leader changed since the last metadata refresh?
+  - Implement automatic retry in a way that can guarantee message order
+  - Implement idempotent producer
+  - Implement transactions
+  - The Java client buffers per-partition. Do we want the same?
 
 - Consumer
 
@@ -37,13 +36,9 @@ It uses [kafka-protocol](https://github.com/tychedelia/kafka-protocol-rs) for th
 - Benchmarking
 
   - See if producer can hit 800k records/s: https://engineering.linkedin.com/kafka/benchmarking-apache-kafka-2-million-writes-second-three-cheap-machines
+  - Update: we are pretty close I think. I did a local benchmark with random data, and hit 1.5M records/s. See the `ProduceRandom` implementation in `cmd/producer.rs` for how that works.
+  - It seems like sending to one partition is faster than multiple right now.
 
 - More tracing
 
 - More tests
-
-- Think about switching off of kafka-protocol. It is not production-grade atm.
-  - It uses `anyhow` for errors. This is not appropriate for a low-level protocol library.
-  - It fails to encode instead of ignoring parameters not relevant to newer versions
-  - It panics in situations that should instead return an `Err`
-  - It would be nice to decode into `Result<Response, ErrorCode>`
