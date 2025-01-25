@@ -384,7 +384,7 @@ impl Producer {
     /// This method returns a nested future.
     /// - The outer future resolves when the message has been queued. Await this for backpressure.
     /// - The inner future resolves when the record has been acknowledged by the server.
-    pub async fn send(&mut self, record: ProducerRecord) -> Result<ProduceFuture, KafkaError> {
+    pub async fn send(&self, record: ProducerRecord) -> Result<ProduceFuture, KafkaError> {
         let (tx, rx) = oneshot::channel();
 
         self.tx.send(ProducerTaskMessage { record, tx }).await?;

@@ -59,7 +59,7 @@ impl Run for ProduceRandom {
     type Response = ();
 
     async fn run(self, client: NetworkClient) -> anyhow::Result<Self::Response> {
-        let mut producer = Producer::new(client);
+        let producer = Producer::new(client);
         let topic = TopicName(StrBytes::from_string(self.topic));
 
         let now = Instant::now();
