@@ -523,7 +523,7 @@ mod test {
 
     use crate::{
         conn::{
-            channel::{KafkaChannel, KafkaChannelMessage},
+            channel::{KafkaChannel, KafkaChannelMessage, ResponseSender},
             codec::sendable::{DecodableResponse, RequestRecord},
             config::ConnectionRetryConfig,
         },
@@ -555,7 +555,7 @@ mod test {
         }
     }
 
-    /// Start a task to a fake broker, and send a metadata request to it.
+    /// Start a task to a fake broker.
     ///
     /// Returns a reciever for messages that the broker would receive from the client.
     fn start_task() -> (mpsc::Receiver<KafkaChannelMessage>, NodeTaskHandle) {
@@ -580,6 +580,7 @@ mod test {
     /// Returns a reciever for messages that the broker would receive from the client.
     fn fire_and_forget_request() -> mpsc::Receiver<KafkaChannelMessage> {
         let (rx, handle) = start_task();
+
         tokio::spawn(async move { handle.send(MetadataRequest::default()).await });
 
         rx
@@ -587,18 +588,7 @@ mod test {
 
     #[tokio::test(start_paused = true)]
     async fn starts_not_connected() {
-        let (tx, _rx) = mpsc::channel(1);
-        let task_tracker = TaskTracker::new();
-        let cancellation_token = CancellationToken::new();
-
-        let (handle, task) = new_pair(
-            0,
-            BrokerHost(Arc::from("localhost"), 9092),
-            ConnectionRetryConfig::default(),
-            KafkaChannel::from_parts(tx, task_tracker, cancellation_token.clone()),
-        );
-
-        tokio::spawn(task.run());
+        let (_, handle) = start_task();
 
         assert!(!handle.is_connected());
     }
@@ -606,18 +596,7 @@ mod test {
     #[tokio::test(start_paused = true)]
     #[traced_test]
     async fn connects_on_request() {
-        let (tx, mut rx) = mpsc::channel(1);
-        let task_tracker = TaskTracker::new();
-        let cancellation_token = CancellationToken::new();
-
-        let (handle, task) = new_pair(
-            0,
-            BrokerHost(Arc::from("localhost"), 9092),
-            ConnectionRetryConfig::default(),
-            KafkaChannel::from_parts(tx, task_tracker, cancellation_token.clone()),
-        );
-
-        tokio::spawn(task.run());
+        let (mut rx, handle) = start_task();
 
         let h_clone = handle.clone();
 
@@ -655,7 +634,12 @@ mod test {
             channel_msg.versioned.api_version,
         );
 
-        let _ = channel_msg.tx.send(Ok(response));
+        assert!(
+            matches!(channel_msg.tx, ResponseSender::Await(_)),
+            "expected client to await the response, but it was abandoned"
+        );
+
+        let _ = channel_msg.tx.send_if_awaiter(response);
 
         let channel_msg = rx.recv().await.unwrap();
 
@@ -675,7 +659,7 @@ mod test {
             channel_msg.versioned.api_version,
         );
 
-        let _ = channel_msg.tx.send(Ok(response));
+        let _ = channel_msg.tx.send_if_awaiter(response);
 
         // the sender should get a response
         let response = metadata_response_handle.await.unwrap();
@@ -694,7 +678,7 @@ mod test {
 
         let channel_msg = rx.recv().await.unwrap();
 
-        let _ = channel_msg.tx.send(Err(io::Error::other("test")));
+        let _ = channel_msg.tx.send_err(io::Error::other("test"));
 
         let result = join.await.unwrap();
 
@@ -722,7 +706,7 @@ mod test {
             channel_msg.versioned.api_version,
         );
 
-        let _ = channel_msg.tx.send(Ok(response));
+        let _ = channel_msg.tx.send_if_awaiter(response);
 
         let channel_msg = rx.recv().await.unwrap();
 

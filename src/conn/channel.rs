@@ -46,7 +46,35 @@ impl<T> From<mpsc::error::SendError<T>> for KafkaChannelError {
     }
 }
 
-pub type ResponseSender = oneshot::Sender<Result<DecodableResponse, io::Error>>;
+pub type AwaitResponseSender = oneshot::Sender<Result<DecodableResponse, io::Error>>;
+
+#[derive(Debug)]
+pub enum ResponseSender {
+    /// A response sender that needs the response object, so it should wait until a response has been received.
+    Await(AwaitResponseSender),
+    /// A response sender that only wants to be notified when its request is flushed.
+    Abandon(oneshot::Sender<Result<(), io::Error>>),
+}
+
+impl ResponseSender {
+    pub fn send_err(self, err: io::Error) {
+        match self {
+            ResponseSender::Await(sender) => {
+                let _ = sender.send(Err(err));
+            }
+            ResponseSender::Abandon(sender) => {
+                let _ = sender.send(Err(err));
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn send_if_awaiter(self, response: DecodableResponse) {
+        if let ResponseSender::Await(sender) = self {
+            let _ = sender.send(Ok(response));
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct KafkaChannelMessage {
@@ -70,7 +98,7 @@ impl<IO> KafkaChannelTask<IO> {
         let (mut sink, mut stream) =
             Framed::new(self.io, KafkaCodec::new(self.config.max_frame_length)).split();
 
-        let mut in_flight: FnvHashMap<CorrelationId, (RequestRecord, ResponseSender)> =
+        let mut in_flight: FnvHashMap<CorrelationId, (RequestRecord, AwaitResponseSender)> =
             FnvHashMap::with_capacity_and_hasher(self.config.send_buffer_size, Default::default());
 
         let mut request_buffer = Vec::with_capacity(self.config.send_buffer_size);
@@ -128,7 +156,7 @@ impl<IO> KafkaChannelTask<IO> {
                                         "io sink failed to feed frame: {:?}",
                                         e
                                     );
-                                    let _ = message.tx.send(Err(e));
+                                    message.tx.send_err(e);
                                 }
                             }
 
@@ -140,15 +168,19 @@ impl<IO> KafkaChannelTask<IO> {
                                 tracing::trace!("io sink failed to flush frames: {:?}", e);
                                 // if the flush fails, notify all requests that they failed to send
                                 for (_, sender, _) in sender_batch.drain(..) {
-                                    let _ = sender.send(Err(e.kind().into()));
+                                    let _ = sender.send_err(e.kind().into());
                                 }
                             }
                             Ok(_) => {
                                 tracing::trace!("io sink flushed frames");
                                 for (correlation_id, sender, record) in sender_batch.drain(..) {
-                                    // Don't bother waiting for the response if the sender dropped.
-                                    if !sender.is_closed() {
-                                        in_flight.insert(correlation_id, (record, sender));
+                                    match sender {
+                                        ResponseSender::Await(sender) => {
+                                            in_flight.insert(correlation_id, (record, sender));
+                                        }
+                                        ResponseSender::Abandon(sender) => {
+                                            let _ = sender.send(Ok(()));
+                                        }
                                     }
                                 }
                             }
@@ -288,7 +320,12 @@ pub async fn send_on<R: Sendable>(
         request: req.into(),
     };
 
-    sender.send(KafkaChannelMessage { versioned, tx }).await?;
+    sender
+        .send(KafkaChannelMessage {
+            versioned,
+            tx: ResponseSender::Await(tx),
+        })
+        .await?;
 
     // error happens when the client dropped our sender before sending anything.
     let response = rx.await??;
@@ -302,16 +339,21 @@ pub async fn send_on_and_forget<R: Sendable>(
     req: R,
     api_version: i16,
 ) -> Result<(), KafkaChannelError> {
-    let (tx, _rx) = oneshot::channel();
+    let (tx, rx) = oneshot::channel();
 
     let versioned = VersionedRequest {
         api_version,
         request: req.into(),
     };
 
-    sender.send(KafkaChannelMessage { versioned, tx }).await?;
+    sender
+        .send(KafkaChannelMessage {
+            versioned,
+            tx: ResponseSender::Abandon(tx),
+        })
+        .await?;
 
-    Ok(())
+    Ok(rx.await??)
 }
 
 #[cfg(test)]
@@ -327,7 +369,7 @@ mod test {
         },
         protocol::{Encodable, Message},
     };
-    use tokio_test::assert_err;
+    use tokio_test::{assert_err, assert_ok};
 
     use super::*;
 
@@ -487,5 +529,18 @@ mod test {
             KafkaChannelError::Closed => {}
             e => panic!("expected closed error but got {e:?}"),
         };
+    }
+
+    #[tokio::test]
+    async fn send_and_forget() {
+        let ((request, req_bytes), (_, _)) = create_request_response(0);
+
+        let io = tokio_test::io::Builder::new().write(&req_bytes).build();
+
+        let conn = Arc::new(KafkaChannel::connect(io, &Default::default()));
+
+        let response = conn.send_and_forget(request, REQ_VERSION).await;
+
+        assert_ok!(response)
     }
 }

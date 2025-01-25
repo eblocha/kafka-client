@@ -181,7 +181,7 @@ impl ProducerTask {
                 context_map.insert(tp, contexts);
             }
 
-            self.send(req, leader_id, context_map).await;
+            self.send_with_acks(req, leader_id, context_map).await;
         }
 
         Ok(())
@@ -335,26 +335,22 @@ impl ProducerTask {
         mapping
     }
 
-    async fn send(
+    async fn send_with_acks(
         &self,
         mut req: ProduceRequest,
         leader_id: i32,
         context_map: HashMap<TopicPartition, Vec<ProduceContext>>,
     ) {
-        let res = self
-            .client
-            .send_to(
-                with_max_version(|_ver| {
-                    // TODO config
-                    req.acks = 1;
-                    req.timeout_ms = 1000;
-                    req.transactional_id = None;
+        let build_req = with_max_version(|_ver| {
+            // TODO config
+            req.acks = 1;
+            req.timeout_ms = 1000;
+            req.transactional_id = None;
 
-                    Some(req)
-                }),
-                leader_id,
-            )
-            .await;
+            Some(req)
+        });
+
+        let res = self.client.send_to(build_req, leader_id).await;
 
         match res {
             Ok(response) => self.handle_produce_response(response, context_map),
@@ -434,7 +430,7 @@ impl Producer {
         Self::new_with_partitioner(client, KeyHashPartitioner)
     }
 
-    /// Create a new producer with the [`CreatePartitioner`] implementation specified.
+    /// Create a new producer with the [`Partitioner`] implementation specified.
     pub fn new_with_partitioner(
         client: NetworkClient,
         partitioner: impl Partitioner + 'static,
