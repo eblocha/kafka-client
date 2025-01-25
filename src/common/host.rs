@@ -1,4 +1,4 @@
-use std::{fmt::Debug, sync::Arc};
+use std::{fmt::Debug, str::FromStr, sync::Arc};
 
 use kafka_protocol::messages::{
     describe_cluster_response::DescribeClusterBroker, metadata_response::MetadataResponseBroker,
@@ -29,14 +29,14 @@ impl From<&DescribeClusterBroker> for BrokerHost {
     }
 }
 
-impl TryFrom<&str> for BrokerHost {
-    type Error = url::ParseError;
+impl FromStr for BrokerHost {
+    type Err = url::ParseError;
 
-    fn try_from(broker: &str) -> Result<Self, Self::Error> {
-        let mut url = Url::parse(broker)?;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut url = Url::parse(s)?;
 
         if !url.has_host() {
-            url = Url::parse(&format!("kafka://{}", broker))?;
+            url = Url::parse(&format!("kafka://{s}"))?;
         }
 
         Ok(Self(
@@ -52,7 +52,7 @@ impl TryFrom<&str> for BrokerHost {
 pub fn try_parse_hosts<S: AsRef<str>>(brokers: &[S]) -> Result<Vec<BrokerHost>, url::ParseError> {
     brokers
         .iter()
-        .map(|h| BrokerHost::try_from(h.as_ref()))
+        .map(|h| h.as_ref().parse())
         .collect::<Result<Vec<_>, _>>()
 }
 
@@ -67,7 +67,7 @@ mod test {
     fn parses_typical_host() {
         let host = "localhost:9092";
 
-        let broker_host = BrokerHost::try_from(host);
+        let broker_host: Result<BrokerHost, _> = host.parse();
 
         assert_eq!(broker_host, Ok(BrokerHost("localhost".into(), 9092)));
     }
@@ -76,7 +76,7 @@ mod test {
     fn parses_with_protocol() {
         let host = "https://localhost:9092";
 
-        let broker_host = BrokerHost::try_from(host);
+        let broker_host: Result<BrokerHost, _> = host.parse();
 
         assert_eq!(broker_host, Ok(BrokerHost("localhost".into(), 9092)));
     }
@@ -85,7 +85,7 @@ mod test {
     fn fails_without_port() {
         let host = "localhost";
 
-        let broker_host = BrokerHost::try_from(host);
+        let broker_host: Result<BrokerHost, _> = host.parse();
 
         assert_err!(broker_host);
     }
@@ -94,7 +94,7 @@ mod test {
     fn fails_with_bad_port() {
         let host = "localhost:abcd";
 
-        let broker_host = BrokerHost::try_from(host);
+        let broker_host: Result<BrokerHost, _> = host.parse();
 
         assert_err!(broker_host);
     }
