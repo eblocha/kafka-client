@@ -290,10 +290,24 @@ impl NodeTaskHandle {
         result
     }
 
-    async fn send_inner<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
+    /// Sends a request and returns a future that resolves when the message is sent.
+    pub async fn send_and_forget<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
         &self,
         req: F,
-    ) -> Result<R::Response, KafkaError> {
+    ) -> Result<(), KafkaError> {
+        self.in_flight.fetch_add(1, Ordering::Acquire);
+
+        let result = self.send_inner_and_forget(req).await;
+
+        self.in_flight.fetch_sub(1, Ordering::Release);
+
+        result
+    }
+
+    async fn prepare_send<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
+        &self,
+        req: F,
+    ) -> Result<(Arc<VersionedConnection>, R, i16), KafkaError> {
         let conn_result = self.get_connection().await;
 
         if conn_result.is_err() {
@@ -319,7 +333,25 @@ impl NodeTaskHandle {
             return Err(KafkaError::ErrorCode(ErrorCode::UnsupportedVersion));
         };
 
+        Ok((conn.clone(), req, version))
+    }
+
+    async fn send_inner<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
+        &self,
+        req: F,
+    ) -> Result<R::Response, KafkaError> {
+        let (conn, req, version) = self.prepare_send(req).await?;
+
         Ok(conn.connection.send(req, version).await?)
+    }
+
+    async fn send_inner_and_forget<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
+        &self,
+        req: F,
+    ) -> Result<(), KafkaError> {
+        let (conn, req, version) = self.prepare_send(req).await?;
+
+        Ok(conn.connection.send_and_forget(req, version).await?)
     }
 
     async fn get_connection(&self) -> Result<Arc<VersionedConnection>, KafkaError> {

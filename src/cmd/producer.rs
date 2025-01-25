@@ -5,7 +5,7 @@ use bytes::Bytes;
 use clap::Subcommand;
 use indicatif::{HumanCount, ProgressBar, ProgressStyle};
 use kafka_protocol::{messages::TopicName, protocol::StrBytes};
-use rand::Rng;
+use rand::RngCore;
 use tokio::{
     fs::File,
     io::{self, AsyncBufReadExt},
@@ -76,7 +76,8 @@ impl Run for ProduceRandom {
         let mut rng = rand::thread_rng();
 
         for _i in 0..SIZE {
-            let msg = rng.gen::<[u8; 32]>();
+            let mut msg = [0_u8; 100];
+            rng.fill_bytes(&mut msg);
 
             let msg = Bytes::from(msg.to_vec());
 

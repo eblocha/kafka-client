@@ -146,7 +146,10 @@ impl<IO> KafkaChannelTask<IO> {
                             Ok(_) => {
                                 tracing::trace!("io sink flushed frames");
                                 for (correlation_id, sender, record) in sender_batch.drain(..) {
-                                    in_flight.insert(correlation_id, (record, sender));
+                                    // Don't bother waiting for the response if the sender dropped.
+                                    if !sender.is_closed() {
+                                        in_flight.insert(correlation_id, (record, sender));
+                                    }
                                 }
                             }
                         }
@@ -248,6 +251,15 @@ impl KafkaChannel {
         send_on(&self.sender, req, api_version).await
     }
 
+    /// Sends a request and returns a future that resolves when the message is sent.
+    pub async fn send_and_forget<R: Sendable>(
+        &self,
+        req: R,
+        api_version: i16,
+    ) -> Result<(), KafkaChannelError> {
+        send_on_and_forget(&self.sender, req, api_version).await
+    }
+
     /// Obtain a new Sender to send and receive messages
     pub fn sender(&self) -> &mpsc::Sender<KafkaChannelMessage> {
         &self.sender
@@ -282,6 +294,24 @@ pub async fn send_on<R: Sendable>(
     let response = rx.await??;
 
     Ok(R::decode(response)?)
+}
+
+/// Send a message on the provided channel and abandon it, do not wait for a response
+pub async fn send_on_and_forget<R: Sendable>(
+    sender: &mpsc::Sender<KafkaChannelMessage>,
+    req: R,
+    api_version: i16,
+) -> Result<(), KafkaChannelError> {
+    let (tx, _rx) = oneshot::channel();
+
+    let versioned = VersionedRequest {
+        api_version,
+        request: req.into(),
+    };
+
+    sender.send(KafkaChannelMessage { versioned, tx }).await?;
+
+    Ok(())
 }
 
 #[cfg(test)]

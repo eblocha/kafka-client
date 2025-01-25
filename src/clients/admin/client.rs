@@ -74,7 +74,7 @@ impl AdminClient {
                     req.allow_auto_topic_creation = false;
                 }
 
-                if ver >= 8 {
+                if ver >= 8 && ver <= 10 {
                     req.include_cluster_authorized_operations = true;
                 }
 

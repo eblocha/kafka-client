@@ -9,6 +9,8 @@ It uses [kafka-protocol](https://github.com/tychedelia/kafka-protocol-rs) for th
 - Multiplexed, async IO
 - Client-side load balancing
 - Connection retry with exponential backoff
+- Generic over the IO channel
+- Custom partitioning strategies
 
 ## Architecture
 
