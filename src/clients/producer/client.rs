@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     future::Future,
     io,
+    iter::zip,
     pin::Pin,
     task::{Context, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -10,7 +11,6 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use fnv::FnvHashMap;
 use futures::FutureExt;
-use itertools::izip;
 use kafka_protocol::{
     messages::{produce_request::PartitionProduceData, ProduceRequest, ProduceResponse, TopicName},
     protocol::StrBytes,
@@ -28,7 +28,10 @@ use crate::{
     common::TopicPartition,
     error::{ErrorCode, KafkaError},
     proto::ver::with_max_version,
+    util::find_partition,
 };
+
+use super::{KeyHashPartitioner, Partitioner, PartitionerSession};
 
 pub struct ProducerRecord {
     pub topic: TopicName,
@@ -48,9 +51,30 @@ struct ProduceContext {
 #[non_exhaustive]
 pub struct RecordMetadata {}
 
+struct ProduceChunk<'p, P> {
+    messages: Vec<ProducerTaskMessage>,
+    partitioner: &'p mut P,
+}
+
 struct ProducerTaskMessage {
     record: ProducerRecord,
+    /// The partition set on the record by the user, so the partitioning strategy can determine if it should modify the
+    /// one on the record.
+    user_partition: Option<i32>,
     tx: oneshot::Sender<Result<RecordMetadata, KafkaError>>,
+}
+
+impl ProducerTaskMessage {
+    fn new(
+        record: ProducerRecord,
+        tx: oneshot::Sender<Result<RecordMetadata, KafkaError>>,
+    ) -> Self {
+        Self {
+            user_partition: record.partition,
+            record,
+            tx,
+        }
+    }
 }
 
 struct ProducerTask {
@@ -63,40 +87,46 @@ const CHUNK_TIMEOUT: Duration = Duration::from_millis(500);
 
 impl ProducerTask {
     fn new(client: NetworkClient) -> Self {
-        Self {
-            client,
-            // sequence: 0,
-        }
+        Self { client }
     }
 
-    async fn run(mut self, rx: mpsc::Receiver<ProducerTaskMessage>) {
+    async fn run(
+        mut self,
+        rx: mpsc::Receiver<ProducerTaskMessage>,
+        mut create_partitioner: impl Partitioner,
+    ) {
         let record_stream = ReceiverStream::new(rx).chunks_timeout(CHUNK_SIZE, CHUNK_TIMEOUT);
 
         tokio::pin!(record_stream);
 
         while let Some(chunk) = record_stream.next().await {
-            if let Err(e) = self.send_chunk(chunk).await {
+            if let Err(e) = self
+                .send_chunk(ProduceChunk {
+                    messages: chunk,
+                    partitioner: &mut create_partitioner,
+                })
+                .await
+            {
                 tracing::error!("encountered an unrecoverable error while producing messages: {e}");
                 break;
             }
         }
     }
 
-    async fn send_chunk(&mut self, chunk: Vec<ProducerTaskMessage>) -> Result<(), KafkaError> {
+    async fn send_chunk(
+        &mut self,
+        mut chunk: ProduceChunk<'_, impl Partitioner>,
+    ) -> Result<(), KafkaError> {
         let topic_names = chunk
+            .messages
             .iter()
             .map(|msg| msg.record.topic.clone())
-            .collect::<Vec<_>>();
-
-        let mut partitions = chunk
-            .iter()
-            .map(|msg| msg.record.partition)
             .collect::<Vec<_>>();
 
         self.client.load_topic_metadata(topic_names.iter()).await?;
 
         let invalid_topic_names =
-            self.get_invalid_topics_and_populate_partitions(&mut partitions, &topic_names, &chunk);
+            self.get_invalid_topics_and_populate_partitions(&topic_names, &mut chunk);
 
         if !invalid_topic_names.is_empty() {
             // Refresh invalid topics
@@ -107,7 +137,7 @@ impl ProducerTask {
                 .await?;
         }
 
-        let mapping = self.create_produce_contexts(&partitions, &topic_names, chunk);
+        let mapping = self.create_produce_contexts(&topic_names, chunk);
 
         for (leader_id, partitions) in mapping.into_iter() {
             let mut req = ProduceRequest::default();
@@ -159,15 +189,16 @@ impl ProducerTask {
 
     fn get_invalid_topics_and_populate_partitions(
         &self,
-        partitions: &mut [Option<i32>],
         topic_names: &[TopicName],
-        chunk: &[ProducerTaskMessage],
+        chunk: &mut ProduceChunk<'_, impl Partitioner>,
     ) -> Vec<TopicName> {
         let topic_map = &self.client.borrow_cluster().metadata.topics;
 
         let mut invalid_topic_names = Vec::<TopicName>::new();
 
-        for (partiton, topic_name, msg) in izip!(partitions, topic_names, chunk) {
+        let mut partitioner = chunk.partitioner.new_partitioner(topic_map);
+
+        for (topic_name, msg) in zip(topic_names, chunk.messages.iter_mut()) {
             let Some(topic_data) = topic_map.get(topic_name) else {
                 invalid_topic_names.push(topic_name.clone());
                 continue;
@@ -178,15 +209,16 @@ impl ProducerTask {
                 continue;
             }
 
-            // TODO compute from key value, or random if no key
-            let partition_index = msg.record.partition.unwrap_or_default();
-            *partiton = Some(partition_index);
+            if msg.user_partition.is_none() {
+                partitioner.partition(&mut msg.record, &topic_data);
+            }
 
-            let Some(partition) = topic_data
-                .partitions
-                .iter()
-                .find(|part| part.partition_index == partition_index)
-            else {
+            let partition = match msg.record.partition {
+                Some(index) => find_partition(&topic_data.partitions, index),
+                None => None,
+            };
+
+            let Some(partition) = partition else {
                 invalid_topic_names.push(topic_name.clone());
                 continue;
             };
@@ -197,21 +229,24 @@ impl ProducerTask {
             }
         }
 
+        chunk.partitioner.finish_partitioning(partitioner);
+
         invalid_topic_names
     }
 
     fn create_produce_contexts(
         &self,
-        partitions: &[Option<i32>],
         topic_names: &[TopicName],
-        chunk: Vec<ProducerTaskMessage>,
+        chunk: ProduceChunk<'_, impl Partitioner>,
     ) -> FnvHashMap<i32, HashMap<TopicPartition, Vec<ProduceContext>>> {
         let mut mapping =
             FnvHashMap::<i32, HashMap<TopicPartition, Vec<ProduceContext>>>::default();
 
         let topic_map = &self.client.borrow_cluster().metadata.topics;
 
-        for (partition, topic_name, msg) in izip!(partitions, topic_names, chunk) {
+        let mut partitioner = chunk.partitioner.new_partitioner(topic_map);
+
+        for (topic_name, mut msg) in zip(topic_names, chunk.messages) {
             let Some(topic_data) = topic_map.get(topic_name) else {
                 let _ = msg.tx.send(Err(ErrorCode::UnknownTopicOrPartition.into()));
                 continue;
@@ -224,14 +259,29 @@ impl ProducerTask {
                 continue;
             }
 
-            // TODO compute from key value, or random if no key
-            let partition_index = partition.unwrap_or_default();
+            let original_partition_index = msg.record.partition;
 
-            let Some(partition) = topic_data
-                .partitions
-                .iter()
-                .find(|part| part.partition_index == partition_index)
-            else {
+            let mut partition = match msg.record.partition {
+                Some(index) => find_partition(&topic_data.partitions, index),
+                None => None,
+            };
+
+            if partition.is_none() && msg.user_partition.is_none() {
+                // Only partition records that did not get partitioned in the first round, or whose partitions no
+                // longer exist after refreshing topic data.
+                // However, if there is a user-specified partition, do not re-partition to another one.
+                partitioner.partition(&mut msg.record, &topic_data);
+            }
+
+            // If the index changed, try to find it again
+            if original_partition_index != msg.record.partition {
+                partition = match msg.record.partition {
+                    Some(index) => find_partition(&topic_data.partitions, index),
+                    None => None,
+                };
+            }
+
+            let Some(partition) = partition else {
                 let _ = msg.tx.send(Err(ErrorCode::UnknownTopicOrPartition.into()));
                 continue;
             };
@@ -254,8 +304,13 @@ impl ProducerTask {
             let part_map = mapping.entry(partition.leader_id.0).or_default();
 
             let records = part_map
-                .entry(TopicPartition::new(topic_name.clone(), partition_index))
+                .entry(TopicPartition::new(
+                    topic_name.clone(),
+                    partition.partition_index,
+                ))
                 .or_default();
+
+            partitioner.partition_validated(&msg.record, partition);
 
             let record = Record {
                 transactional: false,
@@ -274,6 +329,8 @@ impl ProducerTask {
 
             records.push(ProduceContext { record, tx: msg.tx });
         }
+
+        chunk.partitioner.finish_partitioning(partitioner);
 
         mapping
     }
@@ -334,7 +391,7 @@ impl ProducerTask {
 
         match res {
             Ok(response) => self.handle_produce_response(response, context_map),
-            Err(_e) => todo!(),
+            Err(_e) => todo!("handle errors from the channel itself"),
         }
     }
 }
@@ -364,14 +421,23 @@ impl Future for ProduceFuture {
 }
 
 impl Producer {
+    /// Create a new producer with the default [`Partitioner`].
     pub fn new(client: NetworkClient) -> Self {
+        Self::new_with_partitioner(client, KeyHashPartitioner)
+    }
+
+    /// Create a new producer with the [`CreatePartitioner`] implementation specified.
+    pub fn new_with_partitioner(
+        client: NetworkClient,
+        partitioner: impl Partitioner + 'static,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(CHUNK_SIZE);
 
         let task = ProducerTask::new(client.clone());
 
         let task_tracker = TaskTracker::new();
 
-        task_tracker.spawn(task.run(rx));
+        task_tracker.spawn(task.run(rx, partitioner));
 
         Self {
             client,
@@ -388,7 +454,7 @@ impl Producer {
     pub async fn send(&self, record: ProducerRecord) -> Result<ProduceFuture, KafkaError> {
         let (tx, rx) = oneshot::channel();
 
-        self.tx.send(ProducerTaskMessage { record, tx }).await?;
+        self.tx.send(ProducerTaskMessage::new(record, tx)).await?;
 
         Ok(ProduceFuture { rx })
     }

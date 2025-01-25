@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use extend::ext;
-use kafka_protocol::{messages::TopicName, protocol::StrBytes};
+use kafka_protocol::{
+    messages::{metadata_response::MetadataResponsePartition, TopicName},
+    protocol::StrBytes,
+};
 use uuid::Uuid;
 
 #[ext]
@@ -28,4 +31,15 @@ pub impl StrBytes {
     fn as_arc_str(&self) -> Arc<str> {
         Arc::from(self.as_str())
     }
+}
+
+/// Find a partition by partition index using binary search.
+pub fn find_partition(
+    partitions: &[MetadataResponsePartition],
+    partition_index: i32,
+) -> Option<&MetadataResponsePartition> {
+    partitions
+        .binary_search_by(|part| part.partition_index.cmp(&partition_index))
+        .ok()
+        .map(|idx| &partitions[idx])
 }

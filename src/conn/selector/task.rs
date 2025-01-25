@@ -471,16 +471,19 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             }
         }
 
+        for topic_meta in metadata.topics.values_mut() {
+            // Sort the partitions by index so we can binary search it later.
+            topic_meta
+                .partitions
+                .sort_by(|a, b| a.partition_index.cmp(&b.partition_index));
+        }
+
         self.tx.send_modify(|cluster| {
             cluster.broker_channels = self.hosts.clone();
             // merge topic metadata with existing metadata
-            // TODO: can we remove any topics here?
-            for (k, v) in cluster.metadata.topics.drain(..) {
-                if !metadata.topics.contains_key(&k) {
-                    metadata.topics.insert(k, v);
-                }
+            for (topic_name, topic_meta) in metadata.topics.into_iter() {
+                cluster.metadata.topics.insert(topic_name, topic_meta);
             }
-            cluster.metadata = metadata;
         });
     }
 
