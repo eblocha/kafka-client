@@ -1,7 +1,6 @@
 use std::{
     future::Future,
     io,
-    iter::zip,
     pin::Pin,
     task::{Context, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -136,18 +135,17 @@ impl ProducerTask {
         &mut self,
         mut chunk: ProduceChunk<'_, impl Partitioner>,
     ) -> Result<(), KafkaError> {
-        let topic_names = chunk
-            .messages
-            .iter()
-            .map(|msg| msg.record.topic.clone())
-            .collect::<Vec<_>>();
-
         self.client
-            .load_topic_metadata(FxHashSet::<&TopicName>::from_iter(&topic_names))
+            .load_topic_metadata(
+                chunk
+                    .messages
+                    .iter()
+                    .map(|msg| &msg.record.topic)
+                    .collect::<FxHashSet<_>>(),
+            )
             .await?;
 
-        let invalid_topic_names =
-            self.get_invalid_topics_and_populate_partitions(&topic_names, &mut chunk);
+        let invalid_topic_names = self.get_invalid_topics_and_populate_partitions(&mut chunk);
 
         if !invalid_topic_names.is_empty() {
             // Refresh invalid topics
@@ -158,7 +156,7 @@ impl ProducerTask {
                 .await?;
         }
 
-        self.create_produce_contexts(&topic_names, chunk);
+        self.create_produce_contexts(chunk);
 
         for (leader_id, partitions) in self.context_mappings.iter_mut() {
             if partitions.is_empty() {
@@ -250,7 +248,6 @@ impl ProducerTask {
 
     fn get_invalid_topics_and_populate_partitions(
         &self,
-        topic_names: &[TopicName],
         chunk: &mut ProduceChunk<'_, impl Partitioner>,
     ) -> FxHashSet<TopicName> {
         let cluster = &self.client.borrow_cluster();
@@ -259,9 +256,9 @@ impl ProducerTask {
 
         let mut partitioner = chunk.partitioner.new_partitioner(cluster);
 
-        for (topic_name, msg) in zip(topic_names, chunk.messages.iter_mut()) {
-            let Ok(topic_data) = cluster.get_topic_metadata_by_name(topic_name) else {
-                invalid_topic_names.insert(topic_name.clone());
+        for msg in chunk.messages.iter_mut() {
+            let Ok(topic_data) = cluster.get_topic_metadata_by_name(&msg.record.topic) else {
+                invalid_topic_names.insert(msg.record.topic.clone());
                 continue;
             };
 
@@ -276,7 +273,7 @@ impl ProducerTask {
                 .is_none()
             {
                 // The partitioner gave us an invalid partition
-                invalid_topic_names.insert(topic_name.clone());
+                invalid_topic_names.insert(msg.record.topic.clone());
                 continue;
             };
         }
@@ -286,17 +283,13 @@ impl ProducerTask {
         invalid_topic_names
     }
 
-    fn create_produce_contexts(
-        &mut self,
-        topic_names: &[TopicName],
-        chunk: ProduceChunk<'_, impl Partitioner>,
-    ) {
+    fn create_produce_contexts(&mut self, chunk: ProduceChunk<'_, impl Partitioner>) {
         let cluster = &self.client.borrow_cluster();
 
         let mut partitioner = chunk.partitioner.new_partitioner(cluster);
 
-        for (topic_name, mut msg) in zip(topic_names, chunk.messages) {
-            let topic_data = match cluster.get_topic_metadata_by_name(topic_name) {
+        for mut msg in chunk.messages {
+            let topic_data = match cluster.get_topic_metadata_by_name(&msg.record.topic) {
                 Ok(topic_data) => topic_data,
                 Err(e) => {
                     let _ = msg.tx.send(Err(e.into()));
@@ -348,7 +341,10 @@ impl ProducerTask {
                 .or_default();
 
             let records = part_map
-                .entry(TopicPartition::new(topic_name.clone(), partition.index))
+                .entry(TopicPartition::new(
+                    msg.record.topic.clone(),
+                    partition.index,
+                ))
                 .or_default();
 
             partitioner.partition_validated(&msg.record, partition);
