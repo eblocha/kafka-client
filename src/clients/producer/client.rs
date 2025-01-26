@@ -257,7 +257,10 @@ impl ProducerTask {
         let mut partitioner = chunk.partitioner.new_partitioner(cluster);
 
         for msg in chunk.messages.iter_mut() {
-            let Ok(topic_data) = cluster.get_topic_metadata_by_name(&msg.record.topic) else {
+            let Ok(topic_data) = cluster
+                .metadata
+                .get_topic_metadata_by_name(&msg.record.topic)
+            else {
                 invalid_topic_names.insert(msg.record.topic.clone());
                 continue;
             };
@@ -289,7 +292,10 @@ impl ProducerTask {
         let mut partitioner = chunk.partitioner.new_partitioner(cluster);
 
         for mut msg in chunk.messages {
-            let topic_data = match cluster.get_topic_metadata_by_name(&msg.record.topic) {
+            let topic_data = match cluster
+                .metadata
+                .get_topic_metadata_by_name(&msg.record.topic)
+            {
                 Ok(topic_data) => topic_data,
                 Err(e) => {
                     let _ = msg.tx.send(Err(e.into()));

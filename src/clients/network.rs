@@ -71,7 +71,7 @@ impl NetworkClient {
 
     fn get_handle_for_broker(&self, broker_id: i32) -> Result<NodeTaskHandle, KafkaError> {
         let cluster = self.borrow_cluster();
-        let Some(entry) = cluster.brokers.0.get(&broker_id) else {
+        let Some(entry) = cluster.brokers.get_connection_for(broker_id) else {
             tracing::error!("no broker handle for id {broker_id}");
             return Err(KafkaChannelError::Closed.into());
         };
@@ -91,7 +91,7 @@ impl NetworkClient {
     ) {
         self.selector.tx_cluster.send_modify(|cluster| {
             for id in topics {
-                cluster.invalidate_topic(id);
+                cluster.metadata.invalidate_topic(id);
             }
         });
     }
@@ -105,7 +105,12 @@ impl NetworkClient {
             let cluster_state = self.borrow_cluster();
             topic_names
                 .into_iter()
-                .filter(|topic_name| cluster_state.get_topic_key_by_name(*topic_name).is_none())
+                .filter(|topic_name| {
+                    cluster_state
+                        .metadata
+                        .get_topic_key_by_name(*topic_name)
+                        .is_none()
+                })
                 .map(|name| MetadataRequestTopic::default().with_name(Some(name.clone())))
                 .collect::<Vec<_>>()
         };

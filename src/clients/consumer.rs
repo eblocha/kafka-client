@@ -190,7 +190,7 @@ impl ConsumerTask {
             .load_topic_metadata(self.subscriptions.iter())
             .await?;
 
-        let cluster = self.client.borrow_cluster();
+        let cluster = &self.client.borrow_cluster().metadata;
 
         let mut broker_id_to_fetch_req = FxHashMap::<i32, FetchRequest>::default();
         let mut broker_id_to_offset_req = FxHashMap::<i32, ListOffsetsRequest>::default();
@@ -279,8 +279,6 @@ impl ConsumerTask {
             }
         }
 
-        drop(cluster);
-
         if !invalid_topics.is_empty() {
             self.client.invalidate_topic_metadata(invalid_topics);
         }
@@ -323,7 +321,7 @@ impl ConsumerTask {
                         let topic_name = if !response.topic.is_empty() {
                             response.topic
                         } else {
-                            let cluster = self.client.borrow_cluster();
+                            let cluster = &self.client.borrow_cluster().metadata;
                             let Some(name) = cluster
                                 .get_topic_metadata(&TopicKey::Uuid(response.topic_id))
                                 .ok()

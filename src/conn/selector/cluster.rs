@@ -5,7 +5,7 @@ use kafka_protocol::{
     messages::{
         metadata_request::MetadataRequestTopic,
         metadata_response::{MetadataResponsePartition, MetadataResponseTopic},
-        TopicName,
+        MetadataResponse, TopicName,
     },
     protocol::StrBytes,
 };
@@ -26,7 +26,7 @@ pub struct BrokerMapEntry {
 ///
 /// Used to send requests to specific brokers, or the current least-loaded broker.
 #[derive(Debug, Clone, From, Default)]
-pub struct BrokerMap(#[from] pub(crate) FxHashMap<i32, BrokerMapEntry>);
+pub struct BrokerMap(#[from] pub(super) FxHashMap<i32, BrokerMapEntry>);
 
 fn least_in_flight(left: &(&i32, &BrokerMapEntry), right: &(&i32, &BrokerMapEntry)) -> Ordering {
     left.1.handle.in_flight().cmp(&right.1.handle.in_flight())
@@ -43,6 +43,10 @@ fn least_failure_streak(
 }
 
 impl BrokerMap {
+    /// Get a broker map entry for a specific broker by id.
+    pub fn get_connection_for(&self, broker_id: i32) -> Option<&BrokerMapEntry> {
+        self.0.get(&broker_id)
+    }
     /// Get the current "best" connection handle.
     ///
     /// This will prefer connected brokers with the minimum number of pending requests, then favor the minimum number of
@@ -250,6 +254,12 @@ impl From<&TopicMetadata> for MetadataRequestTopic {
 pub struct Cluster {
     /// Mapping of all currently-known broker nodes.
     pub brokers: BrokerMap,
+    /// The cluster's metadata.
+    pub metadata: ClusterMetadata,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ClusterMetadata {
     /// The cluster id returned by the metadata.
     pub cluster_id: Option<StrBytes>,
     /// The broker id of the controller node.
@@ -275,7 +285,9 @@ impl Cluster {
             ..Default::default()
         }
     }
+}
 
+impl ClusterMetadata {
     #[inline]
     pub fn get_topic_key_by_name(&self, name: &TopicName) -> Option<&TopicKey> {
         self.topic_keys_by_name.get(name)
@@ -302,6 +314,7 @@ impl Cluster {
         self.get_topic_metadata(key)
     }
 
+    /// Invalidate a topic, triggering its refresh.
     pub(crate) fn invalidate_topic(&mut self, id: &TopicName) {
         let Some(key) = self.topic_keys_by_name.remove(id) else {
             return;
@@ -310,7 +323,33 @@ impl Cluster {
         self.topics.remove(&key);
     }
 
-    pub(crate) fn insert_update(&mut self, topic_meta: MetadataResponseTopic) {
+    /// Create a [`Vec<MetadataRequestTopic>`] that will refresh metadata for all topics known to the client.
+    pub(super) fn create_topics_for_refresh(&self) -> Vec<MetadataRequestTopic> {
+        self.topic_keys_by_name
+            .iter()
+            .map(|(name, key)| {
+                let mut req = MetadataRequestTopic::default();
+                req.name = Some(name.clone());
+                if let TopicKey::Uuid(uuid) = key {
+                    req.topic_id = *uuid;
+                }
+
+                req
+            })
+            .collect()
+    }
+
+    /// Update the metadata from a successful [`MetadataResponse`].
+    pub(super) fn update_with(&mut self, response: MetadataResponse) {
+        self.cluster_id = response.cluster_id;
+        self.controller_id = response.controller_id.0;
+        // merge topic metadata with existing metadata
+        for topic_meta in response.topics.into_iter() {
+            self.insert_update(topic_meta);
+        }
+    }
+
+    fn insert_update(&mut self, topic_meta: MetadataResponseTopic) {
         let key = topic_meta
             .topic_id
             .as_optional()
@@ -327,20 +366,5 @@ impl Cluster {
             }
             None => {}
         }
-    }
-
-    pub(crate) fn create_topics_for_refresh(&self) -> Vec<MetadataRequestTopic> {
-        self.topic_keys_by_name
-            .iter()
-            .map(|(name, key)| {
-                let mut req = MetadataRequestTopic::default();
-                req.name = Some(name.clone());
-                if let TopicKey::Uuid(uuid) = key {
-                    req.topic_id = *uuid;
-                }
-
-                req
-            })
-            .collect()
     }
 }

@@ -230,10 +230,9 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                         "attempting to refresh metadata"
                     );
 
-                    let topics = req
-                        .as_ref()
-                        .map(|r| r.topics.clone())
-                        .unwrap_or_else(|| Some(self.tx.borrow().create_topics_for_refresh()));
+                    let topics = req.as_ref().map(|r| r.topics.clone()).unwrap_or_else(|| {
+                        Some(self.tx.borrow().metadata.create_topics_for_refresh())
+                    });
 
                     let backoff = self
                         .metadata_backoff
@@ -360,10 +359,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
 
         self.tx.send_modify(|cluster| {
             cluster.brokers = self.hosts.clone();
-            // merge topic metadata with existing metadata
-            for topic_meta in metadata.topics.into_iter() {
-                cluster.insert_update(topic_meta);
-            }
+            cluster.metadata.update_with(metadata);
         });
     }
 

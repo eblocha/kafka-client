@@ -111,7 +111,7 @@ impl Partitioner for RoundRobinPartitioner {
         let mut sent_records = self.sent_records.take().unwrap_or_default();
 
         sent_records.retain(|tp, _| {
-            let Ok(metadata) = cluster.get_topic_metadata_by_name(tp.name()) else {
+            let Ok(metadata) = cluster.metadata.get_topic_metadata_by_name(tp.name()) else {
                 return false;
             };
 
