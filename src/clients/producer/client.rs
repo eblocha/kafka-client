@@ -45,7 +45,6 @@ pub struct ProducerRecord {
 
 struct ProduceContext {
     record: Record,
-    #[allow(unused)]
     tx: oneshot::Sender<Result<RecordMetadata, KafkaError>>,
 }
 
@@ -86,9 +85,15 @@ struct ProducerTask {
     /// Mapping of broker id to a mapping of topic partition to a batch of records to send to the topic.
     ///
     /// This is mutated for performance during sends.
-    ///
-    /// TODO: when to remove an entry from the inner map?
     context_mappings: FxHashMap<i32, FxHashMap<TopicPartition, Vec<ProduceContext>>>,
+    /// Used while creating new requests to remove unused mappings from `context_mappings`.
+    ///
+    /// This is mutated for performance during sends.
+    empty_leaders: Vec<i32>,
+    /// Used while creating new requests to remove unused mappings from `context_mappings`.
+    ///
+    /// This is mutated for performance during sends.
+    empty_partitions: Vec<TopicPartition>,
 }
 
 const CHUNK_SIZE: usize = 2000;
@@ -99,6 +104,8 @@ impl ProducerTask {
         Self {
             client,
             context_mappings: Default::default(),
+            empty_leaders: Default::default(),
+            empty_partitions: Default::default(),
         }
     }
 
@@ -154,10 +161,20 @@ impl ProducerTask {
         self.create_produce_contexts(&topic_names, chunk);
 
         for (leader_id, partitions) in self.context_mappings.iter_mut() {
+            if partitions.is_empty() {
+                self.empty_leaders.push(*leader_id);
+                continue;
+            }
+
             let mut req = ProduceRequest::default();
             let mut topic_data = FxHashMap::<TopicName, TopicProduceData>::default();
 
             for (tp, contexts) in partitions.iter_mut() {
+                if contexts.is_empty() {
+                    self.empty_partitions.push(tp.clone());
+                    continue;
+                }
+
                 let mut records = BytesMut::new();
 
                 if let Err(e) = RecordBatchEncoder::encode(
@@ -190,6 +207,10 @@ impl ProducerTask {
                     );
             }
 
+            for tp in self.empty_partitions.drain(..) {
+                partitions.remove(&tp);
+            }
+
             for (name, mut data) in topic_data.into_iter() {
                 data.name = name;
                 req.topic_data.push(data);
@@ -218,6 +239,10 @@ impl ProducerTask {
                     }
                 }
             }
+        }
+
+        for leader_id in self.empty_leaders.drain(..) {
+            self.context_mappings.remove(&leader_id);
         }
 
         Ok(())
