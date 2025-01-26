@@ -644,7 +644,7 @@ mod test {
         );
 
         assert!(
-            matches!(channel_msg.tx, ResponseSender::Await(_)),
+            matches!(channel_msg.tx, ResponseSender::OnResponse(_)),
             "expected client to await the response, but it was abandoned"
         );
 

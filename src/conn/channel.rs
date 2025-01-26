@@ -51,18 +51,18 @@ pub type AwaitResponseSender = oneshot::Sender<Result<DecodableResponse, io::Err
 #[derive(Debug)]
 pub enum ResponseSender {
     /// A response sender that needs the response object, so it should wait until a response has been received.
-    Await(AwaitResponseSender),
+    OnResponse(AwaitResponseSender),
     /// A response sender that only wants to be notified when its request is flushed.
-    Abandon(oneshot::Sender<Result<(), io::Error>>),
+    OnFlush(oneshot::Sender<Result<(), io::Error>>),
 }
 
 impl ResponseSender {
     pub fn send_err(self, err: io::Error) {
         match self {
-            ResponseSender::Await(sender) => {
+            ResponseSender::OnResponse(sender) => {
                 let _ = sender.send(Err(err));
             }
-            ResponseSender::Abandon(sender) => {
+            ResponseSender::OnFlush(sender) => {
                 let _ = sender.send(Err(err));
             }
         }
@@ -70,7 +70,7 @@ impl ResponseSender {
 
     #[cfg(test)]
     pub fn send_if_awaiter(self, response: DecodableResponse) {
-        if let ResponseSender::Await(sender) = self {
+        if let ResponseSender::OnResponse(sender) = self {
             let _ = sender.send(Ok(response));
         }
     }
@@ -175,10 +175,10 @@ impl<IO> KafkaChannelTask<IO> {
                                 tracing::trace!("io sink flushed frames");
                                 for (correlation_id, sender, record) in sender_batch.drain(..) {
                                     match sender {
-                                        ResponseSender::Await(sender) => {
+                                        ResponseSender::OnResponse(sender) => {
                                             in_flight.insert(correlation_id, (record, sender));
                                         }
-                                        ResponseSender::Abandon(sender) => {
+                                        ResponseSender::OnFlush(sender) => {
                                             let _ = sender.send(Ok(()));
                                         }
                                     }
@@ -323,7 +323,7 @@ pub async fn send_on<R: Sendable>(
     sender
         .send(KafkaChannelMessage {
             versioned,
-            tx: ResponseSender::Await(tx),
+            tx: ResponseSender::OnResponse(tx),
         })
         .await?;
 
@@ -349,7 +349,7 @@ pub async fn send_on_and_forget<R: Sendable>(
     sender
         .send(KafkaChannelMessage {
             versioned,
-            tx: ResponseSender::Abandon(tx),
+            tx: ResponseSender::OnFlush(tx),
         })
         .await?;
 

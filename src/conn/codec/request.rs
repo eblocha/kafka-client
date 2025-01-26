@@ -149,6 +149,6 @@ mod test {
             )
             .unwrap();
 
-        assert_eq!(bytes.into_iter().collect::<Vec<u8>>(), expected);
+        assert_eq!(bytes.to_vec(), expected);
     }
 }
