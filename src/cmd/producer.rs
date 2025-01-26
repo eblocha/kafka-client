@@ -24,14 +24,29 @@ use super::Run;
 
 #[derive(Subcommand)]
 pub enum ProducerCommands {
+    /// Send randomly generated data to a topic and report timing.
+    ///
+    /// This will not wait for responses or verify the data was sent properly.
     Random {
-        #[arg(short, long)]
+        /// The topic to send random data to
+        #[arg(short, long, required = true)]
         topic: String,
+        /// Number of records to send
+        #[arg(short, long, default_value_t = 800_000)]
+        count: u64,
+        /// Number of bytes to generate for each record value
+        #[arg(short, long, default_value_t = 100)]
+        size: usize,
     },
+    /// Send the contents of a file to a topic, sending each line as a separate record.
+    ///
+    /// This command will exit with an error if the send fails.
     File {
-        #[arg(short, long)]
+        /// The file to send
+        #[arg(short, long, required = true)]
         file: PathBuf,
-        #[arg(short, long)]
+        /// The topic to send to
+        #[arg(short, long, required = true)]
         topic: String,
     },
 }
@@ -41,7 +56,9 @@ impl Run for ProducerCommands {
 
     async fn run(self, client: NetworkClient) -> anyhow::Result<()> {
         match self {
-            ProducerCommands::Random { topic } => ProduceRandom { topic }.run(client).await,
+            ProducerCommands::Random { topic, count, size } => {
+                ProduceRandom { topic, count, size }.run(client).await
+            }
             ProducerCommands::File { file, topic } => {
                 ProduceFromFile { file, topic }.run(client).await
             }
@@ -51,9 +68,9 @@ impl Run for ProducerCommands {
 
 pub struct ProduceRandom {
     topic: String,
+    count: u64,
+    size: usize,
 }
-
-const SIZE: i32 = 800_000;
 
 impl Run for ProduceRandom {
     type Response = ();
@@ -64,7 +81,7 @@ impl Run for ProduceRandom {
 
         let now = Instant::now();
 
-        let bar = ProgressBar::new(SIZE as u64);
+        let bar = ProgressBar::new(self.count);
         bar.set_style(
             ProgressStyle::with_template(
                 "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg} {per_sec}",
@@ -75,11 +92,11 @@ impl Run for ProduceRandom {
 
         let mut rng = rand::thread_rng();
 
-        for _i in 0..SIZE {
-            let mut msg = [0_u8; 32];
+        for _i in 0..self.count {
+            let mut msg = vec![0_u8; self.size];
             rng.fill_bytes(&mut msg);
 
-            let msg = Bytes::from(msg.to_vec());
+            let msg = Bytes::from(msg);
 
             producer
                 .send(ProducerRecord {
@@ -101,10 +118,7 @@ impl Run for ProduceRandom {
 
         let finish = now.elapsed();
 
-        println!(
-            "produced {} messages in {finish:?}",
-            HumanCount(SIZE as u64)
-        );
+        println!("produced {} messages in {finish:?}", HumanCount(self.count));
 
         Ok(())
     }

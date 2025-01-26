@@ -15,24 +15,35 @@ use super::Run;
 
 #[derive(Subcommand)]
 pub enum AdminCommands {
+    /// List all topic names in the cluster.
     ListTopics {
+        /// Exclude topics marked as internal.
         #[arg(long, default_value_t = false)]
         exclude_internal: bool,
     },
+    /// Describe the partitions, replicas, and isr nodes for a set of topics.
     DescribeTopics {
+        /// A comma-separated list of topic names to describe.
         #[arg(short, long, value_delimiter = ',', num_args = 1.., required = true)]
         topics: Vec<String>,
     },
+    /// Describe the cluster's nodes, controller, and cluster id information.
     DescribeCluster {},
+    /// Create a topic.
     CreateTopics {
+        /// The topic name.
         #[arg(long, required = true)]
         name: String,
+        /// Number of partitions. If omitted, this will use the server default.
         #[arg(short, long)]
         partitions: Option<i32>,
+        /// Replication factor. If omitted, this will use the server default.
         #[arg(short, long)]
         replication_factor: Option<i16>,
     },
+    /// Delete a set of topics, removing all data. This is irreversible.
     DeleteTopics {
+        /// A comma-separated list of topic names to delete.
         #[arg(short, long, value_delimiter = ',', num_args = 1.., required = true)]
         topics: Vec<String>,
     },

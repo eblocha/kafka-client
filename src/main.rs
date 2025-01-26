@@ -17,17 +17,27 @@ struct Cli {
     #[command(subcommand)]
     client: Client,
 
-    #[arg(short, long, value_delimiter = ',', num_args = 1.., required = true, help = "bootstrap servers (required)")]
+    /// A comma-separated list of bootstrap servers to start the client with.
+    ///
+    /// This does not need to be a list of every address in the cluster, as the client will use one of the servers to
+    /// detect all nodes in the cluster.
+    ///
+    /// If a provided address fails, the next options will be tried.
+    #[arg(short, long, value_delimiter = ',', num_args = 1.., required = true)]
     bootstrap_servers: Vec<BrokerHost>,
 }
 
 #[derive(Subcommand)]
 enum Client {
+    /// Perform administrative commands.
     #[command(subcommand)]
     Admin(AdminCommands),
+    /// Produce messages to a topic.
     #[command(subcommand)]
     Producer(ProducerCommands),
+    /// Start a consumer and print any record values from the topic to stdout.
     Consumer {
+        /// A comma-separated list of topic names to listen on.
         #[arg(short, long, value_delimiter = ',', num_args = 1.., required = true)]
         topics: Vec<String>,
     },
