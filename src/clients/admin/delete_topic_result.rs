@@ -1,15 +1,14 @@
-use std::sync::Arc;
-
-use kafka_protocol::messages::delete_topics_response::DeletableTopicResult;
+use kafka_protocol::messages::{delete_topics_response::DeletableTopicResult, TopicName};
 use uuid::Uuid;
 
 use crate::{proto::error_codes::ErrorCode, util::UuidExt};
 
 pub struct DeletedTopic {
+    pub name: Option<TopicName>,
     pub id: Option<Uuid>,
 }
 
-pub type DeleteTopicsResult = indexmap::IndexMap<Arc<str>, Result<DeletedTopic, ErrorCode>>;
+pub type DeleteTopicsResult = Vec<Result<DeletedTopic, ErrorCode>>;
 
 impl TryFrom<DeletableTopicResult> for DeletedTopic {
     type Error = ErrorCode;
@@ -20,6 +19,7 @@ impl TryFrom<DeletableTopicResult> for DeletedTopic {
         }
 
         Ok(Self {
+            name: value.name,
             id: value.topic_id.as_optional(),
         })
     }

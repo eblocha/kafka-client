@@ -11,7 +11,7 @@ use crate::{
     common::TopicCollection,
     error::KafkaError,
     proto::ver::with_max_version,
-    util::{StrBytesExt, TopicNameExt},
+    util::TopicNameExt,
 };
 
 use super::{
@@ -93,15 +93,16 @@ impl AdminClient {
             }))
             .await?;
 
+        let broker_map = response
+            .brokers
+            .into_iter()
+            .map(|broker| (broker.node_id.0, broker))
+            .collect();
+
         Ok(response
             .topics
             .into_iter()
-            .map(|(name, topic)| {
-                (
-                    name.as_arc_str(),
-                    TopicDescription::try_from((name, topic, &response.brokers)),
-                )
-            })
+            .map(|topic| TopicDescription::try_from((topic, &broker_map)))
             .collect())
     }
 
@@ -119,6 +120,7 @@ impl AdminClient {
 
                     match topic {
                         NewTopic::AutoAssignment(auto) => {
+                            new_topic.name = TopicName::from_string(auto.name);
                             if let Some(partitions) = auto.partitions {
                                 new_topic.num_partitions = partitions;
                             } else {
@@ -131,10 +133,10 @@ impl AdminClient {
                                 new_topic.replication_factor = -1;
                             }
 
-                            req.topics
-                                .insert(TopicName::from_string(auto.name), new_topic);
+                            req.topics.push(new_topic);
                         }
                         NewTopic::ExplicitAssignment(explicit) => {
+                            new_topic.name = TopicName::from_string(explicit.name);
                             new_topic.assignments = explicit
                                 .replicas_assignments
                                 .into_iter()
@@ -142,14 +144,14 @@ impl AdminClient {
                                     let broker_ids =
                                         broker_ids.into_iter().map(BrokerId::from).collect();
                                     let mut assignment = CreatableReplicaAssignment::default();
+                                    assignment.partition_index = partition;
                                     assignment.broker_ids = broker_ids;
 
-                                    (partition, assignment)
+                                    assignment
                                 })
                                 .collect();
 
-                            req.topics
-                                .insert(TopicName::from_string(explicit.name), new_topic);
+                            req.topics.push(new_topic);
                         }
                     }
                 }
@@ -161,7 +163,7 @@ impl AdminClient {
         Ok(response
             .topics
             .into_iter()
-            .map(|(name, result)| (name.as_arc_str(), TopicMetadataAndConfig::try_from(result)))
+            .map(TopicMetadataAndConfig::try_from)
             .collect())
     }
 
@@ -213,7 +215,7 @@ impl AdminClient {
         Ok(response
             .responses
             .into_iter()
-            .map(|(name, result)| (name.as_arc_str(), DeletedTopic::try_from(result)))
+            .map(DeletedTopic::try_from)
             .collect())
     }
 

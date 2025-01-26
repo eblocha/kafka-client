@@ -51,8 +51,7 @@ pub struct RandomPartitionerSession(ThreadRng);
 impl PartitionerSession for RandomPartitionerSession {
     fn partition(&mut self, record: &mut ProducerRecord, topic_data: &TopicMetadata) {
         record.partition = topic_data
-            .partitions
-            .iter()
+            .iter_partition_results()
             .filter_map(|result| match result {
                 Ok(p) => Some(p.index),
                 Err(_) => None,
@@ -139,13 +138,13 @@ impl Partitioner for KeyHashPartitioner {
 
 impl PartitionerSession for KeyHashPartitioner {
     fn partition(&mut self, record: &mut ProducerRecord, topic_data: &TopicMetadata) {
-        if topic_data.partitions.is_empty() {
+        if topic_data.is_empty() {
             return;
         }
 
         let mut hasher = DefaultHasher::new();
         record.key.hash(&mut hasher);
-        let index = hasher.finish() as i32 % topic_data.partitions.len() as i32;
+        let index = hasher.finish() as i32 % topic_data.len() as i32;
 
         record.partition = Some(index);
     }

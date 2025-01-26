@@ -362,7 +362,6 @@ mod test {
 
     use bytes::{BufMut, BytesMut};
     use kafka_protocol::{
-        indexmap::IndexMap,
         messages::{
             metadata_response::MetadataResponseBroker, ApiKey, BrokerId, MetadataRequest,
             MetadataResponse, RequestHeader, ResponseHeader,
@@ -378,8 +377,8 @@ mod test {
     fn create_request_response(
         correlation_id: i32,
     ) -> ((MetadataRequest, BytesMut), (MetadataResponse, BytesMut)) {
-        let req_header_version = ApiKey::MetadataKey.request_header_version(REQ_VERSION);
-        let res_header_version = ApiKey::MetadataKey.response_header_version(REQ_VERSION);
+        let req_header_version = ApiKey::Metadata.request_header_version(REQ_VERSION);
+        let res_header_version = ApiKey::Metadata.response_header_version(REQ_VERSION);
 
         // REQUEST
         let request = {
@@ -392,7 +391,7 @@ mod test {
         let request_header = {
             let mut h = RequestHeader::default();
             h.correlation_id = correlation_id;
-            h.request_api_key = ApiKey::MetadataKey as i16;
+            h.request_api_key = ApiKey::Metadata as i16;
             h.request_api_version = REQ_VERSION;
             h.client_id = None;
             h
@@ -412,7 +411,7 @@ mod test {
         // RESPONSE
         let response = {
             let mut r = MetadataResponse::default();
-            r.brokers = IndexMap::from_iter([(BrokerId(0), MetadataResponseBroker::default())]);
+            r.brokers = vec![MetadataResponseBroker::default()];
             r.controller_id = BrokerId(0);
             r
         };

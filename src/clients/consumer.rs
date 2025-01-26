@@ -10,7 +10,7 @@ use kafka_protocol::{
         list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic},
         FetchRequest, ListOffsetsRequest, ResponseKind, TopicName,
     },
-    records::{Record, RecordBatchDecoder},
+    records::Record,
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -21,7 +21,7 @@ use crate::{
     backoff::{exponential_backoff, BackoffSession},
     clients::network::NetworkClient,
     common::TopicPartition,
-    conn::selector::TopicKey,
+    conn::{selector::TopicKey, RecordBatchDecoder},
     error::KafkaError,
     proto::{error_codes::ErrorCode, request::KafkaRequest},
     util::TopicNameExt,
@@ -214,7 +214,8 @@ impl ConsumerTask {
             let mut broker_id_to_fetch_topic = FnvHashMap::<i32, FetchTopic>::default();
             let mut broker_id_to_offset_topic = FnvHashMap::<i32, ListOffsetsTopic>::default();
 
-            for (partition_index, partition_meta) in topic_meta.partitions.iter().enumerate() {
+            for (partition_index, partition_meta) in topic_meta.iter_partition_results().enumerate()
+            {
                 let tp = TopicPartition::new(topic_name.clone(), partition_index as i32);
 
                 let Ok(partition_meta) = partition_meta else {
@@ -320,19 +321,20 @@ impl ConsumerTask {
             };
 
             match event {
-                ResponseKind::FetchResponse(fetch) => {
+                ResponseKind::Fetch(fetch) => {
                     for response in fetch.responses {
                         let topic_name = if !response.topic.is_empty() {
                             response.topic
                         } else {
                             let cluster = self.client.borrow_cluster();
-                            let Ok(topic_name) =
-                                cluster.get_topic_metadata(&TopicKey::Uuid(response.topic_id))
+                            let Some(name) = cluster
+                                .get_topic_metadata(&TopicKey::Uuid(response.topic_id))
+                                .ok()
+                                .and_then(|meta| meta.name.clone())
                             else {
-                                tracing::warn!("got a fetch response for a topic we do not see in our cluster metadata");
                                 continue;
                             };
-                            topic_name.name.clone()
+                            name
                         };
 
                         if !self.subscriptions.contains(&topic_name) {
@@ -391,7 +393,7 @@ impl ConsumerTask {
                         }
                     }
                 }
-                ResponseKind::ListOffsetsResponse(offsets) => {
+                ResponseKind::ListOffsets(offsets) => {
                     for top in offsets.topics {
                         for part in top.partitions {
                             if part.error_code != ErrorCode::None as i16 {

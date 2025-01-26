@@ -2,7 +2,6 @@ use std::{fmt::Display, sync::Arc};
 
 use kafka_protocol::messages::{
     describe_cluster_response::DescribeClusterBroker, metadata_response::MetadataResponseBroker,
-    BrokerId,
 };
 
 use crate::util::StrBytesExt;
@@ -35,20 +34,20 @@ impl Display for Node {
     }
 }
 
-impl From<(BrokerId, &MetadataResponseBroker)> for Node {
-    fn from((id, broker): (BrokerId, &MetadataResponseBroker)) -> Self {
+impl From<&MetadataResponseBroker> for Node {
+    fn from(broker: &MetadataResponseBroker) -> Self {
         Self {
-            id: id.0,
+            id: broker.node_id.0,
             host: BrokerHost::from(broker),
             rack: broker.rack.clone().map(|s| s.as_arc_str()),
         }
     }
 }
 
-impl From<(BrokerId, &DescribeClusterBroker)> for Node {
-    fn from((id, broker): (BrokerId, &DescribeClusterBroker)) -> Self {
+impl From<&DescribeClusterBroker> for Node {
+    fn from(broker: &DescribeClusterBroker) -> Self {
         Self {
-            id: id.0,
+            id: broker.broker_id.0,
             host: BrokerHost::from(broker),
             rack: broker.rack.clone().map(|s| s.as_arc_str()),
         }

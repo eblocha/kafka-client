@@ -1,3 +1,5 @@
+use std::iter::zip;
+
 use anyhow::bail;
 use clap::Subcommand;
 
@@ -54,14 +56,14 @@ impl AdminCommands {
             }
             AdminCommands::DescribeTopics { topics } => {
                 let mut some_failed = false;
-                let results = client.describe_topics(topics).await?;
+                let results = client.describe_topics(topics.clone()).await?;
 
-                for (name, result) in results {
+                for (name, result) in zip(topics, results) {
                     some_failed = result.is_err();
                     let topic = match result {
                         Ok(topic) => topic,
                         Err(e) => {
-                            println!("{}: ERROR: {}", name, e);
+                            println!("{name}: ERROR: {e}");
                             continue;
                         }
                     };
@@ -73,7 +75,11 @@ impl AdminCommands {
 
                     println!(
                         "{}{}{}",
-                        topic.name,
+                        topic
+                            .name
+                            .as_ref()
+                            .map(|name| name.as_str())
+                            .unwrap_or(name.as_str()),
                         id_text,
                         if topic.is_internal { " (internal)" } else { "" }
                     );
@@ -152,7 +158,7 @@ impl AdminCommands {
                     })])
                     .await?;
 
-                for (name, result) in results {
+                for result in results {
                     some_failed = result.is_err();
                     let result = match result {
                         Ok(result) => result,
@@ -169,7 +175,10 @@ impl AdminCommands {
 
                     println!(
                         "Created topic: {}{} with partitions {} and replication factor {}",
-                        name, id_text, result.partitions, result.replication_factor
+                        result.name.as_str(),
+                        id_text,
+                        result.partitions,
+                        result.replication_factor
                     );
                 }
 
@@ -179,16 +188,27 @@ impl AdminCommands {
             }
             AdminCommands::DeleteTopics { topics } => {
                 let mut some_failed = false;
-                let results = client.delete_topics(TopicCollection::Names(topics)).await?;
+                let results = client
+                    .delete_topics(TopicCollection::Names(topics.clone()))
+                    .await?;
 
-                for (name, result) in results.into_iter() {
+                for (name, result) in zip(topics, results.into_iter()) {
                     some_failed = result.is_err();
-                    let message_text = match result {
-                        Ok(_) => "OK".to_owned(),
-                        Err(e) => format!("ERROR: {e}"),
+                    match result {
+                        Ok(deleted) => {
+                            println!(
+                                "{}: OK",
+                                deleted
+                                    .name
+                                    .as_ref()
+                                    .map(|t| t.as_str())
+                                    .unwrap_or(name.as_str())
+                            );
+                        }
+                        Err(e) => {
+                            println!("{name}: ERROR: {e}");
+                        }
                     };
-
-                    println!("{}: {}", name, message_text);
                 }
 
                 if some_failed {
