@@ -28,7 +28,6 @@ use crate::{
     common::TopicPartition,
     error::{ErrorCode, KafkaError},
     proto::ver::with_max_version,
-    util::find_partition,
 };
 
 use super::{KeyHashPartitioner, Partitioner, PartitionerSession};
@@ -195,41 +194,32 @@ impl ProducerTask {
         topic_names: &[TopicName],
         chunk: &mut ProduceChunk<'_, impl Partitioner>,
     ) -> Vec<TopicName> {
-        let topic_map = &self.client.borrow_cluster().metadata.topics;
+        let cluster = &self.client.borrow_cluster();
 
         let mut invalid_topic_names = Vec::<TopicName>::new();
 
-        let mut partitioner = chunk.partitioner.new_partitioner(topic_map);
+        let mut partitioner = chunk.partitioner.new_partitioner(cluster);
 
         for (topic_name, msg) in zip(topic_names, chunk.messages.iter_mut()) {
-            let Some(topic_data) = topic_map.get(topic_name) else {
+            let Ok(topic_data) = cluster.get_topic_metadata_by_name(topic_name) else {
                 invalid_topic_names.push(topic_name.clone());
                 continue;
             };
-
-            if topic_data.error_code != ErrorCode::None as i16 {
-                invalid_topic_names.push(topic_name.clone());
-                continue;
-            }
 
             if msg.user_partition.is_none() {
                 partitioner.partition(&mut msg.record, &topic_data);
             }
 
-            let partition = match msg.record.partition {
-                Some(index) => find_partition(&topic_data.partitions, index),
-                None => None,
-            };
-
-            let Some(partition) = partition else {
+            if msg
+                .record
+                .partition
+                .and_then(|index| topic_data.get_partition_metadata(index).ok())
+                .is_none()
+            {
+                // The partitioner gave us an invalid partition
                 invalid_topic_names.push(topic_name.clone());
                 continue;
             };
-
-            if partition.error_code != ErrorCode::None as i16 {
-                invalid_topic_names.push(topic_name.clone());
-                continue;
-            }
         }
 
         chunk.partitioner.finish_partitioning(partitioner);
@@ -245,31 +235,27 @@ impl ProducerTask {
         let mut mapping =
             FnvHashMap::<i32, HashMap<TopicPartition, Vec<ProduceContext>>>::default();
 
-        let topic_map = &self.client.borrow_cluster().metadata.topics;
+        let cluster = &self.client.borrow_cluster();
 
-        let mut partitioner = chunk.partitioner.new_partitioner(topic_map);
+        let mut partitioner = chunk.partitioner.new_partitioner(cluster);
 
         for (topic_name, mut msg) in zip(topic_names, chunk.messages) {
-            let Some(topic_data) = topic_map.get(topic_name) else {
-                let _ = msg.tx.send(Err(ErrorCode::UnknownTopicOrPartition.into()));
-                continue;
+            let topic_data = match cluster.get_topic_metadata_by_name(topic_name) {
+                Ok(topic_data) => topic_data,
+                Err(e) => {
+                    let _ = msg.tx.send(Err(e.into()));
+                    continue;
+                }
             };
-
-            if topic_data.error_code != ErrorCode::None as i16 {
-                let _ = msg
-                    .tx
-                    .send(Err(ErrorCode::from(topic_data.error_code).into()));
-                continue;
-            }
 
             let original_partition_index = msg.record.partition;
 
             let mut partition = match msg.record.partition {
-                Some(index) => find_partition(&topic_data.partitions, index),
-                None => None,
+                Some(index) => topic_data.get_partition_metadata(index),
+                None => Err(ErrorCode::UnknownTopicOrPartition),
             };
 
-            if partition.is_none() && msg.user_partition.is_none() {
+            if partition.is_err() && msg.user_partition.is_none() {
                 // Only partition records that did not get partitioned in the first round, or whose partitions no
                 // longer exist after refreshing topic data.
                 // However, if there is a user-specified partition, do not re-partition to another one.
@@ -279,22 +265,18 @@ impl ProducerTask {
             // If the index changed, try to find it again
             if original_partition_index != msg.record.partition {
                 partition = match msg.record.partition {
-                    Some(index) => find_partition(&topic_data.partitions, index),
-                    None => None,
+                    Some(index) => topic_data.get_partition_metadata(index),
+                    None => Err(ErrorCode::UnknownTopicOrPartition),
                 };
             }
 
-            let Some(partition) = partition else {
-                let _ = msg.tx.send(Err(ErrorCode::UnknownTopicOrPartition.into()));
-                continue;
+            let partition = match partition {
+                Ok(partition) => partition,
+                Err(e) => {
+                    let _ = msg.tx.send(Err(e.into()));
+                    continue;
+                }
             };
-
-            if partition.error_code != ErrorCode::None as i16 {
-                let _ = msg
-                    .tx
-                    .send(Err(ErrorCode::from(topic_data.error_code).into()));
-                continue;
-            }
 
             let timestamp = msg.record.timestamp.unwrap_or_else(|| {
                 let start = SystemTime::now();
@@ -304,13 +286,10 @@ impl ProducerTask {
                     .unwrap_or_else(|e| -(e.duration().as_millis() as i64))
             });
 
-            let part_map = mapping.entry(partition.leader_id.0).or_default();
+            let part_map = mapping.entry(partition.leader_id).or_default();
 
             let records = part_map
-                .entry(TopicPartition::new(
-                    topic_name.clone(),
-                    partition.partition_index,
-                ))
+                .entry(TopicPartition::new(topic_name.clone(), partition.index))
                 .or_default();
 
             partitioner.partition_validated(&msg.record, partition);

@@ -16,12 +16,12 @@ use tokio::{
     sync::{mpsc, oneshot},
     task::JoinSet,
 };
-use uuid::Uuid;
 
 use crate::{
     backoff::{exponential_backoff, BackoffSession},
     clients::network::NetworkClient,
     common::TopicPartition,
+    conn::selector::TopicKey,
     error::KafkaError,
     proto::{error_codes::ErrorCode, request::KafkaRequest},
     util::TopicNameExt,
@@ -62,7 +62,7 @@ enum ConsumerTaskEvent {
 struct ConsumerTask {
     client: NetworkClient,
     states: HashMap<TopicPartition, PartitionState>,
-    subscriptions: HashMap<Uuid, TopicName>,
+    subscriptions: HashSet<TopicName>,
     join_set: JoinSet<Result<ResponseKind, KafkaError>>,
     tx: mpsc::Sender<Vec<ConsumerRecords>>,
     rx: mpsc::UnboundedReceiver<ConsumerCommand>,
@@ -80,7 +80,7 @@ impl ConsumerTask {
             tx,
             rx,
             states: HashMap::new(),
-            subscriptions: HashMap::new(),
+            subscriptions: HashSet::new(),
             join_set: JoinSet::new(),
             poll_backoff: Default::default(),
         }
@@ -135,15 +135,9 @@ impl ConsumerTask {
 
     async fn subscribe(&mut self, topics: &[TopicName]) -> Result<(), KafkaError> {
         tracing::info!("subscribing to topics {topics:?}");
-        self.client.load_topic_metadata(topics.iter()).await?;
-        let topic_map = &self.client.borrow_cluster().metadata.topics;
-        self.subscriptions = topics
-            .iter()
-            .filter_map(|name| {
-                let metadata = topic_map.get(name);
-                metadata.map(|meta| (meta.topic_id, (*name).clone()))
-            })
-            .collect();
+        self.client.load_topic_metadata(topics).await?;
+
+        self.subscriptions = topics.iter().cloned().collect();
 
         tracing::info!("subscribed to topics {topics:?}");
 
@@ -193,7 +187,7 @@ impl ConsumerTask {
 
     async fn spawn_next(&mut self) -> Result<bool, KafkaError> {
         self.client
-            .load_topic_metadata(self.subscriptions.values())
+            .load_topic_metadata(self.subscriptions.iter())
             .await?;
 
         let cluster = self.client.borrow_cluster();
@@ -205,67 +199,54 @@ impl ConsumerTask {
 
         let mut invalid_topics = HashSet::<&TopicName>::new();
 
-        for (topic_id, topic_name) in self.subscriptions.iter() {
-            let Some(meta) = cluster.metadata.topics.get(topic_name) else {
-                tracing::warn!(topic = topic_name.0.as_str(), "unknown topic");
-                continue;
-            };
-
-            let error_code: ErrorCode = meta.error_code.into();
-
-            if error_code != ErrorCode::None {
-                tracing::error!(
-                    "error fetching metadata for topic {}",
-                    topic_name.0.as_str()
-                );
-                invalid_topics.insert(topic_name);
-                continue;
-            }
-
-            let mut broker_id_to_fetch_topic = FnvHashMap::<i32, FetchTopic>::default();
-            let mut broker_id_to_offset_topic = FnvHashMap::<i32, ListOffsetsTopic>::default();
-
-            for part in meta.partitions.iter() {
-                let error_code: ErrorCode = meta.error_code.into();
-
-                if error_code != ErrorCode::None || part.leader_id.0 < 0 {
+        for topic_name in self.subscriptions.iter() {
+            let topic_meta = match cluster.get_topic_metadata_by_name(topic_name) {
+                Ok(meta) => meta,
+                Err(e) => {
                     tracing::error!(
-                        "error fetching metadata for topic partition {}:{}",
+                        "error fetching metadata for topic {}: {e}",
                         topic_name.0.as_str(),
-                        part.partition_index
                     );
                     invalid_topics.insert(topic_name);
                     continue;
                 }
+            };
+            let mut broker_id_to_fetch_topic = FnvHashMap::<i32, FetchTopic>::default();
+            let mut broker_id_to_offset_topic = FnvHashMap::<i32, ListOffsetsTopic>::default();
 
-                let state = self
-                    .states
-                    .entry(TopicPartition::new(
-                        topic_name.clone(),
-                        part.partition_index,
-                    ))
-                    .or_default();
+            for (partition_index, partition_meta) in topic_meta.partitions.iter().enumerate() {
+                let tp = TopicPartition::new(topic_name.clone(), partition_index as i32);
+
+                let Ok(partition_meta) = partition_meta else {
+                    tracing::error!("error fetching metadata for topic partition {tp}");
+                    invalid_topics.insert(topic_name);
+                    continue;
+                };
+
+                let state = self.states.entry(tp).or_default();
 
                 if let Some(offset) = state.offset {
                     let fetch_topic = broker_id_to_fetch_topic
-                        .entry(part.leader_id.0)
+                        .entry(partition_meta.leader_id)
                         .or_insert_with(|| {
                             let mut fetch_topic = FetchTopic::default();
                             fetch_topic.topic = topic_name.clone();
-                            fetch_topic.topic_id = *topic_id;
+                            if let Some(uuid) = topic_meta.id {
+                                fetch_topic.topic_id = uuid;
+                            }
                             fetch_topic
                         });
 
                     fetch_topic.partitions.push({
                         let mut fetch_partition = FetchPartition::default();
-                        fetch_partition.current_leader_epoch = part.leader_epoch;
-                        fetch_partition.partition = part.partition_index;
+                        fetch_partition.current_leader_epoch = partition_meta.leader_epoch;
+                        fetch_partition.partition = partition_meta.index;
                         fetch_partition.fetch_offset = offset;
                         fetch_partition
                     });
                 } else {
                     let offsets_topic = broker_id_to_offset_topic
-                        .entry(part.leader_id.0)
+                        .entry(partition_meta.leader_id)
                         .or_insert_with(|| {
                             let mut offsets_topic = ListOffsetsTopic::default();
                             offsets_topic.name = topic_name.clone();
@@ -274,7 +255,7 @@ impl ConsumerTask {
 
                     offsets_topic.partitions.push({
                         let mut offsets_partition = ListOffsetsPartition::default();
-                        offsets_partition.partition_index = part.partition_index;
+                        offsets_partition.partition_index = partition_meta.index;
                         offsets_partition.timestamp = -1; // latest
                         offsets_partition
                     });
@@ -286,7 +267,7 @@ impl ConsumerTask {
             for (broker_id, topic) in broker_id_to_fetch_topic {
                 let req = broker_id_to_fetch_req.entry(broker_id).or_insert_with(|| {
                     let mut req = FetchRequest::default();
-                    req.cluster_id = cluster.metadata.cluster_id.clone();
+                    req.cluster_id = cluster.cluster_id.clone();
                     // TODO config
                     req.min_bytes = 4096;
                     req
@@ -303,8 +284,7 @@ impl ConsumerTask {
         drop(cluster);
 
         if !invalid_topics.is_empty() {
-            self.client
-                .invalidate_topic_metadata(invalid_topics.into_iter());
+            self.client.invalidate_topic_metadata(invalid_topics);
         }
 
         for (broker_id, req) in broker_id_to_fetch_req {
@@ -343,15 +323,22 @@ impl ConsumerTask {
                 ResponseKind::FetchResponse(fetch) => {
                     for response in fetch.responses {
                         let topic_name = if !response.topic.is_empty() {
-                            &response.topic
+                            response.topic
                         } else {
-                            let Some(topic_name) = self.subscriptions.get(&response.topic_id)
+                            let cluster = self.client.borrow_cluster();
+                            let Ok(topic_name) =
+                                cluster.get_topic_metadata(&TopicKey::Uuid(response.topic_id))
                             else {
-                                // Not subscribed
+                                tracing::warn!("got a fetch response for a topic we do not see in our cluster metadata");
                                 continue;
                             };
-                            topic_name
+                            topic_name.name.clone()
                         };
+
+                        if !self.subscriptions.contains(&topic_name) {
+                            // Not subscribed
+                            continue;
+                        }
 
                         for part in response.partitions {
                             let error_code: ErrorCode = part.error_code.into();

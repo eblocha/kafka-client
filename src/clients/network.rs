@@ -71,7 +71,7 @@ impl NetworkClient {
 
     fn get_handle_for_broker(&self, broker_id: i32) -> Result<NodeTaskHandle, KafkaError> {
         let cluster = self.borrow_cluster();
-        let Some(entry) = cluster.broker_channels.0.get(&broker_id) else {
+        let Some(entry) = cluster.brokers.0.get(&broker_id) else {
             tracing::error!("no broker handle for id {broker_id}");
             return Err(KafkaChannelError::Closed.into());
         };
@@ -79,7 +79,7 @@ impl NetworkClient {
     }
 
     fn get_best_handle(&self) -> Result<NodeTaskHandle, KafkaError> {
-        let Some(entry) = self.borrow_cluster().broker_channels.get_best_connection() else {
+        let Some(entry) = self.borrow_cluster().brokers.get_best_connection() else {
             return Err(KafkaChannelError::Closed.into());
         };
         Ok(entry.handle)
@@ -87,24 +87,25 @@ impl NetworkClient {
 
     pub(crate) fn invalidate_topic_metadata<'a>(
         &self,
-        topic_names: impl Iterator<Item = &'a TopicName>,
+        topics: impl IntoIterator<Item = &'a TopicName>,
     ) {
         self.selector.tx_cluster.send_modify(|cluster| {
-            for topic_name in topic_names {
-                cluster.metadata.topics.swap_remove(topic_name);
+            for id in topics {
+                cluster.invalidate_topic(id);
             }
         });
     }
 
     pub(crate) async fn load_topic_metadata<'a>(
         &self,
-        topic_names: impl Iterator<Item = &'a TopicName>,
+        topic_names: impl IntoIterator<Item = &'a TopicName>,
     ) -> Result<(), KafkaError> {
         let missing_topic_names = {
             // Closure is to prevent holding the cluster across an await point, which would make this non-Send.
             let cluster_state = self.borrow_cluster();
             topic_names
-                .filter(|topic_name| !cluster_state.metadata.topics.contains_key(*topic_name))
+                .into_iter()
+                .filter(|topic_name| cluster_state.get_topic_key_by_name(*topic_name).is_none())
                 .map(|name| {
                     let mut req_topic = MetadataRequestTopic::default();
                     req_topic.name = Some(name.clone());

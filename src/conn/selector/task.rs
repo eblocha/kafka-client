@@ -1,14 +1,11 @@
 use std::{
-    cmp::Ordering,
     collections::{HashMap, HashSet},
     time::Duration,
 };
 
-use derive_more::derive::From;
 use fnv::FnvHashMap;
 use kafka_protocol::messages::{
-    metadata_request::MetadataRequestTopic, metadata_response::MetadataResponseTopic, BrokerId,
-    MetadataResponse, TopicName,
+    metadata_request::MetadataRequestTopic, BrokerId, MetadataResponse,
 };
 use tokio::{
     sync::{mpsc, oneshot, watch},
@@ -22,6 +19,7 @@ use crate::{
     conn::{
         config::{ConnectionManagerConfig, ConnectionRetryConfig, MetadataRefreshConfig},
         selector::{
+            cluster::BrokerMapEntry,
             metadata::{MetadataRefreshContext, MetadataRefreshTask},
             ConnectionInitError,
         },
@@ -30,94 +28,11 @@ use crate::{
 };
 
 use super::{
+    cluster::{BrokerMap, Cluster},
     connect::{Connect, Tcp},
     metadata::MetadataRefreshResult,
-    node_task::{new_pair, NodeTask, NodeTaskHandle},
+    node_task::{new_pair, NodeTask},
 };
-
-#[derive(Debug, Clone)]
-pub struct BrokerMapEntry {
-    pub node: Node,
-    pub handle: NodeTaskHandle,
-}
-
-/// Mapping of broker id to [`BrokerMapEntry`].
-///
-/// Used to send requests to specific brokers, or the current least-loaded broker.
-#[derive(Debug, Clone, From, Default)]
-pub struct BrokerMap(#[from] pub FnvHashMap<i32, BrokerMapEntry>);
-
-/// Current cluster state since the last metadata refresh.
-#[derive(Debug, Default, Clone)]
-pub struct Cluster {
-    /// Mapping of broker id to the [`BrokerMapEntry`] to send requests to it.
-    pub broker_channels: BrokerMap,
-    /// Metadata response last recieved from a refresh.
-    pub metadata: MetadataResponse,
-}
-
-fn least_in_flight(left: &(&i32, &BrokerMapEntry), right: &(&i32, &BrokerMapEntry)) -> Ordering {
-    left.1.handle.in_flight().cmp(&right.1.handle.in_flight())
-}
-
-fn least_failure_streak(
-    left: &(&i32, &BrokerMapEntry),
-    right: &(&i32, &BrokerMapEntry),
-) -> Ordering {
-    left.1
-        .handle
-        .failure_streak()
-        .cmp(&right.1.handle.failure_streak())
-}
-
-impl BrokerMap {
-    /// Get the current "best" connection handle.
-    ///
-    /// This will prefer connected brokers with the minimum number of pending requests, then favor the minimum number of
-    /// pending requests, connected or not.
-    pub fn get_best_connection(&self) -> Option<BrokerMapEntry> {
-        // TODO shuffle before selecting
-        // prefer connected, non-saturated nodes with least in-flight requests
-        let least_loaded_connected = self
-            .0
-            .iter()
-            .filter_map(|(id, entry)| {
-                if entry.handle.capacity().is_some_and(|cap| cap > 0) {
-                    Some((id, entry))
-                } else {
-                    None
-                }
-            })
-            .min_by(least_in_flight);
-
-        if let Some((_, entry)) = least_loaded_connected {
-            return Some(entry.clone());
-        }
-
-        // next, prefer nodes with no failure streak and least in-flight requests
-        let least_loaded_no_failures = self
-            .0
-            .iter()
-            .filter_map(|(id, entry)| {
-                if entry.handle.failure_streak() == 0 {
-                    Some((id, entry))
-                } else {
-                    None
-                }
-            })
-            .min_by(least_in_flight);
-
-        if let Some((_, entry)) = least_loaded_no_failures {
-            return Some(entry.clone());
-        }
-
-        // lastly, prefer nodes with the lowest failure streak
-        self.0
-            .iter()
-            .min_by(least_failure_streak)
-            .map(|(_, entry)| entry.clone())
-    }
-}
 
 /// A request to fetch metadata for a specific set of topics, or all topics
 pub struct RefreshMetadataRequest {
@@ -129,16 +44,6 @@ pub struct RefreshMetadataRequest {
     pub topics: Option<Vec<MetadataRequestTopic>>,
     /// Channel which sends when the request has been executed
     pub tx: oneshot::Sender<Result<(), KafkaError>>,
-}
-
-fn metadata_request_topic_from_entry(
-    entry: (&TopicName, &MetadataResponseTopic),
-) -> MetadataRequestTopic {
-    let mut req = MetadataRequestTopic::default();
-    req.name = Some(entry.0.clone());
-    req.topic_id = entry.1.topic_id;
-
-    req
 }
 
 /// Keeps connections to each broker alive.
@@ -246,9 +151,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                                 broker_id = ctx.entry.node.id,
                                 host = ?ctx.entry.node.host,
                                 "successfully updated metadata {:?}",
-                                self.hosts
-                                    .0.values().map(|entry| &entry.node)
-                                    .collect::<Vec<_>>()
+                                self.hosts.list_nodes()
                             );
 
                             ctx.backoff.success();
@@ -320,8 +223,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                     }
                 }
                 Event::RefreshStart(req) => {
-                    let Some(entry_for_refresh) =
-                        self.tx.borrow().broker_channels.get_best_connection()
+                    let Some(entry_for_refresh) = self.tx.borrow().brokers.get_best_connection()
                     else {
                         tracing::error!("no connections available for metadata refresh!");
                         break;
@@ -333,17 +235,10 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                         "attempting to refresh metadata"
                     );
 
-                    let topics = req.as_ref().map(|r| r.topics.clone()).unwrap_or_else(|| {
-                        Some(
-                            self.tx
-                                .borrow()
-                                .metadata
-                                .topics
-                                .iter()
-                                .map(metadata_request_topic_from_entry)
-                                .collect(),
-                        )
-                    });
+                    let topics = req
+                        .as_ref()
+                        .map(|r| r.topics.clone())
+                        .unwrap_or_else(|| Some(self.tx.borrow().create_topics_for_refresh()));
 
                     let backoff = self
                         .metadata_backoff
@@ -479,10 +374,10 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         }
 
         self.tx.send_modify(|cluster| {
-            cluster.broker_channels = self.hosts.clone();
+            cluster.brokers = self.hosts.clone();
             // merge topic metadata with existing metadata
             for (topic_name, topic_meta) in metadata.topics.into_iter() {
-                cluster.metadata.topics.insert(topic_name, topic_meta);
+                cluster.insert_update(topic_name, topic_meta);
             }
         });
     }
@@ -620,10 +515,7 @@ impl SelectorTaskHandle {
         let task_tracker = TaskTracker::new();
 
         // create the watch channel for the metadata
-        let (cluster_tx, mut cluster_rx) = watch::channel::<Cluster>(Cluster {
-            broker_channels: hosts.clone(),
-            metadata: Default::default(),
-        });
+        let (cluster_tx, mut cluster_rx) = watch::channel::<Cluster>(Cluster::new(hosts.clone()));
 
         // TODO: what size for refresh channel?
         let (tx_topic_metadata, rx_topic_metadata) = mpsc::channel(1);

@@ -3,13 +3,12 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
 };
 
-use kafka_protocol::messages::{
-    metadata_response::{MetadataResponsePartition, MetadataResponseTopic},
-    TopicName,
-};
 use rand::{rngs::ThreadRng, seq::IteratorRandom};
 
-use crate::{common::TopicPartition, util::find_partition};
+use crate::{
+    common::TopicPartition,
+    conn::selector::{Cluster, PartitionMetadata, TopicMetadata},
+};
 
 use super::ProducerRecord;
 
@@ -21,14 +20,10 @@ use super::ProducerRecord;
 /// random number generator).
 pub trait PartitionerSession {
     /// Pick a partition for the given record. Mutate the record's `partition` field to update it.
-    fn partition(&mut self, record: &mut ProducerRecord, topic_data: &MetadataResponseTopic);
+    fn partition(&mut self, record: &mut ProducerRecord, topic_data: &TopicMetadata);
 
     /// Called when the producer has validated the partition for a record and is about to send it.
-    fn partition_validated(
-        &mut self,
-        record: &ProducerRecord,
-        partition: &MetadataResponsePartition,
-    ) {
+    fn partition_validated(&mut self, record: &ProducerRecord, partition: &PartitionMetadata) {
         let _ = record;
         let _ = partition;
     }
@@ -41,10 +36,7 @@ pub trait Partitioner: Send {
     /// Called when starting to loop over a batch of records to partition them.
     ///
     /// The topic map provided is a reference to the current cluster state.
-    fn new_partitioner(
-        &mut self,
-        topic_map: &indexmap::IndexMap<TopicName, MetadataResponseTopic>,
-    ) -> Self::Session;
+    fn new_partitioner(&mut self, cluster: &Cluster) -> Self::Session;
 
     /// Called after partitioning records in a batch, to allow this partitioner to observe the results.
     fn finish_partitioning(&mut self, session: Self::Session) {
@@ -57,11 +49,14 @@ pub trait Partitioner: Send {
 pub struct RandomPartitionerSession(ThreadRng);
 
 impl PartitionerSession for RandomPartitionerSession {
-    fn partition(&mut self, record: &mut ProducerRecord, topic_data: &MetadataResponseTopic) {
+    fn partition(&mut self, record: &mut ProducerRecord, topic_data: &TopicMetadata) {
         record.partition = topic_data
             .partitions
             .iter()
-            .map(|p| p.partition_index)
+            .filter_map(|result| match result {
+                Ok(p) => Some(p.index),
+                Err(_) => None,
+            })
             .choose(&mut self.0)
     }
 }
@@ -73,10 +68,7 @@ pub struct RandomPartitioner;
 impl Partitioner for RandomPartitioner {
     type Session = RandomPartitionerSession;
 
-    fn new_partitioner(
-        &mut self,
-        _topic_map: &indexmap::IndexMap<TopicName, MetadataResponseTopic>,
-    ) -> Self::Session {
+    fn new_partitioner(&mut self, _cluster: &Cluster) -> Self::Session {
         RandomPartitionerSession::default()
     }
 }
@@ -87,7 +79,7 @@ pub struct RoundRobinPartitionerSession {
 }
 
 impl PartitionerSession for RoundRobinPartitionerSession {
-    fn partition(&mut self, record: &mut ProducerRecord, _topic_data: &MetadataResponseTopic) {
+    fn partition(&mut self, record: &mut ProducerRecord, _topic_data: &TopicMetadata) {
         let min = self
             .sent_records
             .iter_mut()
@@ -99,18 +91,10 @@ impl PartitionerSession for RoundRobinPartitionerSession {
         }
     }
 
-    fn partition_validated(
-        &mut self,
-        record: &ProducerRecord,
-        partition: &MetadataResponsePartition,
-    ) {
-        // Add to the count for the explicit partition
+    fn partition_validated(&mut self, record: &ProducerRecord, partition: &PartitionMetadata) {
         *self
             .sent_records
-            .entry(TopicPartition::new(
-                record.topic.clone(),
-                partition.partition_index,
-            ))
+            .entry(TopicPartition::new(record.topic.clone(), partition.index))
             .or_default() += 1;
     }
 }
@@ -123,18 +107,15 @@ pub struct RoundRobinPartitioner {
 impl Partitioner for RoundRobinPartitioner {
     type Session = RoundRobinPartitionerSession;
 
-    fn new_partitioner(
-        &mut self,
-        topic_map: &indexmap::IndexMap<TopicName, MetadataResponseTopic>,
-    ) -> Self::Session {
+    fn new_partitioner(&mut self, cluster: &Cluster) -> Self::Session {
         let mut sent_records = self.sent_records.take().unwrap_or_default();
 
         sent_records.retain(|tp, _| {
-            let Some(metadata) = topic_map.get(tp.name()) else {
+            let Ok(metadata) = cluster.get_topic_metadata_by_name(tp.name()) else {
                 return false;
             };
 
-            find_partition(&metadata.partitions, tp.partition()).is_some()
+            metadata.has_partition(tp.partition())
         });
 
         RoundRobinPartitionerSession { sent_records }
@@ -151,24 +132,21 @@ pub struct KeyHashPartitioner;
 impl Partitioner for KeyHashPartitioner {
     type Session = Self;
 
-    fn new_partitioner(
-        &mut self,
-        _topic_map: &indexmap::IndexMap<TopicName, MetadataResponseTopic>,
-    ) -> Self::Session {
+    fn new_partitioner(&mut self, _cluster: &Cluster) -> Self::Session {
         *self
     }
 }
 
 impl PartitionerSession for KeyHashPartitioner {
-    fn partition(&mut self, record: &mut ProducerRecord, topic_data: &MetadataResponseTopic) {
+    fn partition(&mut self, record: &mut ProducerRecord, topic_data: &TopicMetadata) {
         if topic_data.partitions.is_empty() {
             return;
         }
 
         let mut hasher = DefaultHasher::new();
         record.key.hash(&mut hasher);
-        let index = hasher.finish() as usize % topic_data.partitions.len();
+        let index = hasher.finish() as i32 % topic_data.partitions.len() as i32;
 
-        record.partition = Some(topic_data.partitions[index].partition_index);
+        record.partition = Some(index);
     }
 }

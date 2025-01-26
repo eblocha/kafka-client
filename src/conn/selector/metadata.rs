@@ -4,7 +4,7 @@ use kafka_protocol::messages::{
 
 use crate::{backoff::BackoffSession, error::KafkaError, proto::ver::with_max_version};
 
-use super::{BrokerMapEntry, RefreshMetadataRequest};
+use super::{cluster::BrokerMapEntry, RefreshMetadataRequest};
 
 fn create_metadata_request(
     version: i16,
