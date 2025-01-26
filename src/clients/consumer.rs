@@ -200,17 +200,18 @@ impl ConsumerTask {
         let mut invalid_topics = HashSet::<&TopicName>::new();
 
         for topic_name in self.subscriptions.iter() {
-            let topic_meta = match cluster.get_topic_metadata_by_name(topic_name) {
-                Ok(meta) => meta,
-                Err(e) => {
-                    tracing::error!(
-                        "error fetching metadata for topic {}: {e}",
-                        topic_name.0.as_str(),
-                    );
-                    invalid_topics.insert(topic_name);
-                    continue;
-                }
-            };
+            let (topic_key, topic_meta) =
+                match cluster.get_topic_metadata_and_key_by_name(topic_name) {
+                    Ok(meta) => meta,
+                    Err(e) => {
+                        tracing::error!(
+                            "error fetching metadata for topic {}: {e}",
+                            topic_name.0.as_str(),
+                        );
+                        invalid_topics.insert(topic_name);
+                        continue;
+                    }
+                };
             let mut broker_id_to_fetch_topic = FxHashMap::<i32, FetchTopic>::default();
             let mut broker_id_to_offset_topic = FxHashMap::<i32, ListOffsetsTopic>::default();
 
@@ -232,8 +233,8 @@ impl ConsumerTask {
                         .or_insert_with(|| {
                             let mut fetch_topic = FetchTopic::default();
                             fetch_topic.topic = topic_name.clone();
-                            if let Some(uuid) = topic_meta.id {
-                                fetch_topic.topic_id = uuid;
+                            if let TopicKey::Uuid(uuid) = topic_key {
+                                fetch_topic.topic_id = *uuid;
                             }
                             fetch_topic
                         });
@@ -325,7 +326,7 @@ impl ConsumerTask {
                             let Some(name) = cluster
                                 .get_topic_metadata(&TopicKey::Uuid(response.topic_id))
                                 .ok()
-                                .and_then(|meta| meta.name.clone())
+                                .map(|meta| meta.name.clone())
                             else {
                                 continue;
                             };
