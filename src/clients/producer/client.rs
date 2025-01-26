@@ -82,8 +82,13 @@ impl ProducerTaskMessage {
 }
 
 struct ProducerTask {
-    // sequence: i32,
     client: NetworkClient,
+    /// Mapping of broker id to a mapping of topic partition to a batch of records to send to the topic.
+    ///
+    /// This is mutated for performance during sends.
+    ///
+    /// TODO: when to remove an entry from the inner map?
+    context_mappings: FnvHashMap<i32, FnvHashMap<TopicPartition, Vec<ProduceContext>>>,
 }
 
 const CHUNK_SIZE: usize = 2000;
@@ -91,7 +96,10 @@ const CHUNK_TIMEOUT: Duration = Duration::from_millis(500);
 
 impl ProducerTask {
     fn new(client: NetworkClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            context_mappings: Default::default(),
+        }
     }
 
     async fn run(
@@ -143,14 +151,13 @@ impl ProducerTask {
                 .await?;
         }
 
-        let mapping = self.create_produce_contexts(&topic_names, chunk);
+        self.create_produce_contexts(&topic_names, chunk);
 
-        for (leader_id, partitions) in mapping.into_iter() {
+        for (leader_id, partitions) in self.context_mappings.iter_mut() {
             let mut req = ProduceRequest::default();
-            let mut context_map = FnvHashMap::default();
             let mut topic_data = FnvHashMap::<TopicName, TopicProduceData>::default();
 
-            for (tp, contexts) in partitions.into_iter() {
+            for (tp, contexts) in partitions.iter_mut() {
                 let mut records = BytesMut::new();
 
                 if let Err(e) = RecordBatchEncoder::encode(
@@ -163,7 +170,7 @@ impl ProducerTask {
                 ) {
                     tracing::error!("failed to encode record batch for topic {tp}: {e}");
 
-                    for ctx in contexts.into_iter() {
+                    for ctx in contexts.drain(..) {
                         let _ = ctx.tx.send(Err(KafkaError::Channel(
                             io::Error::new(io::ErrorKind::Other, "record batch failed to encode")
                                 .into(),
@@ -181,8 +188,6 @@ impl ProducerTask {
                             .with_index(tp.partition())
                             .with_records(Some(records.into())),
                     );
-
-                context_map.insert(tp, contexts);
             }
 
             for (name, mut data) in topic_data.into_iter() {
@@ -190,7 +195,29 @@ impl ProducerTask {
                 req.topic_data.push(data);
             }
 
-            self.send_with_acks(req, leader_id, context_map).await;
+            let build_req = with_max_version(|_ver| {
+                // TODO config
+                req.acks = 1;
+                req.timeout_ms = 1000;
+                req.transactional_id = None;
+
+                Some(req)
+            });
+
+            let res = self.client.send_to(build_req, *leader_id).await;
+
+            match res {
+                Ok(response) => Self::handle_produce_response(response, partitions),
+                Err(e) => {
+                    tracing::error!("failed to send produce request: {e}");
+
+                    for contexts in partitions.values_mut() {
+                        for context in contexts.drain(..) {
+                            let _ = context.tx.send(Err(e.representative_clone()));
+                        }
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -235,12 +262,12 @@ impl ProducerTask {
     }
 
     fn create_produce_contexts(
-        &self,
+        &mut self,
         topic_names: &[TopicName],
         chunk: ProduceChunk<'_, impl Partitioner>,
-    ) -> FnvHashMap<i32, FnvHashMap<TopicPartition, Vec<ProduceContext>>> {
-        let mut mapping =
-            FnvHashMap::<i32, FnvHashMap<TopicPartition, Vec<ProduceContext>>>::default();
+    ) {
+        // let mut mapping =
+        //     FnvHashMap::<i32, FnvHashMap<TopicPartition, Vec<ProduceContext>>>::default();
 
         let cluster = &self.client.borrow_cluster();
 
@@ -293,7 +320,10 @@ impl ProducerTask {
                     .unwrap_or_else(|e| -(e.duration().as_millis() as i64))
             });
 
-            let part_map = mapping.entry(partition.leader_id).or_default();
+            let part_map = self
+                .context_mappings
+                .entry(partition.leader_id)
+                .or_default();
 
             let records = part_map
                 .entry(TopicPartition::new(topic_name.clone(), partition.index))
@@ -320,51 +350,25 @@ impl ProducerTask {
         }
 
         chunk.partitioner.finish_partitioning(partitioner);
-
-        mapping
     }
 
-    async fn send_with_acks(
-        &self,
-        mut req: ProduceRequest,
-        leader_id: i32,
-        context_map: FnvHashMap<TopicPartition, Vec<ProduceContext>>,
-    ) {
-        let build_req = with_max_version(|_ver| {
-            // TODO config
-            req.acks = 1;
-            req.timeout_ms = 1000;
-            req.transactional_id = None;
-
-            Some(req)
-        });
-
-        let res = self.client.send_to(build_req, leader_id).await;
-
-        match res {
-            Ok(response) => self.handle_produce_response(response, context_map),
-            Err(e) => {
-                tracing::error!("failed to send produce request: {e}");
-
-                for contexts in context_map.into_values() {
-                    for context in contexts.into_iter() {
-                        let _ = context.tx.send(Err(e.representative_clone()));
-                    }
-                }
-            }
-        }
-    }
+    // async fn send_with_acks(
+    //     &self,
+    //     mut req: ProduceRequest,
+    //     leader_id: i32,
+    //     context_map: &mut FnvHashMap<TopicPartition, Vec<ProduceContext>>,
+    // ) {
+    // }
 
     fn handle_produce_response(
-        &self,
         response: ProduceResponse,
-        mut context_map: FnvHashMap<TopicPartition, Vec<ProduceContext>>,
+        context_map: &mut FnvHashMap<TopicPartition, Vec<ProduceContext>>,
     ) {
         for response in response.responses.into_iter() {
             for part_response in response.partition_responses.into_iter() {
                 let tp = TopicPartition::new(response.name.clone(), part_response.index);
 
-                let Some(contexts) = context_map.remove(&tp) else {
+                let Some(contexts) = context_map.get_mut(&tp) else {
                     tracing::warn!(
                         "got a produce response for a partition we did not send data to: {tp}"
                     );
@@ -372,7 +376,7 @@ impl ProducerTask {
                 };
 
                 if part_response.error_code != ErrorCode::None as i16 {
-                    for ctx in contexts.into_iter() {
+                    for ctx in contexts.drain(..) {
                         let _ = ctx
                             .tx
                             .send(Err(KafkaError::ErrorCode(part_response.error_code.into())));
@@ -381,7 +385,7 @@ impl ProducerTask {
                     continue;
                 }
 
-                for ctx in contexts.into_iter() {
+                for ctx in contexts.drain(..) {
                     let _ = ctx.tx.send(Ok(RecordMetadata {
                         topic_partition: tp.clone(),
                         base_offset: part_response.base_offset,
