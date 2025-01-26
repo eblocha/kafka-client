@@ -238,42 +238,39 @@ impl ConsumerTask {
                             fetch_topic
                         });
 
-                    fetch_topic.partitions.push({
-                        let mut fetch_partition = FetchPartition::default();
-                        fetch_partition.current_leader_epoch = partition_meta.leader_epoch;
-                        fetch_partition.partition = partition_meta.index;
-                        fetch_partition.fetch_offset = offset;
-                        fetch_partition
-                    });
+                    fetch_topic.partitions.push(
+                        FetchPartition::default()
+                            .with_current_leader_epoch(partition_meta.leader_epoch)
+                            .with_partition(partition_meta.index)
+                            .with_fetch_offset(offset),
+                    );
                 } else {
                     let offsets_topic = broker_id_to_offset_topic
                         .entry(partition_meta.leader_id)
                         .or_insert_with(|| {
-                            let mut offsets_topic = ListOffsetsTopic::default();
-                            offsets_topic.name = topic_name.clone();
-                            offsets_topic
+                            ListOffsetsTopic::default().with_name(topic_name.clone())
                         });
 
-                    offsets_topic.partitions.push({
-                        let mut offsets_partition = ListOffsetsPartition::default();
-                        offsets_partition.partition_index = partition_meta.index;
-                        offsets_partition.timestamp = -1; // latest
-                        offsets_partition
-                    });
+                    offsets_topic.partitions.push(
+                        ListOffsetsPartition::default()
+                            .with_partition_index(partition_meta.index)
+                            .with_timestamp(-1),
+                    );
 
                     spanwed_offset_requests = true;
                 }
             }
 
             for (broker_id, topic) in broker_id_to_fetch_topic {
-                let req = broker_id_to_fetch_req.entry(broker_id).or_insert_with(|| {
-                    let mut req = FetchRequest::default();
-                    req.cluster_id = cluster.cluster_id.clone();
-                    // TODO config
-                    req.min_bytes = 4096;
-                    req
-                });
-                req.topics.push(topic);
+                broker_id_to_fetch_req
+                    .entry(broker_id)
+                    .or_insert_with(|| {
+                        FetchRequest::default()
+                            .with_cluster_id(cluster.cluster_id.clone())
+                            .with_min_bytes(4096)
+                    })
+                    .topics
+                    .push(topic);
             }
 
             for (broker_id, topic) in broker_id_to_offset_topic {

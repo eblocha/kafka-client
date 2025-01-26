@@ -381,21 +381,15 @@ mod test {
         let res_header_version = ApiKey::Metadata.response_header_version(REQ_VERSION);
 
         // REQUEST
-        let request = {
-            let mut r = MetadataRequest::default();
-            r.allow_auto_topic_creation = true;
-            r.topics = None;
-            r
-        };
+        let request = MetadataRequest::default()
+            .with_allow_auto_topic_creation(true)
+            .with_topics(None);
 
-        let request_header = {
-            let mut h = RequestHeader::default();
-            h.correlation_id = correlation_id;
-            h.request_api_key = ApiKey::Metadata as i16;
-            h.request_api_version = REQ_VERSION;
-            h.client_id = None;
-            h
-        };
+        let request_header = RequestHeader::default()
+            .with_correlation_id(correlation_id)
+            .with_request_api_key(ApiKey::Metadata as i16)
+            .with_request_api_version(REQ_VERSION)
+            .with_client_id(None);
 
         let size = (request_header.compute_size(req_header_version).unwrap()
             + request.compute_size(REQ_VERSION).unwrap()) as i32;
@@ -409,18 +403,11 @@ mod test {
         request.encode(&mut req_bytes, REQ_VERSION).unwrap();
 
         // RESPONSE
-        let response = {
-            let mut r = MetadataResponse::default();
-            r.brokers = vec![MetadataResponseBroker::default()];
-            r.controller_id = BrokerId(0);
-            r
-        };
+        let response = MetadataResponse::default()
+            .with_brokers(vec![MetadataResponseBroker::default()])
+            .with_controller_id(BrokerId(0));
 
-        let response_header = {
-            let mut h = ResponseHeader::default();
-            h.correlation_id = correlation_id;
-            h
-        };
+        let response_header = ResponseHeader::default().with_correlation_id(correlation_id);
 
         let size = (response.compute_size(REQ_VERSION).unwrap()
             + response_header.compute_size(res_header_version).unwrap()) as i32;

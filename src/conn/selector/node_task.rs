@@ -630,13 +630,12 @@ mod test {
             {
                 let mut r = ApiVersionsResponse::default();
 
-                r.api_keys.push({
-                    let mut v = ApiVersion::default();
-                    v.api_key = ApiKey::Metadata as i16;
-                    v.min_version = MetadataRequest::VERSIONS.min;
-                    v.max_version = MetadataRequest::VERSIONS.max;
-                    v
-                });
+                r.api_keys.push(
+                    ApiVersion::default()
+                        .with_api_key(ApiKey::Metadata as i16)
+                        .with_min_version(MetadataRequest::VERSIONS.min)
+                        .with_max_version(MetadataRequest::VERSIONS.max),
+                );
 
                 r
             },
@@ -707,11 +706,7 @@ mod test {
         let channel_msg = rx.recv().await.unwrap();
 
         let response = encode_response(
-            {
-                let mut r = ApiVersionsResponse::default();
-                r.error_code = ErrorCode::UnsupportedVersion as i16;
-                r
-            },
+            ApiVersionsResponse::default().with_error_code(ErrorCode::UnsupportedVersion as i16),
             ApiKey::ApiVersions,
             channel_msg.versioned.api_version,
         );

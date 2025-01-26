@@ -32,13 +32,9 @@ impl AdminClient {
     pub async fn describe_cluster(&self) -> Result<ClusterDescription, KafkaError> {
         let response = self
             .client
-            .send({
-                let mut req = DescribeClusterRequest::default();
-
-                req.include_cluster_authorized_operations = true;
-
-                req
-            })
+            .send(
+                DescribeClusterRequest::default().with_include_cluster_authorized_operations(true),
+            )
             .await?;
 
         Ok(response.try_into()?)
@@ -47,11 +43,7 @@ impl AdminClient {
     pub async fn list_topics(&self) -> Result<Vec<TopicListing>, KafkaError> {
         let response = self
             .client
-            .send({
-                let mut req = MetadataRequest::default();
-                req.topics = None;
-                req
-            })
+            .send(MetadataRequest::default().with_topics(None))
             .await?;
 
         response

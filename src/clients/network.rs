@@ -106,11 +106,7 @@ impl NetworkClient {
             topic_names
                 .into_iter()
                 .filter(|topic_name| cluster_state.get_topic_key_by_name(*topic_name).is_none())
-                .map(|name| {
-                    let mut req_topic = MetadataRequestTopic::default();
-                    req_topic.name = Some(name.clone());
-                    req_topic
-                })
+                .map(|name| MetadataRequestTopic::default().with_name(Some(name.clone())))
                 .collect::<Vec<_>>()
         };
 

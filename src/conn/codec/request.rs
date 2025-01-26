@@ -38,14 +38,11 @@ impl EncodableRequest {
         Self {
             api_key,
             request: value.request,
-            header: {
-                let mut h = RequestHeader::default();
-                h.client_id = client_id.clone();
-                h.correlation_id = correlation_id.0;
-                h.request_api_key = api_key as i16;
-                h.request_api_version = value.api_version;
-                h
-            },
+            header: RequestHeader::default()
+                .with_client_id(client_id.clone())
+                .with_correlation_id(correlation_id.0)
+                .with_request_api_key(api_key as i16)
+                .with_request_api_version(value.api_version),
         }
     }
 

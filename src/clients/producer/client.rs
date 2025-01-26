@@ -177,14 +177,11 @@ impl ProducerTask {
                     .entry(tp.name().clone())
                     .or_default()
                     .partition_data
-                    .push({
-                        let mut partition_data = PartitionProduceData::default();
-
-                        partition_data.index = tp.partition();
-                        partition_data.records = Some(records.into());
-
-                        partition_data
-                    });
+                    .push(
+                        PartitionProduceData::default()
+                            .with_index(tp.partition())
+                            .with_records(Some(records.into())),
+                    );
 
                 context_map.insert(tp, contexts);
             }

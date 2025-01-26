@@ -85,8 +85,9 @@ impl PartitionerSession for RoundRobinPartitionerSession {
             .filter(|(tp, _count)| *tp.name() == record.topic)
             .min_by(|(_, a), (_, b)| a.cmp(b));
 
-        if let Some((tp, _)) = min {
+        if let Some((tp, size)) = min {
             record.partition = Some(tp.partition());
+            *size += 1;
         }
     }
 

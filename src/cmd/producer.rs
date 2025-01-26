@@ -76,7 +76,7 @@ impl Run for ProduceRandom {
         let mut rng = rand::thread_rng();
 
         for _i in 0..SIZE {
-            let mut msg = [0_u8; 100];
+            let mut msg = [0_u8; 32];
             rng.fill_bytes(&mut msg);
 
             let msg = Bytes::from(msg.to_vec());
@@ -117,7 +117,7 @@ pub struct ProduceFromFile {
 
 impl ProduceFromFile {
     async fn run_inner(
-        producer: &mut Producer,
+        producer: &Producer,
         file: File,
         topic: String,
     ) -> anyhow::Result<JoinSet<Result<RecordMetadata, KafkaError>>> {
@@ -151,11 +151,11 @@ impl Run for ProduceFromFile {
 
     async fn run(self, client: NetworkClient) -> anyhow::Result<Self::Response> {
         let file = File::open(self.file).await?;
-        let mut producer = Producer::new(client);
+        let producer = Producer::new(client);
 
         let now = Instant::now();
 
-        let result = Self::run_inner(&mut producer, file, self.topic).await;
+        let result = Self::run_inner(&producer, file, self.topic).await;
 
         producer.flush_and_shutdown().await;
 

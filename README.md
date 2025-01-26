@@ -38,7 +38,7 @@ It uses [kafka-protocol](https://github.com/tychedelia/kafka-protocol-rs) for th
 - Benchmarking
 
   - See if producer can hit 800k records/s: https://engineering.linkedin.com/kafka/benchmarking-apache-kafka-2-million-writes-second-three-cheap-machines
-  - Update: we are pretty close I think. I did a local benchmark with random data, and hit 1.5M records/s. See the `ProduceRandom` implementation in `cmd/producer.rs` for how that works.
+  - Update: we are pretty close I think. I did a local benchmark with random data, and hit 1M records/s. See the `ProduceRandom` implementation in `cmd/producer.rs` for how that works.
   - It seems like sending to one partition is faster than multiple right now.
 
 - More tracing
