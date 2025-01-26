@@ -1,5 +1,4 @@
 use std::{
-    collections::{HashMap, HashSet},
     future::Future,
     io,
     iter::zip,
@@ -9,7 +8,7 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-use fnv::FnvHashMap;
+use fnv::{FnvHashMap, FnvHashSet};
 use futures::FutureExt;
 use kafka_protocol::{
     messages::{
@@ -129,7 +128,7 @@ impl ProducerTask {
             .collect::<Vec<_>>();
 
         self.client
-            .load_topic_metadata(HashSet::<&TopicName>::from_iter(&topic_names))
+            .load_topic_metadata(FnvHashSet::<&TopicName>::from_iter(&topic_names))
             .await?;
 
         let invalid_topic_names =
@@ -148,7 +147,7 @@ impl ProducerTask {
 
         for (leader_id, partitions) in mapping.into_iter() {
             let mut req = ProduceRequest::default();
-            let mut context_map = HashMap::new();
+            let mut context_map = FnvHashMap::default();
             let mut topic_data = FnvHashMap::<TopicName, TopicProduceData>::default();
 
             for (tp, contexts) in partitions.into_iter() {
@@ -201,10 +200,10 @@ impl ProducerTask {
         &self,
         topic_names: &[TopicName],
         chunk: &mut ProduceChunk<'_, impl Partitioner>,
-    ) -> HashSet<TopicName> {
+    ) -> FnvHashSet<TopicName> {
         let cluster = &self.client.borrow_cluster();
 
-        let mut invalid_topic_names = HashSet::<TopicName>::new();
+        let mut invalid_topic_names = FnvHashSet::<TopicName>::default();
 
         let mut partitioner = chunk.partitioner.new_partitioner(cluster);
 
@@ -239,9 +238,9 @@ impl ProducerTask {
         &self,
         topic_names: &[TopicName],
         chunk: ProduceChunk<'_, impl Partitioner>,
-    ) -> FnvHashMap<i32, HashMap<TopicPartition, Vec<ProduceContext>>> {
+    ) -> FnvHashMap<i32, FnvHashMap<TopicPartition, Vec<ProduceContext>>> {
         let mut mapping =
-            FnvHashMap::<i32, HashMap<TopicPartition, Vec<ProduceContext>>>::default();
+            FnvHashMap::<i32, FnvHashMap<TopicPartition, Vec<ProduceContext>>>::default();
 
         let cluster = &self.client.borrow_cluster();
 
@@ -329,7 +328,7 @@ impl ProducerTask {
         &self,
         mut req: ProduceRequest,
         leader_id: i32,
-        context_map: HashMap<TopicPartition, Vec<ProduceContext>>,
+        context_map: FnvHashMap<TopicPartition, Vec<ProduceContext>>,
     ) {
         let build_req = with_max_version(|_ver| {
             // TODO config
@@ -359,7 +358,7 @@ impl ProducerTask {
     fn handle_produce_response(
         &self,
         response: ProduceResponse,
-        mut context_map: HashMap<TopicPartition, Vec<ProduceContext>>,
+        mut context_map: FnvHashMap<TopicPartition, Vec<ProduceContext>>,
     ) {
         for response in response.responses.into_iter() {
             for part_response in response.partition_responses.into_iter() {

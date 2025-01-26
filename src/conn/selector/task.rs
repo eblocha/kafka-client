@@ -1,9 +1,6 @@
-use std::{
-    collections::{HashMap, HashSet},
-    time::Duration,
-};
+use std::time::Duration;
 
-use fnv::FnvHashMap;
+use fnv::{FnvHashMap, FnvHashSet};
 use kafka_protocol::messages::{metadata_request::MetadataRequestTopic, MetadataResponse};
 use tokio::{
     sync::{mpsc, oneshot, watch},
@@ -68,7 +65,7 @@ struct SelectorTask<Conn> {
     /// Receiver for requests to refresh metadata now
     rx_topic_metadata: mpsc::Receiver<RefreshMetadataRequest>,
     /// Container to store metadata backoff state per-broker
-    metadata_backoff: HashMap<BrokerHost, BackoffSession<()>>,
+    metadata_backoff: FnvHashMap<BrokerHost, BackoffSession<()>>,
     /// Join set for the metadata refresh task. This should only have one task spawned at any time.
     metadata_join_set: JoinSet<MetadataRefreshResult>,
     /// Cancellation signal
@@ -307,7 +304,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             .map(|broker| (broker.node_id.0, broker))
             .collect();
 
-        let new_broker_hosts: HashSet<BrokerHost> =
+        let new_broker_hosts: FnvHashSet<BrokerHost> =
             metadata.brokers.iter().map(BrokerHost::from).collect();
 
         // remove backoff state for nodes not in the cluster
@@ -330,7 +327,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             keep
         });
 
-        let mut broker_ids_changing_hosts = HashSet::new();
+        let mut broker_ids_changing_hosts = FnvHashSet::default();
 
         // spawn nodes that should be in the cluster
         for (broker_id, broker) in new_broker_ids {
