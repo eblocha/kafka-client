@@ -95,9 +95,19 @@ impl BrokerMap {
     }
 }
 
+/// An identifier for a topic that was requested by the client, and may or may not be known to the server.
+///
+/// This will be a [`TopicKey::Uuid`] when the server identifies topics by id, the topic is known by the server, and we
+/// got a successful response for it.
+///
+/// This will be a [`TopicKey::Name`] when either:
+/// - The server identifies topics by name
+/// - We requested a topic by name that does not exist
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TopicKey {
+    /// A topic key identified by uuid.
     Uuid(Uuid),
+    /// A topic key identified by name.
     Name(TopicName),
 }
 
@@ -238,8 +248,11 @@ impl From<&TopicMetadata> for MetadataRequestTopic {
 
 #[derive(Debug, Default, Clone)]
 pub struct Cluster {
+    /// Mapping of all currently-known broker nodes.
     pub brokers: BrokerMap,
+    /// The cluster id returned by the metadata.
     pub cluster_id: Option<StrBytes>,
+    /// The broker id of the controller node.
     pub controller_id: i32,
     /// Maps the [`TopicKey`] to a [`Result`] containing the last metadata fetch result for the topic.
     topics: FnvHashMap<TopicKey, Result<TopicMetadata, ErrorCode>>,
