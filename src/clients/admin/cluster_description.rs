@@ -29,14 +29,11 @@ impl TryFrom<DescribeClusterResponse> for ClusterDescription {
 
         let controller = value
             .brokers
-            .get(&value.controller_id)
-            .map(|broker| Node::from((value.controller_id, broker)));
+            .iter()
+            .find(|broker| broker.broker_id == value.controller_id)
+            .map(Node::from);
 
-        let nodes = value
-            .brokers
-            .into_iter()
-            .map(|(id, broker)| Node::from((id, &broker)))
-            .collect();
+        let nodes = value.brokers.iter().map(Node::from).collect();
 
         Ok(Self {
             authorized_operations: acl_from_bitfield(value.cluster_authorized_operations),

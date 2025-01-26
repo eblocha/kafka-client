@@ -4,9 +4,7 @@ use std::{
 };
 
 use fnv::FnvHashMap;
-use kafka_protocol::messages::{
-    metadata_request::MetadataRequestTopic, BrokerId, MetadataResponse,
-};
+use kafka_protocol::messages::{metadata_request::MetadataRequestTopic, MetadataResponse};
 use tokio::{
     sync::{mpsc, oneshot, watch},
     task::JoinSet,
@@ -297,7 +295,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         Ok(())
     }
 
-    fn update_metadata(&mut self, mut metadata: MetadataResponse) {
+    fn update_metadata(&mut self, metadata: MetadataResponse) {
         if metadata.brokers.is_empty() {
             tracing::warn!("metadata response has no brokers, ignoring");
         }
@@ -306,14 +304,11 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         let new_broker_ids: FnvHashMap<_, _> = metadata
             .brokers
             .iter()
-            .map(|(id, broker)| (id.0, broker))
+            .map(|broker| (broker.node_id.0, broker))
             .collect();
 
-        let new_broker_hosts: HashSet<BrokerHost> = metadata
-            .brokers
-            .iter()
-            .map(|(_, broker)| broker.into())
-            .collect();
+        let new_broker_hosts: HashSet<BrokerHost> =
+            metadata.brokers.iter().map(BrokerHost::from).collect();
 
         // remove backoff state for nodes not in the cluster
         self.metadata_backoff
@@ -339,7 +334,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
 
         // spawn nodes that should be in the cluster
         for (broker_id, broker) in new_broker_ids {
-            let new_node = Node::from((BrokerId(broker_id), broker));
+            let new_node = Node::from(broker);
 
             if let Some(entry) = self.hosts.0.get_mut(&broker_id) {
                 let host = &entry.node.host;
@@ -366,18 +361,11 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             }
         }
 
-        for topic_meta in metadata.topics.values_mut() {
-            // Sort the partitions by index so we can binary search it later.
-            topic_meta
-                .partitions
-                .sort_by(|a, b| a.partition_index.cmp(&b.partition_index));
-        }
-
         self.tx.send_modify(|cluster| {
             cluster.brokers = self.hosts.clone();
             // merge topic metadata with existing metadata
-            for (topic_name, topic_meta) in metadata.topics.into_iter() {
-                cluster.insert_update(topic_name, topic_meta);
+            for topic_meta in metadata.topics.into_iter() {
+                cluster.insert_update(topic_meta);
             }
         });
     }

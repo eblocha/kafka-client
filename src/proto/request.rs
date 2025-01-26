@@ -34,7 +34,7 @@ macro_rules! requests {
                 /// Get the api key associated with this request type.
                 pub fn as_api_key(&self) -> ::kafka_protocol::messages::ApiKey {
                     match self {
-                        $(Self::$name(_) => ::kafka_protocol::messages::ApiKey::[<$name Key>],)*
+                        $(Self::$name(_) => ::kafka_protocol::messages::ApiKey::$name,)*
                     }
                 }
             }
@@ -62,7 +62,7 @@ macro_rules! requests {
             $(
                 impl GetApiKey for ::kafka_protocol::messages::[<$name Request>] {
                     fn key(&self) -> i16 {
-                        ::kafka_protocol::messages::ApiKey::[<$name Key>] as i16
+                        ::kafka_protocol::messages::ApiKey::$name as i16
                     }
                 }
             )*
@@ -72,7 +72,7 @@ macro_rules! requests {
 
                 fn decode(response: DecodableResponse) -> Result<Self::Response, io::Error> {
                     match response.record.api_key {
-                        $(::kafka_protocol::messages::ApiKey::[<$name Key>] => Ok(::kafka_protocol::messages::ResponseKind::[<$name Response>](::kafka_protocol::messages::[<$name Request>]::decode(response)?)),)*
+                        $(::kafka_protocol::messages::ApiKey::$name => Ok(::kafka_protocol::messages::ResponseKind::$name(::kafka_protocol::messages::[<$name Request>]::decode(response)?)),)*
                     }
                 }
             }
@@ -95,6 +95,7 @@ requests!(
     BeginQuorumEpoch,
     BrokerHeartbeat,
     BrokerRegistration,
+    ConsumerGroupDescribe,
     ConsumerGroupHeartbeat,
     ControlledShutdown,
     ControllerRegistration,
@@ -115,6 +116,7 @@ requests!(
     DescribeLogDirs,
     DescribeProducers,
     DescribeQuorum,
+    DescribeTopicPartitions,
     DescribeTransactions,
     DescribeUserScramCredentials,
     ElectLeaders,

@@ -101,6 +101,17 @@ pub enum TopicKey {
     Name(TopicName),
 }
 
+impl From<&MetadataResponseTopic> for TopicKey {
+    fn from(value: &MetadataResponseTopic) -> Self {
+        value
+            .topic_id
+            .as_optional()
+            .map(|uuid| Self::Uuid(uuid))
+            // Either uuid or name are supposed to exist, even for responses with an error code.
+            .unwrap_or_else(|| Self::Name(value.name.clone().unwrap_or_default()))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PartitionMetadata {
     pub index: i32,
@@ -130,7 +141,7 @@ impl TryFrom<MetadataResponsePartition> for PartitionMetadata {
 #[derive(Debug, Clone)]
 pub struct TopicMetadata {
     pub key: TopicKey,
-    pub name: TopicName,
+    pub name: Option<TopicName>,
     pub id: Option<Uuid>,
     pub is_internal: bool,
     pub partitions: Vec<Result<PartitionMetadata, ErrorCode>>,
@@ -151,13 +162,15 @@ impl TopicMetadata {
     }
 }
 
-impl TryFrom<(TopicName, MetadataResponseTopic)> for TopicMetadata {
+impl TryFrom<MetadataResponseTopic> for TopicMetadata {
     type Error = ErrorCode;
 
-    fn try_from((name, meta): (TopicName, MetadataResponseTopic)) -> Result<Self, Self::Error> {
+    fn try_from(meta: MetadataResponseTopic) -> Result<Self, Self::Error> {
         if meta.error_code != ErrorCode::None as i16 {
             return Err(meta.error_code.into());
         }
+
+        let key = TopicKey::from(&meta);
 
         let partitions: FnvHashMap<i32, Result<PartitionMetadata, ErrorCode>> = meta
             .partitions
@@ -181,14 +194,8 @@ impl TryFrom<(TopicName, MetadataResponseTopic)> for TopicMetadata {
             partitions_vec[index as usize] = result;
         }
 
-        let key = meta
-            .topic_id
-            .as_optional()
-            .map(|uuid| TopicKey::Uuid(uuid))
-            .unwrap_or_else(|| TopicKey::Name(name.clone()));
-
         Ok(Self {
-            name,
+            name: meta.name,
             id: meta.topic_id.as_optional(),
             key,
             is_internal: meta.is_internal,
@@ -200,7 +207,7 @@ impl TryFrom<(TopicName, MetadataResponseTopic)> for TopicMetadata {
 impl From<&TopicMetadata> for MetadataRequestTopic {
     fn from(value: &TopicMetadata) -> Self {
         let mut req = MetadataRequestTopic::default();
-        req.name = Some(value.name.clone());
+        req.name = value.name.clone();
         if let Some(id) = value.id {
             req.topic_id = id;
         }
@@ -267,20 +274,23 @@ impl Cluster {
         self.topics.remove(&key);
     }
 
-    pub(crate) fn insert_update(
-        &mut self,
-        topic_name: TopicName,
-        topic_meta: MetadataResponseTopic,
-    ) {
+    pub(crate) fn insert_update(&mut self, topic_meta: MetadataResponseTopic) {
         let key = topic_meta
             .topic_id
             .as_optional()
             .map(TopicKey::Uuid)
-            .unwrap_or_else(|| TopicKey::Name(topic_name.clone()));
+            .map(Some)
+            .unwrap_or_else(|| topic_meta.name.clone().map(TopicKey::Name));
 
-        self.topic_keys_by_name
-            .insert(topic_name.clone(), key.clone());
-        self.topics.insert(key, (topic_name, topic_meta).try_into());
+        match key {
+            Some(key) => {
+                if let Some(ref name) = topic_meta.name {
+                    self.topic_keys_by_name.insert(name.clone(), key.clone());
+                }
+                self.topics.insert(key, topic_meta.try_into());
+            }
+            None => {}
+        }
     }
 
     pub(crate) fn create_topics_for_refresh(&self) -> Vec<MetadataRequestTopic> {

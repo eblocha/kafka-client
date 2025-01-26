@@ -1,9 +1,6 @@
-use kafka_protocol::{
-    indexmap::IndexMap,
-    messages::{
-        metadata_response::{MetadataResponseBroker, MetadataResponsePartition},
-        BrokerId,
-    },
+use fnv::FnvHashMap;
+use kafka_protocol::messages::metadata_response::{
+    MetadataResponseBroker, MetadataResponsePartition,
 };
 
 use crate::{common::Node, proto::error_codes::ErrorCode};
@@ -18,7 +15,7 @@ pub struct TopicPartitionInfo {
 
 pub type ToTopicPartitionInfo<'m> = (
     MetadataResponsePartition,
-    &'m IndexMap<BrokerId, MetadataResponseBroker>,
+    &'m FnvHashMap<i32, MetadataResponseBroker>,
 );
 
 impl<'m> TryFrom<ToTopicPartitionInfo<'m>> for TopicPartitionInfo {
@@ -29,20 +26,20 @@ impl<'m> TryFrom<ToTopicPartitionInfo<'m>> for TopicPartitionInfo {
             return Err(partition.error_code.into());
         }
 
-        let leader = map
-            .get(&partition.leader_id)
-            .map(|leader| Node::from((partition.leader_id, leader)));
+        let leader = map.get(&partition.leader_id).map(Node::from);
 
         let replicas = partition
             .replica_nodes
             .into_iter()
-            .filter_map(|id| map.get(&id).map(|broker| Node::from((id, broker))))
+            .filter_map(|id| map.get(&id))
+            .map(Node::from)
             .collect::<Vec<_>>();
 
         let isr = partition
             .isr_nodes
             .into_iter()
-            .filter_map(|id| map.get(&id).map(|broker| Node::from((id, broker))))
+            .filter_map(|id| map.get(&id))
+            .map(Node::from)
             .collect::<Vec<_>>();
 
         Ok(Self {

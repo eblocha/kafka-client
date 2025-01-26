@@ -1,19 +1,14 @@
-use std::sync::Arc;
-
-use fnv::FnvHashSet;
-use kafka_protocol::{
-    indexmap::IndexMap,
-    messages::{
-        metadata_response::{MetadataResponseBroker, MetadataResponseTopic},
-        BrokerId, TopicName,
-    },
+use fnv::{FnvHashMap, FnvHashSet};
+use kafka_protocol::messages::{
+    metadata_response::{MetadataResponseBroker, MetadataResponseTopic},
+    TopicName,
 };
 use uuid::Uuid;
 
 use crate::{
     common::acl::{acl_from_bitfield, AclOperation},
     proto::error_codes::ErrorCode,
-    util::{StrBytesExt, UuidExt},
+    util::UuidExt,
 };
 
 use super::TopicPartitionInfo;
@@ -21,25 +16,24 @@ use super::TopicPartitionInfo;
 /// A detailed description of a single topic in the cluster.
 #[derive(Debug, Clone)]
 pub struct TopicDescription {
-    pub name: Arc<str>,
+    pub name: Option<TopicName>,
     pub is_internal: bool,
     pub partitions: Vec<TopicPartitionInfo>,
     pub authorized_operations: Option<FnvHashSet<AclOperation>>,
     pub id: Option<Uuid>,
 }
 
-pub type DescribeTopicsResult = indexmap::IndexMap<Arc<str>, Result<TopicDescription, ErrorCode>>;
+pub type DescribeTopicsResult = Vec<Result<TopicDescription, ErrorCode>>;
 
 pub type ToTopicDescription<'m> = (
-    TopicName,
     MetadataResponseTopic,
-    &'m IndexMap<BrokerId, MetadataResponseBroker>,
+    &'m FnvHashMap<i32, MetadataResponseBroker>,
 );
 
 impl<'m> TryFrom<ToTopicDescription<'m>> for TopicDescription {
     type Error = ErrorCode;
 
-    fn try_from((name, topic, map): ToTopicDescription<'m>) -> Result<Self, Self::Error> {
+    fn try_from((topic, map): ToTopicDescription<'m>) -> Result<Self, Self::Error> {
         if topic.error_code != ErrorCode::None as i16 {
             return Err(topic.error_code.into());
         }
@@ -53,7 +47,7 @@ impl<'m> TryFrom<ToTopicDescription<'m>> for TopicDescription {
         Ok(Self {
             id: topic.topic_id.as_optional(),
             is_internal: topic.is_internal,
-            name: name.as_arc_str(),
+            name: topic.name,
             partitions,
             authorized_operations: acl_from_bitfield(topic.topic_authorized_operations),
         })

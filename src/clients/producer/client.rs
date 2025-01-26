@@ -12,11 +12,13 @@ use bytes::{Bytes, BytesMut};
 use fnv::FnvHashMap;
 use futures::FutureExt;
 use kafka_protocol::{
-    messages::{produce_request::PartitionProduceData, ProduceRequest, ProduceResponse, TopicName},
+    messages::{
+        produce_request::{PartitionProduceData, TopicProduceData},
+        ProduceRequest, ProduceResponse, TopicName,
+    },
     protocol::StrBytes,
     records::{
-        Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
-        NO_PRODUCER_EPOCH, NO_PRODUCER_ID,
+        Compression, Record, RecordEncodeOptions, TimestampType, NO_PRODUCER_EPOCH, NO_PRODUCER_ID,
     },
 };
 use tokio::sync::{mpsc, oneshot};
@@ -26,6 +28,7 @@ use tokio_util::task::TaskTracker;
 use crate::{
     clients::network::NetworkClient,
     common::TopicPartition,
+    conn::RecordBatchEncoder,
     error::{ErrorCode, KafkaError},
     proto::ver::with_max_version,
 };
@@ -144,6 +147,7 @@ impl ProducerTask {
         for (leader_id, partitions) in mapping.into_iter() {
             let mut req = ProduceRequest::default();
             let mut context_map = HashMap::new();
+            let mut topic_data = FnvHashMap::<TopicName, TopicProduceData>::default();
 
             for (tp, contexts) in partitions.into_iter() {
                 let mut records = BytesMut::new();
@@ -167,7 +171,7 @@ impl ProducerTask {
                     continue;
                 }
 
-                req.topic_data
+                topic_data
                     .entry(tp.name().clone())
                     .or_default()
                     .partition_data
@@ -181,6 +185,11 @@ impl ProducerTask {
                     });
 
                 context_map.insert(tp, contexts);
+            }
+
+            for (name, mut data) in topic_data.into_iter() {
+                data.name = name;
+                req.topic_data.push(data);
             }
 
             self.send_with_acks(req, leader_id, context_map).await;
@@ -353,9 +362,9 @@ impl ProducerTask {
         response: ProduceResponse,
         mut context_map: HashMap<TopicPartition, Vec<ProduceContext>>,
     ) {
-        for (topic_name, response) in response.responses.into_iter() {
+        for response in response.responses.into_iter() {
             for part_response in response.partition_responses.into_iter() {
-                let tp = TopicPartition::new(topic_name.clone(), part_response.index);
+                let tp = TopicPartition::new(response.name.clone(), part_response.index);
 
                 let Some(contexts) = context_map.remove(&tp) else {
                     tracing::warn!(

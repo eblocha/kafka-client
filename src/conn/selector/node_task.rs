@@ -1,5 +1,6 @@
 use arc_swap::ArcSwapOption;
 use derive_more::derive::From;
+use fnv::FnvHashMap;
 use kafka_protocol::{
     messages::{ApiVersionsRequest, ApiVersionsResponse},
     protocol::{Message, StrBytes, VersionRange},
@@ -104,7 +105,7 @@ pub struct NodeTaskMessage {
 #[derive(Debug)]
 pub struct VersionedConnection {
     connection: KafkaChannel,
-    versions: ApiVersionsResponse,
+    versions: FnvHashMap<i16, VersionRange>,
 }
 
 /// A connection task to a broker.
@@ -193,7 +194,20 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
 
         let conn = result??;
 
-        let versions = negotiate(self.broker_id, &self.host, &conn).await?;
+        let versions = negotiate(self.broker_id, &self.host, &conn)
+            .await?
+            .api_keys
+            .into_iter()
+            .map(|key| {
+                (
+                    key.api_key,
+                    VersionRange {
+                        min: key.min_version,
+                        max: key.max_version,
+                    },
+                )
+            })
+            .collect();
 
         // TODO authenticate
 
@@ -320,16 +334,11 @@ impl NodeTaskHandle {
 
         let api_key = req.key();
 
-        let Some(broker_versions) = conn.versions.api_keys.get(&api_key) else {
+        let Some(broker_versions) = conn.versions.get(&api_key) else {
             return Err(KafkaError::ErrorCode(ErrorCode::UnsupportedVersion));
         };
 
-        let broker_range = VersionRange {
-            min: broker_versions.min_version,
-            max: broker_versions.max_version,
-        };
-
-        let Some((req, version)) = req.from_version_range(broker_range) else {
+        let Some((req, version)) = req.from_version_range(*broker_versions) else {
             return Err(KafkaError::ErrorCode(ErrorCode::UnsupportedVersion));
         };
 
@@ -621,8 +630,9 @@ mod test {
             {
                 let mut r = ApiVersionsResponse::default();
 
-                r.api_keys.insert(ApiKey::MetadataKey as i16, {
+                r.api_keys.push({
                     let mut v = ApiVersion::default();
+                    v.api_key = ApiKey::Metadata as i16;
                     v.min_version = MetadataRequest::VERSIONS.min;
                     v.max_version = MetadataRequest::VERSIONS.max;
                     v
@@ -630,7 +640,7 @@ mod test {
 
                 r
             },
-            ApiKey::MetadataKey,
+            ApiKey::Metadata,
             channel_msg.versioned.api_version,
         );
 
@@ -655,7 +665,7 @@ mod test {
 
         let response = encode_response(
             MetadataResponse::default(),
-            ApiKey::MetadataKey,
+            ApiKey::Metadata,
             channel_msg.versioned.api_version,
         );
 
@@ -702,7 +712,7 @@ mod test {
                 r.error_code = ErrorCode::UnsupportedVersion as i16;
                 r
             },
-            ApiKey::ApiVersionsKey,
+            ApiKey::ApiVersions,
             channel_msg.versioned.api_version,
         );
 
