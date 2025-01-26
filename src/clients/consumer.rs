@@ -3,7 +3,6 @@ use std::{
     time::Duration,
 };
 
-use fnv::FnvHashMap;
 use kafka_protocol::{
     messages::{
         fetch_request::{FetchPartition, FetchTopic},
@@ -12,6 +11,7 @@ use kafka_protocol::{
     },
     records::Record,
 };
+use rustc_hash::FxHashMap;
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinSet,
@@ -192,8 +192,8 @@ impl ConsumerTask {
 
         let cluster = self.client.borrow_cluster();
 
-        let mut broker_id_to_fetch_req = FnvHashMap::<i32, FetchRequest>::default();
-        let mut broker_id_to_offset_req = FnvHashMap::<i32, ListOffsetsRequest>::default();
+        let mut broker_id_to_fetch_req = FxHashMap::<i32, FetchRequest>::default();
+        let mut broker_id_to_offset_req = FxHashMap::<i32, ListOffsetsRequest>::default();
 
         let mut spanwed_offset_requests = false;
 
@@ -211,8 +211,8 @@ impl ConsumerTask {
                     continue;
                 }
             };
-            let mut broker_id_to_fetch_topic = FnvHashMap::<i32, FetchTopic>::default();
-            let mut broker_id_to_offset_topic = FnvHashMap::<i32, ListOffsetsTopic>::default();
+            let mut broker_id_to_fetch_topic = FxHashMap::<i32, FetchTopic>::default();
+            let mut broker_id_to_offset_topic = FxHashMap::<i32, ListOffsetsTopic>::default();
 
             for (partition_index, partition_meta) in topic_meta.iter_partition_results().enumerate()
             {

@@ -8,7 +8,6 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-use fnv::{FnvHashMap, FnvHashSet};
 use futures::FutureExt;
 use kafka_protocol::{
     messages::{
@@ -20,6 +19,7 @@ use kafka_protocol::{
         Compression, Record, RecordEncodeOptions, TimestampType, NO_PRODUCER_EPOCH, NO_PRODUCER_ID,
     },
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tokio_util::task::TaskTracker;
@@ -88,7 +88,7 @@ struct ProducerTask {
     /// This is mutated for performance during sends.
     ///
     /// TODO: when to remove an entry from the inner map?
-    context_mappings: FnvHashMap<i32, FnvHashMap<TopicPartition, Vec<ProduceContext>>>,
+    context_mappings: FxHashMap<i32, FxHashMap<TopicPartition, Vec<ProduceContext>>>,
 }
 
 const CHUNK_SIZE: usize = 2000;
@@ -136,7 +136,7 @@ impl ProducerTask {
             .collect::<Vec<_>>();
 
         self.client
-            .load_topic_metadata(FnvHashSet::<&TopicName>::from_iter(&topic_names))
+            .load_topic_metadata(FxHashSet::<&TopicName>::from_iter(&topic_names))
             .await?;
 
         let invalid_topic_names =
@@ -155,7 +155,7 @@ impl ProducerTask {
 
         for (leader_id, partitions) in self.context_mappings.iter_mut() {
             let mut req = ProduceRequest::default();
-            let mut topic_data = FnvHashMap::<TopicName, TopicProduceData>::default();
+            let mut topic_data = FxHashMap::<TopicName, TopicProduceData>::default();
 
             for (tp, contexts) in partitions.iter_mut() {
                 let mut records = BytesMut::new();
@@ -227,10 +227,10 @@ impl ProducerTask {
         &self,
         topic_names: &[TopicName],
         chunk: &mut ProduceChunk<'_, impl Partitioner>,
-    ) -> FnvHashSet<TopicName> {
+    ) -> FxHashSet<TopicName> {
         let cluster = &self.client.borrow_cluster();
 
-        let mut invalid_topic_names = FnvHashSet::<TopicName>::default();
+        let mut invalid_topic_names = FxHashSet::<TopicName>::default();
 
         let mut partitioner = chunk.partitioner.new_partitioner(cluster);
 
@@ -266,9 +266,6 @@ impl ProducerTask {
         topic_names: &[TopicName],
         chunk: ProduceChunk<'_, impl Partitioner>,
     ) {
-        // let mut mapping =
-        //     FnvHashMap::<i32, FnvHashMap<TopicPartition, Vec<ProduceContext>>>::default();
-
         let cluster = &self.client.borrow_cluster();
 
         let mut partitioner = chunk.partitioner.new_partitioner(cluster);
@@ -352,17 +349,9 @@ impl ProducerTask {
         chunk.partitioner.finish_partitioning(partitioner);
     }
 
-    // async fn send_with_acks(
-    //     &self,
-    //     mut req: ProduceRequest,
-    //     leader_id: i32,
-    //     context_map: &mut FnvHashMap<TopicPartition, Vec<ProduceContext>>,
-    // ) {
-    // }
-
     fn handle_produce_response(
         response: ProduceResponse,
-        context_map: &mut FnvHashMap<TopicPartition, Vec<ProduceContext>>,
+        context_map: &mut FxHashMap<TopicPartition, Vec<ProduceContext>>,
     ) {
         for response in response.responses.into_iter() {
             for part_response in response.partition_responses.into_iter() {

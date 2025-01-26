@@ -2,8 +2,8 @@
 
 use std::{future::Future, io};
 
-use fnv::FnvHashMap;
 use futures::{future::Either, SinkExt, StreamExt};
+use rustc_hash::FxHashMap;
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -98,8 +98,8 @@ impl<IO> KafkaChannelTask<IO> {
         let (mut sink, mut stream) =
             Framed::new(self.io, KafkaCodec::new(self.config.max_frame_length)).split();
 
-        let mut in_flight: FnvHashMap<CorrelationId, (RequestRecord, AwaitResponseSender)> =
-            FnvHashMap::with_capacity_and_hasher(self.config.send_buffer_size, Default::default());
+        let mut in_flight =
+            FxHashMap::<CorrelationId, (RequestRecord, AwaitResponseSender)>::with_capacity_and_hasher(self.config.send_buffer_size, Default::default());
 
         let mut request_buffer = Vec::with_capacity(self.config.send_buffer_size);
         let mut sender_batch = Vec::with_capacity(self.config.send_buffer_size);

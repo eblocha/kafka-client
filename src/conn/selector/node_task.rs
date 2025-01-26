@@ -1,10 +1,10 @@
 use arc_swap::ArcSwapOption;
 use derive_more::derive::From;
-use fnv::FnvHashMap;
 use kafka_protocol::{
     messages::{ApiVersionsRequest, ApiVersionsResponse},
     protocol::{Message, StrBytes, VersionRange},
 };
+use rustc_hash::FxHashMap;
 use std::{
     io,
     sync::{
@@ -105,7 +105,7 @@ pub struct NodeTaskMessage {
 #[derive(Debug)]
 pub struct VersionedConnection {
     connection: KafkaChannel,
-    versions: FnvHashMap<i16, VersionRange>,
+    versions: FxHashMap<i16, VersionRange>,
 }
 
 /// A connection task to a broker.

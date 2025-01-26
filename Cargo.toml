@@ -13,7 +13,6 @@ bytes = "1.7.1"
 clap = { version = "4.5.15", features = ["derive"] }
 derive_more = { version = "1.0.0", features = ["from"] }
 extend = "1.2.0"
-fnv = "1.0.7"
 futures = "0.3.30"
 indexmap = "2.7.1"
 indicatif = "0.17.9"
@@ -21,6 +20,7 @@ itertools = "0.14.0"
 kafka-protocol = { version = "0.14.0", features = ["messages_enums"] }
 paste = "1.0.15"
 rand = "0.8.5"
+rustc-hash = "2.1.0"
 thiserror = "1.0.63"
 tokio = { version = "1.39.2", features = ["full"] }
 tokio-stream = "0.1.17"
@@ -33,3 +33,6 @@ uuid = "1.12.0"
 [dev-dependencies]
 tokio-test = "0.4.4"
 tracing-test = "0.2.5"
+
+[profile.release]
+debug = true

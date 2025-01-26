@@ -1,7 +1,6 @@
 use std::cmp::Ordering;
 
 use derive_more::derive::From;
-use fnv::FnvHashMap;
 use kafka_protocol::{
     messages::{
         metadata_request::MetadataRequestTopic,
@@ -10,6 +9,7 @@ use kafka_protocol::{
     },
     protocol::StrBytes,
 };
+use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
 use crate::{common::Node, error::ErrorCode, util::UuidExt};
@@ -26,7 +26,7 @@ pub struct BrokerMapEntry {
 ///
 /// Used to send requests to specific brokers, or the current least-loaded broker.
 #[derive(Debug, Clone, From, Default)]
-pub struct BrokerMap(#[from] pub(crate) FnvHashMap<i32, BrokerMapEntry>);
+pub struct BrokerMap(#[from] pub(crate) FxHashMap<i32, BrokerMapEntry>);
 
 fn least_in_flight(left: &(&i32, &BrokerMapEntry), right: &(&i32, &BrokerMapEntry)) -> Ordering {
     left.1.handle.in_flight().cmp(&right.1.handle.in_flight())
@@ -202,7 +202,7 @@ impl TryFrom<MetadataResponseTopic> for TopicMetadata {
 
         let key = TopicKey::from(&meta);
 
-        let partitions: FnvHashMap<i32, Result<PartitionMetadata, ErrorCode>> = meta
+        let partitions: FxHashMap<i32, Result<PartitionMetadata, ErrorCode>> = meta
             .partitions
             .into_iter()
             .map(|partition_meta| {
@@ -255,7 +255,7 @@ pub struct Cluster {
     /// The broker id of the controller node.
     pub controller_id: i32,
     /// Maps the [`TopicKey`] to a [`Result`] containing the last metadata fetch result for the topic.
-    topics: FnvHashMap<TopicKey, Result<TopicMetadata, ErrorCode>>,
+    topics: FxHashMap<TopicKey, Result<TopicMetadata, ErrorCode>>,
     /// Maps the topic name to either the uuid or name.
     ///
     /// The [`TopicKey`] will be a [`TopicKey::Name`] when:
@@ -265,7 +265,7 @@ pub struct Cluster {
     /// The [`TopicKey`] will be a [`TopicKey::Uuid`] when:
     /// - The request was successful, and
     /// - The server supports topic uuids
-    topic_keys_by_name: FnvHashMap<TopicName, TopicKey>,
+    topic_keys_by_name: FxHashMap<TopicName, TopicKey>,
 }
 
 impl Cluster {

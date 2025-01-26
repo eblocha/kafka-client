@@ -1,8 +1,8 @@
-use fnv::{FnvHashMap, FnvHashSet};
 use kafka_protocol::messages::{
     metadata_response::{MetadataResponseBroker, MetadataResponseTopic},
     TopicName,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 use uuid::Uuid;
 
 use crate::{
@@ -19,7 +19,7 @@ pub struct TopicDescription {
     pub name: Option<TopicName>,
     pub is_internal: bool,
     pub partitions: Vec<TopicPartitionInfo>,
-    pub authorized_operations: Option<FnvHashSet<AclOperation>>,
+    pub authorized_operations: Option<FxHashSet<AclOperation>>,
     pub id: Option<Uuid>,
 }
 
@@ -27,7 +27,7 @@ pub type DescribeTopicsResult = Vec<Result<TopicDescription, ErrorCode>>;
 
 pub type ToTopicDescription<'m> = (
     MetadataResponseTopic,
-    &'m FnvHashMap<i32, MetadataResponseBroker>,
+    &'m FxHashMap<i32, MetadataResponseBroker>,
 );
 
 impl<'m> TryFrom<ToTopicDescription<'m>> for TopicDescription {

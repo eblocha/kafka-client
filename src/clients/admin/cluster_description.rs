@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use fnv::FnvHashSet;
 use kafka_protocol::messages::DescribeClusterResponse;
+use rustc_hash::FxHashSet;
 
 use crate::{
     common::{
@@ -13,7 +13,7 @@ use crate::{
 };
 
 pub struct ClusterDescription {
-    pub authorized_operations: Option<FnvHashSet<AclOperation>>,
+    pub authorized_operations: Option<FxHashSet<AclOperation>>,
     pub cluster_id: Arc<str>,
     pub controller: Option<Node>,
     pub nodes: Vec<Node>,

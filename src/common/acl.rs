@@ -1,4 +1,4 @@
-use fnv::FnvHashSet;
+use rustc_hash::FxHashSet;
 
 const MIN: u8 = 0;
 
@@ -34,12 +34,12 @@ impl From<u8> for AclOperation {
     }
 }
 
-pub fn acl_from_bitfield(bits: i32) -> Option<FnvHashSet<AclOperation>> {
+pub fn acl_from_bitfield(bits: i32) -> Option<FxHashSet<AclOperation>> {
     if bits == i32::MIN {
         return None;
     }
 
-    let mut set = FnvHashSet::default();
+    let mut set = FxHashSet::default();
 
     for i in MIN..=MAX {
         if (bits >> 1) & 1 != 0 {

@@ -1,7 +1,7 @@
-use fnv::FnvHashMap;
 use kafka_protocol::messages::metadata_response::{
     MetadataResponseBroker, MetadataResponsePartition,
 };
+use rustc_hash::FxHashMap;
 
 use crate::{common::Node, proto::error_codes::ErrorCode};
 
@@ -15,7 +15,7 @@ pub struct TopicPartitionInfo {
 
 pub type ToTopicPartitionInfo<'m> = (
     MetadataResponsePartition,
-    &'m FnvHashMap<i32, MetadataResponseBroker>,
+    &'m FxHashMap<i32, MetadataResponseBroker>,
 );
 
 impl<'m> TryFrom<ToTopicPartitionInfo<'m>> for TopicPartitionInfo {
