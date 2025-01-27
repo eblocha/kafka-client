@@ -31,7 +31,10 @@ use crate::{
     proto::ver::with_max_version,
 };
 
-use super::{KeyHashPartitioner, Partitioner, PartitionerSession};
+use super::{
+    arena::{PreparedRecord, ProducerArena},
+    KeyHashPartitioner, Partitioner, PartitionerSession,
+};
 
 pub struct ProducerRecord {
     pub topic: TopicName,
@@ -40,11 +43,6 @@ pub struct ProducerRecord {
     pub key: Option<Bytes>,
     pub value: Option<Bytes>,
     pub headers: indexmap::IndexMap<StrBytes, Option<Bytes>>,
-}
-
-struct ProduceContext {
-    record: Record,
-    tx: oneshot::Sender<Result<RecordMetadata, KafkaError>>,
 }
 
 #[non_exhaustive]
@@ -81,18 +79,7 @@ impl ProducerTaskMessage {
 
 struct ProducerTask {
     client: NetworkClient,
-    /// Mapping of broker id to a mapping of topic partition to a batch of records to send to the topic.
-    ///
-    /// This is mutated for performance during sends.
-    context_mappings: FxHashMap<i32, FxHashMap<TopicPartition, Vec<ProduceContext>>>,
-    /// Used while creating new requests to remove unused mappings from `context_mappings`.
-    ///
-    /// This is mutated for performance during sends.
-    empty_leaders: Vec<i32>,
-    /// Used while creating new requests to remove unused mappings from `context_mappings`.
-    ///
-    /// This is mutated for performance during sends.
-    empty_partitions: Vec<TopicPartition>,
+    arena: ProducerArena,
 }
 
 const CHUNK_SIZE: usize = 2000;
@@ -102,9 +89,7 @@ impl ProducerTask {
     fn new(client: NetworkClient) -> Self {
         Self {
             client,
-            context_mappings: Default::default(),
-            empty_leaders: Default::default(),
-            empty_partitions: Default::default(),
+            arena: Default::default(),
         }
     }
 
@@ -158,18 +143,18 @@ impl ProducerTask {
 
         self.create_produce_contexts(chunk);
 
-        for (leader_id, partitions) in self.context_mappings.iter_mut() {
-            if partitions.is_empty() {
-                self.empty_leaders.push(*leader_id);
+        for leader in self.arena.brokers.iter_mut() {
+            if leader.is_empty() {
+                self.arena.empty_leaders.push(leader.broker_id);
                 continue;
             }
 
             let mut req = ProduceRequest::default();
             let mut topic_data = FxHashMap::<TopicName, TopicProduceData>::default();
 
-            for (tp, contexts) in partitions.iter_mut() {
-                if contexts.is_empty() {
-                    self.empty_partitions.push(tp.clone());
+            for (tp, prepared_records) in leader.partitions.iter_mut() {
+                if prepared_records.is_empty() {
+                    self.arena.empty_partitions.push(tp.clone());
                     continue;
                 }
 
@@ -177,7 +162,7 @@ impl ProducerTask {
 
                 if let Err(e) = RecordBatchEncoder::encode(
                     &mut records,
-                    contexts.iter().map(|ctx| &ctx.record),
+                    prepared_records.iter().map(|ctx| &ctx.record),
                     &RecordEncodeOptions {
                         version: 2,
                         compression: Compression::None, // TODO config
@@ -185,7 +170,7 @@ impl ProducerTask {
                 ) {
                     tracing::error!("failed to encode record batch for topic {tp}: {e}");
 
-                    for ctx in contexts.drain(..) {
+                    for ctx in prepared_records.drain(..) {
                         let _ = ctx.tx.send(Err(KafkaError::Channel(
                             io::Error::new(io::ErrorKind::Other, "record batch failed to encode")
                                 .into(),
@@ -205,8 +190,8 @@ impl ProducerTask {
                     );
             }
 
-            for tp in self.empty_partitions.drain(..) {
-                partitions.remove(&tp);
+            for tp in self.arena.empty_partitions.drain(..) {
+                leader.partitions.remove(&tp);
             }
 
             for (name, mut data) in topic_data.into_iter() {
@@ -223,14 +208,14 @@ impl ProducerTask {
                 Some(req)
             });
 
-            let res = self.client.send_to(build_req, *leader_id).await;
+            let res = self.client.send_to(build_req, leader.broker_id).await;
 
             match res {
-                Ok(response) => Self::handle_produce_response(response, partitions),
+                Ok(response) => Self::handle_produce_response(response, &mut leader.partitions),
                 Err(e) => {
                     tracing::error!("failed to send produce request: {e}");
 
-                    for contexts in partitions.values_mut() {
+                    for contexts in leader.partitions.values_mut() {
                         for context in contexts.drain(..) {
                             let _ = context.tx.send(Err(e.representative_clone()));
                         }
@@ -239,8 +224,8 @@ impl ProducerTask {
             }
         }
 
-        for leader_id in self.empty_leaders.drain(..) {
-            self.context_mappings.remove(&leader_id);
+        for leader_id in self.arena.empty_leaders.drain(..) {
+            self.arena.brokers.remove(&leader_id);
         }
 
         Ok(())
@@ -341,12 +326,10 @@ impl ProducerTask {
                     .unwrap_or_else(|e| -(e.duration().as_millis() as i64))
             });
 
-            let part_map = self
-                .context_mappings
-                .entry(partition.leader_id)
-                .or_default();
+            let part_map = self.arena.brokers.get_mut_or_default(partition.leader_id);
 
             let records = part_map
+                .partitions
                 .entry(TopicPartition::new(
                     msg.record.topic.clone(),
                     partition.index,
@@ -370,7 +353,7 @@ impl ProducerTask {
                 headers: msg.record.headers,
             };
 
-            records.push(ProduceContext { record, tx: msg.tx });
+            records.push(PreparedRecord { record, tx: msg.tx });
         }
 
         chunk.partitioner.finish_partitioning(partitioner);
@@ -378,7 +361,7 @@ impl ProducerTask {
 
     fn handle_produce_response(
         response: ProduceResponse,
-        context_map: &mut FxHashMap<TopicPartition, Vec<ProduceContext>>,
+        context_map: &mut FxHashMap<TopicPartition, Vec<PreparedRecord>>,
     ) {
         for response in response.responses.into_iter() {
             for part_response in response.partition_responses.into_iter() {

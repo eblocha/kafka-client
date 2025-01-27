@@ -1,3 +1,4 @@
+mod arena;
 mod client;
 mod partitioner;
 
