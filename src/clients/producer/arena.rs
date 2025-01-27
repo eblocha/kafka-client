@@ -1,4 +1,7 @@
-use kafka_protocol::records::Record;
+use kafka_protocol::{
+    messages::{produce_request::TopicProduceData, TopicName},
+    records::Record,
+};
 use rustc_hash::FxHashMap;
 use tokio::sync::oneshot;
 
@@ -97,4 +100,6 @@ pub struct ProducerArena {
     ///
     /// This is mutated for performance during sends.
     pub empty_partitions: Vec<TopicPartition>,
+    /// Reusable mapping for organizing topic batches
+    pub topic_data: FxHashMap<TopicName, TopicProduceData>,
 }

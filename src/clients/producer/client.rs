@@ -150,7 +150,6 @@ impl ProducerTask {
             }
 
             let mut req = ProduceRequest::default();
-            let mut topic_data = FxHashMap::<TopicName, TopicProduceData>::default();
 
             for (tp, prepared_records) in leader.partitions.iter_mut() {
                 if prepared_records.is_empty() {
@@ -179,22 +178,25 @@ impl ProducerTask {
                     continue;
                 }
 
-                topic_data
-                    .entry(tp.name().clone())
-                    .or_default()
-                    .partition_data
-                    .push(
-                        PartitionProduceData::default()
-                            .with_index(tp.partition())
-                            .with_records(Some(records.into())),
+                let partition_data = PartitionProduceData::default()
+                    .with_index(tp.partition())
+                    .with_records(Some(records.into()));
+
+                if let Some(produce_data) = self.arena.topic_data.get_mut(tp.name()) {
+                    produce_data.partition_data.push(partition_data);
+                } else {
+                    self.arena.topic_data.insert(
+                        tp.name().clone(),
+                        TopicProduceData::default().with_partition_data(vec![partition_data]),
                     );
+                }
             }
 
             for tp in self.arena.empty_partitions.drain(..) {
                 leader.partitions.remove(&tp);
             }
 
-            for (name, mut data) in topic_data.into_iter() {
+            for (name, mut data) in self.arena.topic_data.drain() {
                 data.name = name;
                 req.topic_data.push(data);
             }
