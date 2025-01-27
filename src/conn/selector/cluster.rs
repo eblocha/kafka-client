@@ -26,27 +26,24 @@ pub struct BrokerMapEntry {
 ///
 /// Used to send requests to specific brokers, or the current least-loaded broker.
 #[derive(Debug, Clone, From, Default)]
-pub struct BrokerMap(#[from] pub(super) FxHashMap<i32, BrokerMapEntry>);
+pub struct BrokerMap(#[from] Vec<BrokerMapEntry>);
 
-fn least_in_flight(left: &(&i32, &BrokerMapEntry), right: &(&i32, &BrokerMapEntry)) -> Ordering {
-    left.1.handle.in_flight().cmp(&right.1.handle.in_flight())
+fn least_in_flight(left: &&BrokerMapEntry, right: &&BrokerMapEntry) -> Ordering {
+    left.handle.in_flight().cmp(&right.handle.in_flight())
 }
 
-fn least_failure_streak(
-    left: &(&i32, &BrokerMapEntry),
-    right: &(&i32, &BrokerMapEntry),
-) -> Ordering {
-    left.1
-        .handle
+fn least_failure_streak(left: &&BrokerMapEntry, right: &&BrokerMapEntry) -> Ordering {
+    left.handle
         .failure_streak()
-        .cmp(&right.1.handle.failure_streak())
+        .cmp(&right.handle.failure_streak())
 }
 
 impl BrokerMap {
     /// Get a broker map entry for a specific broker by id.
     pub fn get_connection_for(&self, broker_id: i32) -> Option<&BrokerMapEntry> {
-        self.0.get(&broker_id)
+        self.0.iter().find(|entry| entry.node.id == broker_id)
     }
+
     /// Get the current "best" connection handle.
     ///
     /// This will prefer connected brokers with the minimum number of pending requests, then favor the minimum number of
@@ -57,16 +54,16 @@ impl BrokerMap {
         let least_loaded_connected = self
             .0
             .iter()
-            .filter_map(|(id, entry)| {
+            .filter_map(|entry| {
                 if entry.handle.capacity().is_some_and(|cap| cap > 0) {
-                    Some((id, entry))
+                    Some(entry)
                 } else {
                     None
                 }
             })
             .min_by(least_in_flight);
 
-        if let Some((_, entry)) = least_loaded_connected {
+        if let Some(entry) = least_loaded_connected {
             return Some(entry.clone());
         }
 
@@ -74,28 +71,62 @@ impl BrokerMap {
         let least_loaded_no_failures = self
             .0
             .iter()
-            .filter_map(|(id, entry)| {
+            .filter_map(|entry| {
                 if entry.handle.failure_streak() == 0 {
-                    Some((id, entry))
+                    Some(entry)
                 } else {
                     None
                 }
             })
             .min_by(least_in_flight);
 
-        if let Some((_, entry)) = least_loaded_no_failures {
+        if let Some(entry) = least_loaded_no_failures {
             return Some(entry.clone());
         }
 
         // lastly, prefer nodes with the lowest failure streak
-        self.0
-            .iter()
-            .min_by(least_failure_streak)
-            .map(|(_, entry)| entry.clone())
+        self.0.iter().min_by(least_failure_streak).cloned()
     }
 
     pub(super) fn list_nodes(&self) -> Vec<&Node> {
-        self.0.values().map(|entry| &entry.node).collect::<Vec<_>>()
+        self.0.iter().map(|entry| &entry.node).collect()
+    }
+
+    pub(super) fn drain(&mut self) -> impl Iterator<Item = BrokerMapEntry> + use<'_> {
+        self.0.drain(..).map(|entry| entry)
+    }
+
+    pub(super) fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&mut BrokerMapEntry) -> bool,
+    {
+        self.0.retain_mut(|entry| f(entry));
+    }
+
+    pub(super) fn get_mut(&mut self, broker_id: &i32) -> Option<&mut BrokerMapEntry> {
+        self.0.iter_mut().find(|entry| entry.node.id == *broker_id)
+    }
+
+    pub(super) fn insert(&mut self, entry: BrokerMapEntry) {
+        if let Some(existing) = self.get_mut(&entry.node.id) {
+            *existing = entry;
+        } else {
+            self.0.push(entry);
+        }
+    }
+
+    pub(super) fn remove(&mut self, broker_id: &i32) -> Option<BrokerMapEntry> {
+        let Some(idx) = self.0.iter().enumerate().find_map(|(i, entry)| {
+            if &entry.node.id == broker_id {
+                Some(i)
+            } else {
+                None
+            }
+        }) else {
+            return None;
+        };
+
+        Some(self.0.swap_remove(idx))
     }
 }
 

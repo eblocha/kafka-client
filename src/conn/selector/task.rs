@@ -254,7 +254,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             }
         }
 
-        for (_, entry) in self.hosts.0.drain() {
+        for entry in self.hosts.drain() {
             entry.handle.cancellation_token.cancel();
         }
 
@@ -311,12 +311,12 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             .retain(|host, _| new_broker_hosts.contains(host));
 
         // remove nodes that are not in the cluster
-        self.hosts.0.retain(|id, entry| {
-            let keep = new_broker_ids.contains_key(id);
+        self.hosts.retain(|entry| {
+            let keep = new_broker_ids.contains_key(&entry.node.id);
 
             if !keep {
                 tracing::debug!(
-                    broker_id = id,
+                    broker_id = entry.node.id,
                     host = ?entry.node.host,
                     "removing connection to broker"
                 );
@@ -332,7 +332,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         for (broker_id, broker) in new_broker_ids {
             let new_node = Node::from(broker);
 
-            if let Some(entry) = self.hosts.0.get_mut(&broker_id) {
+            if let Some(entry) = self.hosts.get_mut(&broker_id) {
                 let host = &entry.node.host;
 
                 if entry.handle.tx.is_closed() {
@@ -379,13 +379,11 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
 
         self.join_set.spawn(task.run());
 
-        self.hosts
-            .0
-            .insert(broker_id, BrokerMapEntry { node, handle });
+        self.hosts.insert(BrokerMapEntry { node, handle });
     }
 
     async fn restart_if_needed(&mut self, mut dead_task: NodeTask<Conn>) {
-        if let Some(mut entry) = self.hosts.0.remove(&dead_task.broker_id) {
+        if let Some(mut entry) = self.hosts.remove(&dead_task.broker_id) {
             tracing::debug!(
                 broker_id = dead_task.broker_id,
                 host = ?entry.node.host,
@@ -410,7 +408,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
 
             dead_task.host = entry.node.host.clone();
 
-            self.hosts.0.insert(dead_task.broker_id, entry);
+            self.hosts.insert(entry);
             self.join_set.spawn(dead_task.run());
         }
     }
@@ -479,17 +477,14 @@ impl SelectorTaskHandle {
 
             join_set.spawn(task.run());
 
-            hosts.0.insert(
-                id,
-                BrokerMapEntry {
-                    node: Node {
-                        id,
-                        host: host.clone(),
-                        rack: None,
-                    },
-                    handle,
+            hosts.insert(BrokerMapEntry {
+                node: Node {
+                    id,
+                    host: host.clone(),
+                    rack: None,
                 },
-            );
+                handle,
+            });
         }
 
         let cancellation_token = CancellationToken::new();
