@@ -81,10 +81,12 @@ impl Run for ProduceRandom {
 
         let now = Instant::now();
 
-        let bar = ProgressBar::new(self.count);
+        let u64_usize = self.size as u64;
+
+        let bar = ProgressBar::new(self.count * u64_usize);
         bar.set_style(
             ProgressStyle::with_template(
-                "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg} {per_sec}",
+                "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg} {bytes_per_sec}",
             )
             .unwrap()
             .progress_chars("##-"),
@@ -109,7 +111,7 @@ impl Run for ProduceRandom {
                 })
                 .await?;
 
-            bar.inc(1);
+            bar.inc(u64_usize);
         }
 
         producer.flush_and_shutdown().await;

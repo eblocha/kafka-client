@@ -141,7 +141,7 @@ impl ProducerTask {
                 .await?;
         }
 
-        self.create_produce_contexts(chunk);
+        self.populate_arena(chunk);
 
         for leader in self.arena.brokers.iter_mut() {
             if leader.is_empty() {
@@ -271,10 +271,18 @@ impl ProducerTask {
         invalid_topic_names
     }
 
-    fn create_produce_contexts(&mut self, chunk: ProduceChunk<'_, impl Partitioner>) {
+    fn populate_arena(&mut self, chunk: ProduceChunk<'_, impl Partitioner>) {
         let cluster = &self.client.borrow_cluster();
 
         let mut partitioner = chunk.partitioner.new_partitioner(cluster);
+
+        let fallback_timestamp = {
+            let start = SystemTime::now();
+            start
+                .duration_since(UNIX_EPOCH)
+                .map(|ts| ts.as_millis() as i64)
+                .unwrap_or_else(|e| -(e.duration().as_millis() as i64))
+        };
 
         for mut msg in chunk.messages {
             let topic_data = match cluster
@@ -318,13 +326,7 @@ impl ProducerTask {
                 }
             };
 
-            let timestamp = msg.record.timestamp.unwrap_or_else(|| {
-                let start = SystemTime::now();
-                start
-                    .duration_since(UNIX_EPOCH)
-                    .map(|ts| ts.as_millis() as i64)
-                    .unwrap_or_else(|e| -(e.duration().as_millis() as i64))
-            });
+            let timestamp = msg.record.timestamp.unwrap_or(fallback_timestamp);
 
             let part_map = self.arena.brokers.get_mut_or_default(partition.leader_id);
 
