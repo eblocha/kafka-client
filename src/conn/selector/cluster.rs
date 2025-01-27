@@ -152,8 +152,6 @@ impl TryFrom<MetadataResponsePartition> for PartitionMetadata {
 #[derive(Debug, Clone)]
 pub struct TopicMetadata {
     pub name: TopicName,
-    pub id: Option<Uuid>,
-    pub is_internal: bool,
     partitions: Vec<Result<PartitionMetadata, ErrorCode>>,
 }
 
@@ -223,22 +221,8 @@ impl TryFrom<(TopicName, MetadataResponseTopic)> for TopicMetadata {
 
         Ok(Self {
             name,
-            id: meta.topic_id.as_optional(),
-            is_internal: meta.is_internal,
             partitions: partitions_vec,
         })
-    }
-}
-
-impl From<&TopicMetadata> for MetadataRequestTopic {
-    fn from(value: &TopicMetadata) -> Self {
-        let mut req = MetadataRequestTopic::default();
-        req.name = Some(value.name.clone());
-        if let Some(id) = value.id {
-            req.topic_id = id;
-        }
-
-        req
     }
 }
 
@@ -375,8 +359,10 @@ impl ClusterMetadata {
                 Some(Ok(meta)) => {
                     // Use the name for the key instead of the uuid, since it no longer exists.
                     let new_key = TopicKey::Name(meta.name.clone());
-                    self.topics
-                        .insert(new_key.clone(), (meta.name.clone(), topic_meta).try_into());
+                    self.topics.insert(
+                        new_key.clone(),
+                        TopicMetadata::try_from((meta.name.clone(), topic_meta)),
+                    );
                     self.topic_keys_by_name.insert(meta.name, new_key);
                 }
                 _ => {
@@ -507,7 +493,6 @@ mod test {
             topic_metadata.name,
             TopicName::from_string("topic-a".into())
         );
-        assert_eq!(topic_metadata.id, Some(topic_id));
 
         let partition_0 = topic_metadata.get_partition_metadata(0);
         let partition_1 = topic_metadata.get_partition_metadata(1);
@@ -567,7 +552,6 @@ mod test {
         let topic = topic.unwrap();
 
         assert_eq!(topic.name, topic_name);
-        assert_eq!(topic.id, Some(topic_id));
 
         let topic = metadata.get_topic_metadata_by_name(&topic_name);
 
@@ -576,7 +560,6 @@ mod test {
         let topic = topic.unwrap();
 
         assert_eq!(topic.name, TopicName::from_string("topic-a".into()));
-        assert_eq!(topic.id, Some(topic_id));
     }
 
     /// Verify the cluster properly handles when we attempt to fetch by uuid, but the topic is not found.
