@@ -32,7 +32,7 @@ pub enum ProducerCommands {
         #[arg(short, long, required = true)]
         topic: String,
         /// Number of records to send
-        #[arg(short, long, default_value_t = 800_000)]
+        #[arg(short, long, default_value_t = 10_000_000)]
         count: u64,
         /// Number of bytes to generate for each record value
         #[arg(short, long, default_value_t = 100)]
