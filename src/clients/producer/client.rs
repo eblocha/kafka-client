@@ -253,7 +253,7 @@ impl ProducerTask {
             };
 
             if msg.user_partition.is_none() {
-                partitioner.partition(&mut msg.record, &topic_data);
+                partitioner.partition(&mut msg.record, topic_data);
             }
 
             if msg
@@ -309,7 +309,7 @@ impl ProducerTask {
                 // Only partition records that did not get partitioned in the first round, or whose partitions no
                 // longer exist after refreshing topic data.
                 // However, if there is a user-specified partition, do not re-partition to another one.
-                partitioner.partition(&mut msg.record, &topic_data);
+                partitioner.partition(&mut msg.record, topic_data);
             }
 
             // If the index changed, try to find it again

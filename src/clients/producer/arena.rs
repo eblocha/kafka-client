@@ -41,15 +41,13 @@ impl ProduceLeaders {
     }
 
     pub fn remove(&mut self, broker_id: &i32) -> Option<LeaderPreparedRecords> {
-        let Some(idx) = self.0.iter().enumerate().find_map(|(i, entry)| {
+        let idx = self.0.iter().enumerate().find_map(|(i, entry)| {
             if &entry.broker_id == broker_id {
                 Some(i)
             } else {
                 None
             }
-        }) else {
-            return None;
-        };
+        })?;
 
         Some(self.0.swap_remove(idx))
     }

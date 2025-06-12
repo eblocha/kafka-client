@@ -54,13 +54,7 @@ impl BrokerMap {
         let least_loaded_connected = self
             .0
             .iter()
-            .filter_map(|entry| {
-                if entry.handle.capacity().is_some_and(|cap| cap > 0) {
-                    Some(entry)
-                } else {
-                    None
-                }
-            })
+            .filter(|entry| entry.handle.capacity().is_some_and(|cap| cap > 0))
             .min_by(least_in_flight);
 
         if let Some(entry) = least_loaded_connected {
@@ -71,13 +65,7 @@ impl BrokerMap {
         let least_loaded_no_failures = self
             .0
             .iter()
-            .filter_map(|entry| {
-                if entry.handle.failure_streak() == 0 {
-                    Some(entry)
-                } else {
-                    None
-                }
-            })
+            .filter(|entry| entry.handle.failure_streak() == 0)
             .min_by(least_in_flight);
 
         if let Some(entry) = least_loaded_no_failures {
@@ -93,7 +81,7 @@ impl BrokerMap {
     }
 
     pub(super) fn drain(&mut self) -> impl Iterator<Item = BrokerMapEntry> + use<'_> {
-        self.0.drain(..).map(|entry| entry)
+        self.0.drain(..)
     }
 
     pub(super) fn retain<F>(&mut self, mut f: F)
@@ -116,15 +104,13 @@ impl BrokerMap {
     }
 
     pub(super) fn remove(&mut self, broker_id: &i32) -> Option<BrokerMapEntry> {
-        let Some(idx) = self.0.iter().enumerate().find_map(|(i, entry)| {
+        let idx = self.0.iter().enumerate().find_map(|(i, entry)| {
             if &entry.node.id == broker_id {
                 Some(i)
             } else {
                 None
             }
-        }) else {
-            return None;
-        };
+        })?;
 
         Some(self.0.swap_remove(idx))
     }
@@ -193,7 +179,7 @@ impl TopicMetadata {
             return Err(ErrorCode::UnknownTopicOrPartition);
         };
 
-        return result.as_ref().map_err(|e| *e);
+        result.as_ref().map_err(|e| *e)
     }
 
     #[inline]

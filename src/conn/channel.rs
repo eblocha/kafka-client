@@ -168,7 +168,7 @@ impl<IO> KafkaChannelTask<IO> {
                                 tracing::trace!("io sink failed to flush frames: {:?}", e);
                                 // if the flush fails, notify all requests that they failed to send
                                 for (_, sender, _) in sender_batch.drain(..) {
-                                    let _ = sender.send_err(e.kind().into());
+                                    sender.send_err(e.kind().into());
                                 }
                             }
                             Ok(_) => {

@@ -108,7 +108,7 @@ impl NetworkClient {
                 .filter(|topic_name| {
                     cluster_state
                         .metadata
-                        .get_topic_key_by_name(*topic_name)
+                        .get_topic_key_by_name(topic_name)
                         .is_none()
                 })
                 .map(|name| MetadataRequestTopic::default().with_name(Some(name.clone())))
