@@ -9,7 +9,7 @@ use super::{cluster::BrokerMapEntry, RefreshMetadataRequest};
 fn create_metadata_request(
     version: i16,
     topics: Option<Vec<MetadataRequestTopic>>,
-) -> Option<MetadataRequest> {
+) -> MetadataRequest {
     let mut r = MetadataRequest::default();
 
     if version >= 4 {
@@ -26,7 +26,7 @@ fn create_metadata_request(
 
     r.topics = topics;
 
-    Some(r)
+    r
 }
 
 pub struct MetadataRefreshContext {
@@ -51,7 +51,7 @@ impl MetadataRefreshTask {
             .entry
             .handle
             .send(with_max_version(move |ver| {
-                create_metadata_request(ver, self.topics)
+                Some(create_metadata_request(ver, self.topics))
             }))
             .await;
 

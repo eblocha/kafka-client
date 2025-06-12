@@ -151,7 +151,7 @@ impl ProducerTask {
 
             let mut req = ProduceRequest::default();
 
-            for (tp, prepared_records) in leader.partitions.iter_mut() {
+            for (tp, prepared_records) in &mut leader.partitions {
                 if prepared_records.is_empty() {
                     self.arena.empty_partitions.push(tp.clone());
                     continue;
@@ -243,7 +243,7 @@ impl ProducerTask {
 
         let mut partitioner = chunk.partitioner.new_partitioner(cluster);
 
-        for msg in chunk.messages.iter_mut() {
+        for msg in &mut chunk.messages {
             let Ok(topic_data) = cluster
                 .metadata
                 .get_topic_metadata_by_name(&msg.record.topic)
@@ -280,10 +280,10 @@ impl ProducerTask {
 
         let fallback_timestamp = {
             let start = SystemTime::now();
-            start
-                .duration_since(UNIX_EPOCH)
-                .map(|ts| ts.as_millis() as i64)
-                .unwrap_or_else(|e| -(e.duration().as_millis() as i64))
+            start.duration_since(UNIX_EPOCH).map_or_else(
+                |e| -(e.duration().as_millis() as i64),
+                |ts| ts.as_millis() as i64,
+            )
         };
 
         for mut msg in chunk.messages {
@@ -367,8 +367,8 @@ impl ProducerTask {
         response: ProduceResponse,
         context_map: &mut FxHashMap<TopicPartition, Vec<PreparedRecord>>,
     ) {
-        for response in response.responses.into_iter() {
-            for part_response in response.partition_responses.into_iter() {
+        for response in response.responses {
+            for part_response in response.partition_responses {
                 let tp = TopicPartition::new(response.name.clone(), part_response.index);
 
                 let Some(contexts) = context_map.get_mut(&tp) else {
@@ -425,6 +425,7 @@ impl Future for ProduceFuture {
 
 impl Producer {
     /// Create a new producer with the default [`Partitioner`].
+    #[must_use]
     pub fn new(client: NetworkClient) -> Self {
         Self::new_with_partitioner(client, KeyHashPartitioner)
     }
@@ -477,16 +478,16 @@ impl Producer {
         drop(self.tx);
         self.task_tracker.close();
         self.task_tracker.wait().await;
-        self.client.shutdown().await
+        self.client.shutdown().await;
     }
 
     /// Stop the client and prevent any future messages
     pub async fn shutdown(&self) {
-        self.client.shutdown().await
+        self.client.shutdown().await;
     }
 
     /// Resolves when the client as shut down
     pub async fn await_shutdown(&self) {
-        self.client.await_shutdown().await
+        self.client.await_shutdown().await;
     }
 }

@@ -56,7 +56,7 @@ impl PartitionerSession for RandomPartitionerSession {
                 Ok(p) => Some(p.index),
                 Err(_) => None,
             })
-            .choose(&mut self.0)
+            .choose(&mut self.0);
     }
 }
 

@@ -41,6 +41,7 @@ impl From<oneshot::error::RecvError> for KafkaError {
 
 impl KafkaError {
     /// Clone a simpler representation of this [`KafkaError`], which removes the non-cloneable parts.
+    #[must_use]
     pub fn representative_clone(&self) -> Self {
         match self {
             KafkaError::Channel(channel) => KafkaError::Channel(match channel {

@@ -109,16 +109,16 @@ impl<IO> KafkaChannelTask<IO> {
         loop {
             let either = tokio::select! {
                 biased;
-                _ = self.cancellation_token.cancelled() => break,
+                () = self.cancellation_token.cancelled() => break,
                 next_res = stream.next() => Either::Right(next_res),
                 count = self.rx.recv_many(&mut request_buffer, self.config.send_buffer_size) => Either::Left(count),
             };
 
             match either {
-                Either::Left(count) => match count {
-                    // 0 means all senders dropped, and no remaining messages. This happens only when the connection is dropped.
-                    0 => break,
-                    _ => {
+                Either::Left(count) => {
+                    if count == 0 {
+                        break;
+                    } else {
                         tracing::trace!("sending {} frame(s)", request_buffer.len());
                         for message in request_buffer.drain(..) {
                             let id = CorrelationId(correlation_id);
@@ -141,13 +141,13 @@ impl<IO> KafkaChannelTask<IO> {
                             let api_key = encodable.api_key();
 
                             match sink.feed(encodable).await {
-                                Ok(_) => {
+                                Ok(()) => {
                                     tracing::trace!(
                                         correlation_id = id.0,
                                         api_key = ?api_key,
                                         "io sink fed frame",
                                     );
-                                    sender_batch.push((id, message.tx, record))
+                                    sender_batch.push((id, message.tx, record));
                                 }
                                 Err(e) => {
                                     tracing::trace!(
@@ -163,30 +163,27 @@ impl<IO> KafkaChannelTask<IO> {
                             correlation_id += 1;
                         }
 
-                        match sink.flush().await {
-                            Err(e) => {
-                                tracing::trace!("io sink failed to flush frames: {:?}", e);
-                                // if the flush fails, notify all requests that they failed to send
-                                for (_, sender, _) in sender_batch.drain(..) {
-                                    sender.send_err(e.kind().into());
-                                }
+                        if let Err(e) = sink.flush().await {
+                            tracing::trace!("io sink failed to flush frames: {:?}", e);
+                            // if the flush fails, notify all requests that they failed to send
+                            for (_, sender, _) in sender_batch.drain(..) {
+                                sender.send_err(e.kind().into());
                             }
-                            Ok(_) => {
-                                tracing::trace!("io sink flushed frames");
-                                for (correlation_id, sender, record) in sender_batch.drain(..) {
-                                    match sender {
-                                        ResponseSender::OnResponse(sender) => {
-                                            in_flight.insert(correlation_id, (record, sender));
-                                        }
-                                        ResponseSender::OnFlush(sender) => {
-                                            let _ = sender.send(Ok(()));
-                                        }
+                        } else {
+                            tracing::trace!("io sink flushed frames");
+                            for (correlation_id, sender, record) in sender_batch.drain(..) {
+                                match sender {
+                                    ResponseSender::OnResponse(sender) => {
+                                        in_flight.insert(correlation_id, (record, sender));
+                                    }
+                                    ResponseSender::OnFlush(sender) => {
+                                        let _ = sender.send(Ok(()));
                                     }
                                 }
                             }
                         }
                     }
-                },
+                }
                 Either::Right(next_res) => match next_res {
                     Some(Ok(frame)) => {
                         tracing::trace!(

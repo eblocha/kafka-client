@@ -1,4 +1,4 @@
-//! These are here because kafka_protocol adds a generic to encode/decode that forces you to name the types.
+//! These are here because `kafka_protocol` adds a generic to encode/decode that forces you to name the types.
 //!
 //! It doesn't _need_ to require this, but it does.
 

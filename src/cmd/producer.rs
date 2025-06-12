@@ -3,6 +3,7 @@ use std::{path::PathBuf, time::Instant};
 use anyhow::anyhow;
 use bytes::Bytes;
 use clap::Subcommand;
+use indexmap::IndexMap;
 use indicatif::{HumanCount, ProgressBar, ProgressStyle};
 use kafka_protocol::{messages::TopicName, protocol::StrBytes};
 use rand::RngCore;
@@ -60,7 +61,7 @@ impl Run for ProducerCommands {
                 ProduceRandom { topic, count, size }.run(client).await
             }
             ProducerCommands::File { file, topic } => {
-                ProduceFromFile { file, topic }.run(client).await
+                ProduceFromFile { topic, file }.run(client).await
             }
         }
     }
@@ -102,7 +103,7 @@ impl Run for ProduceRandom {
 
             producer
                 .send(ProducerRecord {
-                    headers: Default::default(),
+                    headers: IndexMap::default(),
                     key: None,
                     partition: None,
                     timestamp: None,
@@ -146,7 +147,7 @@ impl ProduceFromFile {
         while let Some(line) = reader.next_line().await? {
             let rx = producer
                 .send(ProducerRecord {
-                    headers: Default::default(),
+                    headers: IndexMap::default(),
                     key: None,
                     partition: None,
                     timestamp: None,

@@ -80,8 +80,8 @@ impl AdminCommands {
                     };
 
                     let id_text = match topic.id {
-                        Some(id) => format!(" (id: {})", id),
-                        None => "".to_owned(),
+                        Some(id) => format!(" (id: {id})"),
+                        None => String::new(),
                     };
 
                     println!(
@@ -89,22 +89,21 @@ impl AdminCommands {
                         topic
                             .name
                             .as_ref()
-                            .map(|name| name.as_str())
-                            .unwrap_or(name.as_str()),
+                            .map_or(name.as_str(), |name| name.as_str()),
                         id_text,
                         if topic.is_internal { " (internal)" } else { "" }
                     );
 
                     let acl_text = match topic.authorized_operations {
-                        Some(acl) => format!("{:?}", acl),
+                        Some(acl) => format!("{acl:?}"),
                         None => "None".to_owned(),
                     };
 
-                    println!("    authorized ops: {}", acl_text);
+                    println!("    authorized ops: {acl_text}");
 
-                    for partition in topic.partitions.into_iter() {
+                    for partition in topic.partitions {
                         let leader_text = match partition.leader {
-                            Some(node) => format!("{}", node),
+                            Some(node) => format!("{node}"),
                             None => "Unknown".to_owned(),
                         };
 
@@ -152,7 +151,7 @@ impl AdminCommands {
                         } else {
                             ""
                         }
-                    )
+                    );
                 }
             }
             AdminCommands::CreateTopics {
@@ -180,8 +179,8 @@ impl AdminCommands {
                     };
 
                     let id_text = match result.id {
-                        Some(id) => format!(" (id: {})", id),
-                        None => "".to_owned(),
+                        Some(id) => format!(" (id: {id})"),
+                        None => String::new(),
                     };
 
                     println!(
@@ -209,11 +208,7 @@ impl AdminCommands {
                         Ok(deleted) => {
                             println!(
                                 "{}: OK",
-                                deleted
-                                    .name
-                                    .as_ref()
-                                    .map(|t| t.as_str())
-                                    .unwrap_or(name.as_str())
+                                deleted.name.as_ref().map_or(name.as_str(), |t| t.as_str())
                             );
                         }
                         Err(e) => {

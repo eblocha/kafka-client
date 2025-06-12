@@ -113,7 +113,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
 
             let event = tokio::select! {
                 biased;
-                _ = self.cancellation_token.cancelled() => break,
+                () = self.cancellation_token.cancelled() => break,
                 // An err here means it panicked. There's no way to recover the original context, so let it go.
                 Some(Ok(metadata_refreshed)) = self.metadata_join_set.join_next() => Event::RefreshComplete(metadata_refreshed),
                 Some(req) = metadata_fut => Event::RefreshStart(req),
@@ -266,7 +266,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             if let Err(join_err) = result {
                 if join_err.is_panic() {
                     clean_shutdown = false;
-                    tracing::error!("metadata refresh task stopped with an error: {join_err}")
+                    tracing::error!("metadata refresh task stopped with an error: {join_err}");
                 }
             }
         }
@@ -275,12 +275,12 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             if let Err(join_err) = result {
                 if join_err.is_panic() {
                     clean_shutdown = false;
-                    tracing::error!("a broker connection task stopped with an error: {join_err}")
+                    tracing::error!("a broker connection task stopped with an error: {join_err}");
                 }
             }
         }
 
-        let _ = self.tx.send(Default::default());
+        let _ = self.tx.send(Cluster::default());
 
         if clean_shutdown {
             tracing::info!("shut down gracefully");
@@ -459,7 +459,7 @@ impl SelectorTaskHandle {
     pub async fn shutdown(&self) {
         self.task_tracker.close();
         self.cancellation_token.cancel();
-        self.await_shutdown().await
+        self.await_shutdown().await;
     }
 
     async fn try_new_with_connect<Conn: Connect + Clone + Send + 'static>(
@@ -467,7 +467,7 @@ impl SelectorTaskHandle {
         config: ConnectionManagerConfig,
         connect: Conn,
     ) -> Result<Self, KafkaError> {
-        let mut hosts: BrokerMap = Default::default();
+        let mut hosts: BrokerMap = BrokerMap::default();
         let mut join_set = JoinSet::new();
 
         for (id, host) in bootstrap.iter().enumerate() {

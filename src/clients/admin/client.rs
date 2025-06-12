@@ -25,6 +25,7 @@ pub struct AdminClient {
 }
 
 impl AdminClient {
+    #[must_use]
     pub fn new(client: NetworkClient) -> Self {
         Self { client }
     }
@@ -66,6 +67,7 @@ impl AdminClient {
                     req.allow_auto_topic_creation = false;
                 }
 
+                #[allow(clippy::manual_range_contains)]
                 if ver >= 8 && ver <= 10 {
                     req.include_cluster_authorized_operations = true;
                 }
@@ -175,7 +177,7 @@ impl AdminClient {
 
                 match topics {
                     TopicCollection::Ids(ids) => {
-                        for id in ids.into_iter() {
+                        for id in ids {
                             req.topics.push({
                                 let mut topic = DeleteTopicState::default();
                                 topic.topic_id = id;
@@ -185,11 +187,11 @@ impl AdminClient {
                     }
                     TopicCollection::Names(names) => {
                         if ver < 6 {
-                            for name in names.into_iter() {
+                            for name in names {
                                 req.topic_names.push(TopicName::from_string(name));
                             }
                         } else {
-                            for name in names.into_iter() {
+                            for name in names {
                                 req.topics.push({
                                     let mut topic = DeleteTopicState::default();
                                     topic.name = Some(TopicName::from_string(name));
@@ -212,10 +214,10 @@ impl AdminClient {
     }
 
     pub async fn shutdown(&self) {
-        self.client.shutdown().await
+        self.client.shutdown().await;
     }
 
     pub async fn await_shutdown(&self) {
-        self.client.await_shutdown().await
+        self.client.await_shutdown().await;
     }
 }

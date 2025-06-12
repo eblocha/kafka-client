@@ -139,7 +139,7 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
         loop {
             let NodeTaskMessage { tx } = tokio::select! {
                 biased;
-                _ = self.cancellation_token.cancelled() => break,
+                () = self.cancellation_token.cancelled() => break,
                 Some(msg) = self.rx.recv() => msg,
                 else => break
             };
@@ -165,16 +165,15 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
 
                 self.backoff.failure(backoff, ());
             } else {
-                self.backoff.success()
+                self.backoff.success();
             }
 
-            match &conn_result {
-                Ok(_) => self.backoff.success(),
-                Err(_) => {
-                    let (min, max) = (self.retry_config.min_backoff, self.retry_config.max_backoff);
-                    let backoff = exponential_backoff(min, max, self.backoff.count());
-                    self.backoff.schedule_next(backoff, ());
-                }
+            if conn_result.is_ok() {
+                self.backoff.success()
+            } else {
+                let (min, max) = (self.retry_config.min_backoff, self.retry_config.max_backoff);
+                let backoff = exponential_backoff(min, max, self.backoff.count());
+                self.backoff.schedule_next(backoff, ());
             }
 
             let _ = tx.send(conn_result);
@@ -188,7 +187,7 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
 
         let result = tokio::select! {
             biased;
-            _ = self.cancellation_token.cancelled() => return Err(ConnectAttemptError::Cancelled),
+            () = self.cancellation_token.cancelled() => return Err(ConnectAttemptError::Cancelled),
             result = tokio::time::timeout(self.retry_config.connection_timeout, connect_fut) => result,
         };
 
@@ -445,7 +444,7 @@ pub fn new_pair<Conn>(
         retry_config,
         connection: handle.connection.clone(),
         connect,
-        backoff: Default::default(),
+        backoff: BackoffSession::default(),
     };
 
     (handle, task)

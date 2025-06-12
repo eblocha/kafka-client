@@ -126,9 +126,9 @@ impl ConsumerTask {
     async fn recv_next_event(&mut self) -> ConsumerTaskEvent {
         tokio::select! {
             biased;
-            _ = self.client.await_shutdown() => ConsumerTaskEvent::Shutdown,
-            _ = self.tx.closed() => ConsumerTaskEvent::Shutdown,
-            command = self.rx.recv() => command.map(ConsumerTaskEvent::Command).unwrap_or(ConsumerTaskEvent::Shutdown),
+            () = self.client.await_shutdown() => ConsumerTaskEvent::Shutdown,
+            () = self.tx.closed() => ConsumerTaskEvent::Shutdown,
+            command = self.rx.recv() => command.map_or(ConsumerTaskEvent::Shutdown, ConsumerTaskEvent::Command),
             _ = self.poll_backoff.wait_next() => ConsumerTaskEvent::Poll,
         }
     }
@@ -199,7 +199,7 @@ impl ConsumerTask {
 
         let mut invalid_topics = HashSet::<&TopicName>::new();
 
-        for topic_name in self.subscriptions.iter() {
+        for topic_name in &self.subscriptions {
             let (topic_key, topic_meta) =
                 match cluster.get_topic_metadata_and_key_by_name(topic_name) {
                     Ok(meta) => meta,
@@ -319,9 +319,7 @@ impl ConsumerTask {
             match event {
                 ResponseKind::Fetch(fetch) => {
                     for response in fetch.responses {
-                        let topic_name = if !response.topic.is_empty() {
-                            response.topic
-                        } else {
+                        let topic_name = if response.topic.is_empty() {
                             let cluster = &self.client.borrow_cluster().metadata;
                             let Some(name) = cluster
                                 .get_topic_metadata(&TopicKey::Uuid(response.topic_id))
@@ -331,6 +329,8 @@ impl ConsumerTask {
                                 continue;
                             };
                             name
+                        } else {
+                            response.topic
                         };
 
                         if !self.subscriptions.contains(&topic_name) {
@@ -437,6 +437,7 @@ pub struct Consumer {
 }
 
 impl Consumer {
+    #[must_use]
     pub fn new(client: NetworkClient) -> Self {
         let (tx_records, rx_records) = mpsc::channel(1);
         let (tx_commands, rx_commands) = mpsc::unbounded_channel();
@@ -470,10 +471,10 @@ impl Consumer {
     }
 
     pub async fn shutdown(&self) {
-        self.client.shutdown().await
+        self.client.shutdown().await;
     }
 
     pub async fn await_shutdown(&self) {
-        self.client.await_shutdown().await
+        self.client.await_shutdown().await;
     }
 }

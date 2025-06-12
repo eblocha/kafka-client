@@ -133,6 +133,6 @@ impl NetworkClient {
     }
 
     pub async fn await_shutdown(&self) {
-        self.selector.await_shutdown().await
+        self.selector.await_shutdown().await;
     }
 }

@@ -2,7 +2,7 @@ use kafka_protocol::protocol::{Request, VersionRange};
 
 pub trait GetApiKey {
     /// The numeric representation of the API key, which identifies the message type.
-    /// See https://kafka.apache.org/protocol#protocol_api_keys
+    /// See <https://kafka.apache.org/protocol#protocol_api_keys>
     fn key(&self) -> i16;
 }
 

@@ -34,6 +34,7 @@ impl From<u8> for AclOperation {
     }
 }
 
+#[must_use]
 pub fn acl_from_bitfield(bits: i32) -> Option<FxHashSet<AclOperation>> {
     if bits == i32::MIN {
         return None;

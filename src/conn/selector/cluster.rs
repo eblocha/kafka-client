@@ -232,7 +232,7 @@ impl TryFrom<(TopicName, MetadataResponseTopic)> for TopicMetadata {
             None => Vec::new(),
         };
 
-        for (index, result) in partitions.into_iter() {
+        for (index, result) in partitions {
             partitions_vec[index] = result;
         }
 
@@ -349,7 +349,7 @@ impl ClusterMetadata {
         self.cluster_id = response.cluster_id;
         self.controller_id = response.controller_id.0;
         // merge topic metadata with existing metadata
-        for topic_meta in response.topics.into_iter() {
+        for topic_meta in response.topics {
             self.insert_update(topic_meta);
         }
     }
@@ -359,8 +359,7 @@ impl ClusterMetadata {
             .topic_id
             .as_optional()
             .map(TopicKey::Uuid)
-            .map(Some)
-            .unwrap_or_else(|| topic_meta.name.clone().map(TopicKey::Name));
+            .map_or_else(|| topic_meta.name.clone().map(TopicKey::Name), Some);
 
         let Some(key) = key else {
             tracing::warn!(
@@ -372,19 +371,16 @@ impl ClusterMetadata {
         let Some(ref topic_name) = topic_meta.name else {
             // The topic name is empty, which means we requested a topic by id that does not exist.
             // Remove the uuid-key from the topic mapping
-            match self.topics.remove(&key) {
-                Some(Ok(meta)) => {
-                    // Use the name for the key instead of the uuid, since it no longer exists.
-                    let new_key = TopicKey::Name(meta.name.clone());
-                    self.topics.insert(
-                        new_key.clone(),
-                        TopicMetadata::try_from((meta.name.clone(), topic_meta)),
-                    );
-                    self.topic_keys_by_name.insert(meta.name, new_key);
-                }
-                _ => {
-                    // we never had this topic, or the last attempt to fetch gave an error
-                }
+            if let Some(Ok(meta)) = self.topics.remove(&key) {
+                // Use the name for the key instead of the uuid, since it no longer exists.
+                let new_key = TopicKey::Name(meta.name.clone());
+                self.topics.insert(
+                    new_key.clone(),
+                    TopicMetadata::try_from((meta.name.clone(), topic_meta)),
+                );
+                self.topic_keys_by_name.insert(meta.name, new_key);
+            } else {
+                // we never had this topic, or the last attempt to fetch gave an error
             };
             return;
         };
