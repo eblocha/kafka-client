@@ -10,6 +10,7 @@ use bytes::{Bytes, BytesMut};
 use futures::FutureExt;
 use kafka_protocol::{
     messages::{
+        metadata_request::MetadataRequestTopic,
         produce_request::{PartitionProduceData, TopicProduceData},
         ProduceRequest, ProduceResponse, TopicName,
     },
@@ -120,26 +121,16 @@ impl ProducerTask {
         &mut self,
         mut chunk: ProduceChunk<'_, impl Partitioner>,
     ) -> Result<(), KafkaError> {
-        self.client
-            .load_topic_metadata(
-                chunk
-                    .messages
-                    .iter()
-                    .map(|msg| &msg.record.topic)
-                    .collect::<FxHashSet<_>>(),
-            )
-            .await?;
-
         let invalid_topic_names = self.get_invalid_topics_and_populate_partitions(&mut chunk);
 
-        if !invalid_topic_names.is_empty() {
-            // Refresh invalid topics
-            self.client
-                .invalidate_topic_metadata(invalid_topic_names.iter());
-            self.client
-                .load_topic_metadata(invalid_topic_names.iter())
-                .await?;
-        }
+        self.client
+            .load_topic_metadata(
+                invalid_topic_names
+                    .into_iter()
+                    .map(|top| MetadataRequestTopic::default().with_name(Some(top)))
+                    .collect(),
+            )
+            .await?;
 
         self.populate_arena(chunk);
 

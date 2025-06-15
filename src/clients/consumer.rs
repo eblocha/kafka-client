@@ -7,6 +7,7 @@ use kafka_protocol::{
     messages::{
         fetch_request::{FetchPartition, FetchTopic},
         list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic},
+        metadata_request::MetadataRequestTopic,
         FetchRequest, ListOffsetsRequest, ResponseKind, TopicName,
     },
     records::Record,
@@ -63,6 +64,7 @@ struct ConsumerTask {
     client: NetworkClient,
     states: HashMap<TopicPartition, PartitionState>,
     subscriptions: HashSet<TopicName>,
+    invalid_topics: HashSet<TopicName>,
     join_set: JoinSet<Result<ResponseKind, KafkaError>>,
     tx: mpsc::Sender<Vec<ConsumerRecords>>,
     rx: mpsc::UnboundedReceiver<ConsumerCommand>,
@@ -81,6 +83,7 @@ impl ConsumerTask {
             rx,
             states: HashMap::new(),
             subscriptions: HashSet::new(),
+            invalid_topics: HashSet::new(),
             join_set: JoinSet::new(),
             poll_backoff: Default::default(),
         }
@@ -112,7 +115,7 @@ impl ConsumerTask {
 
         match command.kind {
             ConsumerCommandKind::SubscribeTopics(ref topics) => {
-                let result = self.subscribe(topics).await;
+                let result = self.subscribe(topics);
                 if let Err(ref e) = result {
                     tracing::error!(topics = ?topics, "failed to subscribe: {e}");
                 };
@@ -133,9 +136,12 @@ impl ConsumerTask {
         }
     }
 
-    async fn subscribe(&mut self, topics: &[TopicName]) -> Result<(), KafkaError> {
-        tracing::info!("subscribing to topics {topics:?}");
-        self.client.load_topic_metadata(topics).await?;
+    fn subscribe(&mut self, topics: &[TopicName]) -> Result<(), KafkaError> {
+        self.invalid_topics = self
+            .client
+            .get_missing_topic_names(topics)
+            .into_iter()
+            .collect();
 
         self.subscriptions = topics.iter().cloned().collect();
 
@@ -170,6 +176,7 @@ impl ConsumerTask {
     }
 
     async fn poll(&mut self) -> Result<Vec<ConsumerRecords>, KafkaError> {
+        self.refresh_topics().await?;
         let may_have_records_next_poll = self.spawn_next().await?;
         let records = self.join_next().await?;
 
@@ -186,18 +193,12 @@ impl ConsumerTask {
     }
 
     async fn spawn_next(&mut self) -> Result<bool, KafkaError> {
-        self.client
-            .load_topic_metadata(self.subscriptions.iter())
-            .await?;
-
         let cluster = &self.client.borrow_cluster().metadata;
 
         let mut broker_id_to_fetch_req = FxHashMap::<i32, FetchRequest>::default();
         let mut broker_id_to_offset_req = FxHashMap::<i32, ListOffsetsRequest>::default();
 
         let mut spanwed_offset_requests = false;
-
-        let mut invalid_topics = HashSet::<&TopicName>::new();
 
         for topic_name in &self.subscriptions {
             let (topic_key, topic_meta) =
@@ -208,7 +209,7 @@ impl ConsumerTask {
                             "error fetching metadata for topic {}: {e}",
                             topic_name.0.as_str(),
                         );
-                        invalid_topics.insert(topic_name);
+                        self.invalid_topics.insert(topic_name.clone());
                         continue;
                     }
                 };
@@ -221,7 +222,7 @@ impl ConsumerTask {
 
                 let Ok(partition_meta) = partition_meta else {
                     tracing::error!("error fetching metadata for topic partition {tp}");
-                    invalid_topics.insert(topic_name);
+                    self.invalid_topics.insert(topic_name.clone());
                     continue;
                 };
 
@@ -280,10 +281,6 @@ impl ConsumerTask {
             }
         }
 
-        if !invalid_topics.is_empty() {
-            self.client.invalidate_topic_metadata(invalid_topics);
-        }
-
         for (broker_id, req) in broker_id_to_fetch_req {
             let c = self.client.clone();
             self.join_set
@@ -301,8 +298,6 @@ impl ConsumerTask {
 
     async fn join_next(&mut self) -> Result<Vec<ConsumerRecords>, KafkaError> {
         let mut records = Vec::<ConsumerRecords>::new();
-
-        let mut invalid_topics = HashSet::<TopicName>::new();
 
         loop {
             let event = tokio::select! {
@@ -348,7 +343,7 @@ impl ConsumerTask {
                                 | ErrorCode::UnknownLeaderEpoch
                                 | ErrorCode::StaleBrokerEpoch
                                 | ErrorCode::NotLeaderOrFollower => {
-                                    invalid_topics.insert(topic_name.clone());
+                                    self.invalid_topics.insert(topic_name.clone());
                                     continue;
                                 }
                                 _ => {}
@@ -422,11 +417,17 @@ impl ConsumerTask {
             }
         }
 
-        if !invalid_topics.is_empty() {
-            self.client.invalidate_topic_metadata(invalid_topics.iter());
-        }
-
         Ok(records)
+    }
+
+    async fn refresh_topics(&mut self) -> Result<(), KafkaError> {
+        let to_refresh = self
+            .invalid_topics
+            .drain()
+            .map(|top| MetadataRequestTopic::default().with_name(Some(top)))
+            .collect::<Vec<_>>();
+
+        self.client.load_topic_metadata(to_refresh).await
     }
 }
 

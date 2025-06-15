@@ -319,15 +319,6 @@ impl ClusterMetadata {
         self.get_topic_metadata(key).map(|meta| (key, meta))
     }
 
-    /// Invalidate a topic, triggering its refresh.
-    pub(crate) fn invalidate_topic(&mut self, id: &TopicName) {
-        let Some(key) = self.topic_keys_by_name.remove(id) else {
-            return;
-        };
-
-        self.topics.remove(&key);
-    }
-
     /// Create a [`Vec<MetadataRequestTopic>`] that will refresh metadata for all topics known to the client.
     pub(super) fn create_topics_for_refresh(&self) -> Vec<MetadataRequestTopic> {
         self.topic_keys_by_name

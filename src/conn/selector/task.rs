@@ -1,9 +1,10 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use arc_swap::ArcSwap;
 use kafka_protocol::messages::{metadata_request::MetadataRequestTopic, MetadataResponse};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::{
-    sync::{mpsc, oneshot, watch},
+    sync::{mpsc, oneshot},
     task::JoinSet,
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -55,7 +56,7 @@ struct SelectorTask<Conn> {
     /// Mapping of broker id to its host
     hosts: BrokerMap,
     /// Shared global cluster state. Contains the latest metadata and mapping of broker id to connection
-    tx: watch::Sender<Cluster>,
+    cluster: Arc<ArcSwap<Cluster>>,
     /// Join set for running connection tasks. Used to detect failed connections
     join_set: JoinSet<NodeTask<Conn>>,
     /// Configuration settings for retries
@@ -70,6 +71,8 @@ struct SelectorTask<Conn> {
     metadata_join_set: JoinSet<MetadataRefreshResult>,
     /// Cancellation signal
     cancellation_token: CancellationToken,
+    // The bootstrap signal is dropped when bootstrap is complete.
+    bootstrap_signal: Option<oneshot::Sender<()>>,
     /// Used to create new tcp streams
     connect: Conn,
 }
@@ -159,6 +162,8 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                             self.metadata_backoff
                                 .insert(ctx.entry.node.host, ctx.backoff);
 
+                            drop(self.bootstrap_signal.take());
+
                             if let Some(tx) = tx {
                                 let _ = tx.send(Ok(()));
                             }
@@ -218,7 +223,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                     }
                 }
                 Event::RefreshStart(req) => {
-                    let Some(entry_for_refresh) = self.tx.borrow().brokers.get_best_connection()
+                    let Some(entry_for_refresh) = self.cluster.load().brokers.get_best_connection()
                     else {
                         tracing::error!("no connections available for metadata refresh!");
                         break;
@@ -231,7 +236,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                     );
 
                     let topics = req.as_ref().map(|r| r.topics.clone()).unwrap_or_else(|| {
-                        Some(self.tx.borrow().metadata.create_topics_for_refresh())
+                        Some(self.cluster.load().metadata.create_topics_for_refresh())
                     });
 
                     let backoff = self
@@ -280,7 +285,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             }
         }
 
-        let _ = self.tx.send(Cluster::default());
+        let _ = self.cluster.store(Arc::new(Cluster::default()));
 
         if clean_shutdown {
             tracing::info!("shut down gracefully");
@@ -357,10 +362,12 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             }
         }
 
-        self.tx.send_modify(|cluster| {
-            cluster.brokers = self.hosts.clone();
-            cluster.metadata.update_with(metadata);
-        });
+        // TODO optimize
+        let mut new_state = self.cluster.load().as_ref().clone();
+        new_state.brokers = self.hosts.clone();
+        new_state.metadata.update_with(metadata);
+
+        self.cluster.store(Arc::new(new_state));
     }
 
     fn start_new_task(&mut self, broker_id: i32, node: Node) {
@@ -428,9 +435,8 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
 /// the connection is closed.
 #[derive(Clone)]
 pub(crate) struct SelectorTaskHandle {
-    pub cluster: watch::Receiver<Cluster>,
+    pub cluster: Arc<ArcSwap<Cluster>>,
     pub tx_topic_metadata: mpsc::Sender<RefreshMetadataRequest>,
-    pub tx_cluster: watch::Sender<Cluster>,
     cancellation_token: CancellationToken,
     task_tracker: TaskTracker,
 }
@@ -491,15 +497,17 @@ impl SelectorTaskHandle {
         let task_tracker = TaskTracker::new();
 
         // create the watch channel for the metadata
-        let (cluster_tx, mut cluster_rx) = watch::channel::<Cluster>(Cluster::new(hosts.clone()));
+        let cluster = Arc::new(ArcSwap::new(Arc::new(Cluster::new(hosts.clone()))));
 
         // TODO: what size for refresh channel?
         let (tx_topic_metadata, rx_topic_metadata) = mpsc::channel(1);
 
+        let (tx_bootstrap, rx_bootstrap) = oneshot::channel();
+
         // start the selector task to manage broker connections
         let selector_task = SelectorTask {
             hosts,
-            tx: cluster_tx.clone(),
+            cluster: cluster.clone(),
             rx_topic_metadata,
             join_set,
             retry_config: config.conn.retry,
@@ -507,14 +515,15 @@ impl SelectorTaskHandle {
             metadata_backoff: Default::default(),
             metadata_join_set: JoinSet::new(),
             cancellation_token: cancellation_token.clone(),
+            bootstrap_signal: Some(tx_bootstrap),
             connect,
         };
 
         let join_handle = task_tracker.spawn(selector_task.run());
 
         tokio::select! {
-            // wait for metadata refresh (bootstrap)
-            _ = cluster_rx.changed() => Ok(()),
+            // wait for bootstrap. Task will drop this channel when finished with bootstrap.
+            _ = rx_bootstrap => Ok(()),
             // or failure to bootstrap
             result = join_handle => result.map_err(|join_err| {
                 tracing::error!("bootstrapping stopped unexpectedly: {join_err}");
@@ -523,11 +532,10 @@ impl SelectorTaskHandle {
         }?;
 
         Ok(Self {
-            cluster: cluster_rx,
+            cluster,
             tx_topic_metadata,
             cancellation_token,
             task_tracker,
-            tx_cluster: cluster_tx,
         })
     }
 

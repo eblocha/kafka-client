@@ -1,5 +1,7 @@
+use std::sync::Arc;
+
+use arc_swap::Guard;
 use kafka_protocol::messages::{metadata_request::MetadataRequestTopic, TopicName};
-use tokio::sync::watch::Ref;
 
 use crate::{
     common::BrokerHost,
@@ -85,47 +87,38 @@ impl NetworkClient {
         Ok(entry.handle)
     }
 
-    pub(crate) fn invalidate_topic_metadata<'a>(
-        &self,
-        topics: impl IntoIterator<Item = &'a TopicName>,
-    ) {
-        self.selector.tx_cluster.send_modify(|cluster| {
-            for id in topics {
-                cluster.metadata.invalidate_topic(id);
-            }
-        });
-    }
-
-    pub(crate) async fn load_topic_metadata<'a>(
+    pub(crate) fn get_missing_topic_names<'a>(
         &self,
         topic_names: impl IntoIterator<Item = &'a TopicName>,
-    ) -> Result<(), KafkaError> {
-        let missing_topic_names = {
-            // Closure is to prevent holding the cluster across an await point, which would make this non-Send.
-            let cluster_state = self.borrow_cluster();
-            topic_names
-                .into_iter()
-                .filter(|topic_name| {
-                    cluster_state
-                        .metadata
-                        .get_topic_key_by_name(topic_name)
-                        .is_none()
-                })
-                .map(|name| MetadataRequestTopic::default().with_name(Some(name.clone())))
-                .collect::<Vec<_>>()
-        };
+    ) -> Vec<TopicName> {
+        let cluster_state = self.borrow_cluster();
+        topic_names
+            .into_iter()
+            .filter(|topic_name| {
+                cluster_state
+                    .metadata
+                    .get_topic_key_by_name(topic_name)
+                    .is_none()
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    }
 
-        if !missing_topic_names.is_empty() {
+    pub(crate) async fn load_topic_metadata(
+        &self,
+        topic_names: Vec<MetadataRequestTopic>,
+    ) -> Result<(), KafkaError> {
+        if !topic_names.is_empty() {
             self.selector
-                .refresh_metadata_for_topics(Some(missing_topic_names))
+                .refresh_metadata_for_topics(Some(topic_names))
                 .await?;
         }
 
         Ok(())
     }
 
-    pub(crate) fn borrow_cluster(&self) -> Ref<'_, Cluster> {
-        self.selector.cluster.borrow()
+    pub(crate) fn borrow_cluster(&self) -> Guard<Arc<Cluster>> {
+        self.selector.cluster.load()
     }
 
     pub async fn shutdown(&self) {
