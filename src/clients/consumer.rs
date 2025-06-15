@@ -139,7 +139,7 @@ impl ConsumerTask {
     fn subscribe(&mut self, topics: &[TopicName]) -> Result<(), KafkaError> {
         self.invalid_topics = self
             .client
-            .get_missing_topic_names(topics)
+            .get_errored_topic_names(topics)
             .into_iter()
             .collect();
 

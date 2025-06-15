@@ -87,7 +87,7 @@ impl NetworkClient {
         Ok(entry.handle)
     }
 
-    pub(crate) fn get_missing_topic_names<'a>(
+    pub(crate) fn get_errored_topic_names<'a>(
         &self,
         topic_names: impl IntoIterator<Item = &'a TopicName>,
     ) -> Vec<TopicName> {
@@ -97,8 +97,8 @@ impl NetworkClient {
             .filter(|topic_name| {
                 cluster_state
                     .metadata
-                    .get_topic_key_by_name(topic_name)
-                    .is_none()
+                    .get_topic_metadata_by_name(topic_name)
+                    .is_err()
             })
             .cloned()
             .collect::<Vec<_>>()

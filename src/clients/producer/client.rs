@@ -59,9 +59,6 @@ struct ProduceChunk<'p, P> {
 
 struct ProducerTaskMessage {
     record: ProducerRecord,
-    /// The partition set on the record by the user, so the partitioning strategy can determine if it should modify the
-    /// one on the record.
-    user_partition: Option<i32>,
     tx: oneshot::Sender<Result<RecordMetadata, KafkaError>>,
 }
 
@@ -70,11 +67,7 @@ impl ProducerTaskMessage {
         record: ProducerRecord,
         tx: oneshot::Sender<Result<RecordMetadata, KafkaError>>,
     ) -> Self {
-        Self {
-            user_partition: record.partition,
-            record,
-            tx,
-        }
+        Self { record, tx }
     }
 }
 
@@ -119,9 +112,15 @@ impl ProducerTask {
 
     async fn send_chunk(
         &mut self,
-        mut chunk: ProduceChunk<'_, impl Partitioner>,
+        chunk: ProduceChunk<'_, impl Partitioner>,
     ) -> Result<(), KafkaError> {
-        let invalid_topic_names = self.get_invalid_topics_and_populate_partitions(&mut chunk);
+        let topic_names = chunk
+            .messages
+            .iter()
+            .map(|msg| &msg.record.topic)
+            .collect::<FxHashSet<_>>();
+
+        let invalid_topic_names = self.client.get_errored_topic_names(topic_names);
 
         self.client
             .load_topic_metadata(
@@ -224,48 +223,10 @@ impl ProducerTask {
         Ok(())
     }
 
-    fn get_invalid_topics_and_populate_partitions(
-        &self,
-        chunk: &mut ProduceChunk<'_, impl Partitioner>,
-    ) -> FxHashSet<TopicName> {
-        let cluster = &self.client.borrow_cluster();
-
-        let mut invalid_topic_names = FxHashSet::<TopicName>::default();
-
-        let mut partitioner = chunk.partitioner.new_partitioner(cluster);
-
-        for msg in &mut chunk.messages {
-            let Ok(topic_data) = cluster
-                .metadata
-                .get_topic_metadata_by_name(&msg.record.topic)
-            else {
-                invalid_topic_names.insert(msg.record.topic.clone());
-                continue;
-            };
-
-            if msg.user_partition.is_none() {
-                partitioner.partition(&mut msg.record, topic_data);
-            }
-
-            if msg
-                .record
-                .partition
-                .and_then(|index| topic_data.get_partition_metadata(index).ok())
-                .is_none()
-            {
-                // The partitioner gave us an invalid partition
-                invalid_topic_names.insert(msg.record.topic.clone());
-                continue;
-            };
-        }
-
-        chunk.partitioner.finish_partitioning(partitioner);
-
-        invalid_topic_names
-    }
-
     fn populate_arena(&mut self, chunk: ProduceChunk<'_, impl Partitioner>) {
         let cluster = &self.client.borrow_cluster();
+
+        tracing::debug!("{:#?}", cluster.metadata);
 
         let mut partitioner = chunk.partitioner.new_partitioner(cluster);
 
@@ -284,36 +245,25 @@ impl ProducerTask {
             {
                 Ok(topic_data) => topic_data,
                 Err(e) => {
+                    tracing::error!("topic does not exist: {}", msg.record.topic.0);
                     let _ = msg.tx.send(Err(e.into()));
                     continue;
                 }
             };
 
-            let original_partition_index = msg.record.partition;
+            if msg.record.partition.is_none() {
+                partitioner.partition(&mut msg.record, topic_data);
+            }
 
-            let mut partition = match msg.record.partition {
+            let partition = match msg.record.partition {
                 Some(index) => topic_data.get_partition_metadata(index),
                 None => Err(ErrorCode::UnknownTopicOrPartition),
             };
 
-            if partition.is_err() && msg.user_partition.is_none() {
-                // Only partition records that did not get partitioned in the first round, or whose partitions no
-                // longer exist after refreshing topic data.
-                // However, if there is a user-specified partition, do not re-partition to another one.
-                partitioner.partition(&mut msg.record, topic_data);
-            }
-
-            // If the index changed, try to find it again
-            if original_partition_index != msg.record.partition {
-                partition = match msg.record.partition {
-                    Some(index) => topic_data.get_partition_metadata(index),
-                    None => Err(ErrorCode::UnknownTopicOrPartition),
-                };
-            }
-
             let partition = match partition {
                 Ok(partition) => partition,
                 Err(e) => {
+                    tracing::error!("failed to assign partition");
                     let _ = msg.tx.send(Err(e.into()));
                     continue;
                 }
