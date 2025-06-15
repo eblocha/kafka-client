@@ -378,6 +378,13 @@ impl ClusterMetadata {
 
         self.topic_keys_by_name
             .insert(topic_name.clone(), key.clone());
+
+        if matches!(key, TopicKey::Uuid(_)) {
+            // Remove the topic-name version if it exists.
+            // For example, if a previous request for the topic by name failed
+            self.topics.remove(&TopicKey::Name(topic_name.clone()));
+        }
+
         self.topics.insert(
             key,
             TopicMetadata::try_from((topic_name.clone(), topic_meta)),
@@ -564,6 +571,11 @@ mod test {
         let topic = topic.unwrap();
 
         assert_eq!(topic.name, TopicName::from_string("topic-a".into()));
+
+        assert!(
+            !metadata.topics.contains_key(&TopicKey::Name(topic_name)),
+            "original TopicName key still exists in the metadata"
+        );
     }
 
     /// Verify the cluster properly handles when we attempt to fetch by uuid, but the topic is not found.
