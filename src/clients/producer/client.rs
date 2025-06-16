@@ -100,23 +100,15 @@ impl ProducerTask {
         tokio::pin!(record_stream);
 
         while let Some(chunk) = record_stream.next().await {
-            if let Err(e) = self
-                .send_chunk(ProduceChunk {
-                    messages: chunk,
-                    partitioner: &mut create_partitioner,
-                })
-                .await
-            {
-                tracing::error!("encountered an unrecoverable error while producing messages: {e}");
-                break;
-            }
+            self.send_chunk(ProduceChunk {
+                messages: chunk,
+                partitioner: &mut create_partitioner,
+            })
+            .await;
         }
     }
 
-    async fn send_chunk(
-        &mut self,
-        chunk: ProduceChunk<'_, impl Partitioner>,
-    ) -> Result<(), KafkaError> {
+    async fn send_chunk(&mut self, mut chunk: ProduceChunk<'_, impl Partitioner>) {
         let topic_names = chunk
             .messages
             .iter()
@@ -125,14 +117,21 @@ impl ProducerTask {
 
         let invalid_topic_names = self.client.get_errored_topic_names(topic_names);
 
-        self.client
+        if let Err(e) = self
+            .client
             .load_topic_metadata(
                 invalid_topic_names
                     .into_iter()
                     .map(|top| MetadataRequestTopic::default().with_name(Some(top)))
                     .collect(),
             )
-            .await?;
+            .await
+        {
+            self.handle_metadata_refresh_failure(&mut chunk, e);
+            if chunk.messages.is_empty() {
+                return;
+            }
+        }
 
         self.populate_arena(chunk);
 
@@ -231,8 +230,34 @@ impl ProducerTask {
                 }
             }
         }
+    }
 
-        Ok(())
+    fn handle_metadata_refresh_failure(
+        &mut self,
+        chunk: &mut ProduceChunk<'_, impl Partitioner>,
+        err: KafkaError,
+    ) {
+        tracing::error!("failed to refresh metadata before sending produce request: {err}");
+
+        let topic_names = chunk
+            .messages
+            .iter()
+            .map(|msg| &msg.record.topic)
+            .collect::<FxHashSet<_>>();
+
+        let invalid_topic_names = self.client.get_errored_topic_names(topic_names);
+
+        let mut retained = Vec::new();
+
+        for message in chunk.messages.drain(..) {
+            if invalid_topic_names.contains(&message.record.topic) {
+                let _ = message.tx.send(Err(err.representative_clone()));
+            } else {
+                retained.push(message);
+            }
+        }
+
+        chunk.messages = retained;
     }
 
     fn populate_arena(&mut self, chunk: ProduceChunk<'_, impl Partitioner>) {
