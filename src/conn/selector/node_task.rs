@@ -169,7 +169,7 @@ impl<Conn: Connect + Send + 'static> NodeTask<Conn> {
             }
 
             if conn_result.is_ok() {
-                self.backoff.success()
+                self.backoff.success();
             } else {
                 let (min, max) = (self.retry_config.min_backoff, self.retry_config.max_backoff);
                 let backoff = exponential_backoff(min, max, self.backoff.count());

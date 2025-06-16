@@ -118,67 +118,67 @@ impl<IO> KafkaChannelTask<IO> {
                 Either::Left(count) => {
                     if count == 0 {
                         break;
-                    } else {
-                        tracing::trace!("sending {} frame(s)", request_buffer.len());
-                        for message in request_buffer.drain(..) {
-                            let id = CorrelationId(correlation_id);
+                    }
 
-                            let api_key = message.versioned.request.as_api_key();
+                    tracing::trace!("sending {} frame(s)", request_buffer.len());
+                    for message in request_buffer.drain(..) {
+                        let id = CorrelationId(correlation_id);
 
-                            let record = RequestRecord {
-                                api_key,
-                                api_version: message.versioned.api_version,
-                                response_header_version: api_key
-                                    .response_header_version(message.versioned.api_version),
-                            };
+                        let api_key = message.versioned.request.as_api_key();
 
-                            let encodable = EncodableRequest::from_versioned(
-                                message.versioned,
-                                id,
-                                self.config.client_id.clone(),
-                            );
+                        let record = RequestRecord {
+                            api_key,
+                            api_version: message.versioned.api_version,
+                            response_header_version: api_key
+                                .response_header_version(message.versioned.api_version),
+                        };
 
-                            let api_key = encodable.api_key();
+                        let encodable = EncodableRequest::from_versioned(
+                            message.versioned,
+                            id,
+                            self.config.client_id.clone(),
+                        );
 
-                            match sink.feed(encodable).await {
-                                Ok(()) => {
-                                    tracing::trace!(
-                                        correlation_id = id.0,
-                                        api_key = ?api_key,
-                                        "io sink fed frame",
-                                    );
-                                    sender_batch.push((id, message.tx, record));
-                                }
-                                Err(e) => {
-                                    tracing::trace!(
-                                        correlation_id = id.0,
-                                        api_key = ?api_key,
-                                        "io sink failed to feed frame: {:?}",
-                                        e
-                                    );
-                                    message.tx.send_err(e);
-                                }
+                        let api_key = encodable.api_key();
+
+                        match sink.feed(encodable).await {
+                            Ok(()) => {
+                                tracing::trace!(
+                                    correlation_id = id.0,
+                                    api_key = ?api_key,
+                                    "io sink fed frame",
+                                );
+                                sender_batch.push((id, message.tx, record));
                             }
-
-                            correlation_id += 1;
+                            Err(e) => {
+                                tracing::trace!(
+                                    correlation_id = id.0,
+                                    api_key = ?api_key,
+                                    "io sink failed to feed frame: {:?}",
+                                    e
+                                );
+                                message.tx.send_err(e);
+                            }
                         }
 
-                        if let Err(e) = sink.flush().await {
-                            tracing::trace!("io sink failed to flush frames: {:?}", e);
-                            // if the flush fails, notify all requests that they failed to send
-                            for (_, sender, _) in sender_batch.drain(..) {
-                                sender.send_err(e.kind().into());
-                            }
-                        } else {
-                            tracing::trace!("io sink flushed frames");
-                            for (correlation_id, sender, record) in sender_batch.drain(..) {
-                                match sender {
-                                    ResponseSender::OnResponse(sender) => {
-                                        in_flight.insert(correlation_id, (record, sender));
-                                    }
-                                    ResponseSender::OnFlush(sender) => {
-                                        let _ = sender.send(Ok(()));
-                                    }
+                        correlation_id += 1;
+                    }
+
+                    if let Err(e) = sink.flush().await {
+                        tracing::trace!("io sink failed to flush frames: {:?}", e);
+                        // if the flush fails, notify all requests that they failed to send
+                        for (_, sender, _) in sender_batch.drain(..) {
+                            sender.send_err(e.kind().into());
+                        }
+                    } else {
+                        tracing::trace!("io sink flushed frames");
+                        for (correlation_id, sender, record) in sender_batch.drain(..) {
+                            match sender {
+                                ResponseSender::OnResponse(sender) => {
+                                    in_flight.insert(correlation_id, (record, sender));
+                                }
+                                ResponseSender::OnFlush(sender) => {
+                                    let _ = sender.send(Ok(()));
                                 }
                             }
                         }

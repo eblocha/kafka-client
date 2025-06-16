@@ -115,11 +115,7 @@ impl ConsumerTask {
 
         match command.kind {
             ConsumerCommandKind::SubscribeTopics(ref topics) => {
-                let result = self.subscribe(topics);
-                if let Err(ref e) = result {
-                    tracing::error!(topics = ?topics, "failed to subscribe: {e}");
-                };
-                let _ = command.tx.send(result);
+                self.subscribe(topics);
             }
         }
 
@@ -136,7 +132,7 @@ impl ConsumerTask {
         }
     }
 
-    fn subscribe(&mut self, topics: &[TopicName]) -> Result<(), KafkaError> {
+    fn subscribe(&mut self, topics: &[TopicName]) {
         self.invalid_topics = self
             .client
             .get_errored_topic_names(topics)
@@ -146,8 +142,6 @@ impl ConsumerTask {
         self.subscriptions = topics.iter().cloned().collect();
 
         tracing::info!("subscribed to topics {topics:?}");
-
-        Ok(())
     }
 
     async fn handle_poll(&mut self) -> Option<()> {

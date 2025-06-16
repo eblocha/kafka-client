@@ -39,7 +39,7 @@ impl EncodableRequest {
             api_key,
             request: value.request,
             header: RequestHeader::default()
-                .with_client_id(client_id.clone())
+                .with_client_id(client_id)
                 .with_correlation_id(correlation_id.0)
                 .with_request_api_key(api_key as i16)
                 .with_request_api_version(value.api_version),
