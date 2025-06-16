@@ -285,15 +285,12 @@ impl ProducerTask {
 
             let part_map = self.arena.brokers.get_mut_or_default(partition.leader_id);
 
+            partitioner.partition_validated(&msg.record, partition);
+
             let records = part_map
                 .partitions
-                .entry(TopicPartition::new(
-                    msg.record.topic.clone(),
-                    partition.index,
-                ))
+                .entry(TopicPartition::new(msg.record.topic, partition.index))
                 .or_default();
-
-            partitioner.partition_validated(&msg.record, partition);
 
             let record = Record {
                 transactional: false,
