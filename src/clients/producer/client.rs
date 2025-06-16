@@ -20,7 +20,10 @@ use kafka_protocol::{
     },
 };
 use rustc_hash::{FxHashMap, FxHashSet};
-use tokio::sync::{mpsc, oneshot};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinSet,
+};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tokio_util::task::TaskTracker;
 
@@ -135,6 +138,8 @@ impl ProducerTask {
 
         self.arena.brokers.gc();
 
+        let mut join_set = JoinSet::new();
+
         for leader in self.arena.brokers.iter_mut() {
             let mut req = ProduceRequest::default();
             leader.gc();
@@ -192,7 +197,26 @@ impl ProducerTask {
                 Some(req)
             });
 
-            let res = client.send_to(build_req, broker_id).await;
+            let fut = async move {
+                let res = client.send_to(build_req, broker_id).await;
+                (res, broker_id)
+            };
+
+            join_set.spawn(fut);
+        }
+
+        while let Some(join_result) = join_set.join_next().await {
+            let (res, broker_id) = match join_result {
+                Ok(result) => result,
+                Err(e) => {
+                    tracing::error!("producer send task stopped unexpectedly {e}");
+                    continue;
+                }
+            };
+
+            let Some(leader) = self.arena.brokers.get_mut(broker_id) else {
+                continue;
+            };
 
             match res {
                 Ok(response) => Self::handle_produce_response(response, &mut leader.partitions),

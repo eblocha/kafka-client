@@ -44,6 +44,10 @@ impl ProduceLeaders {
         self.0.iter_mut()
     }
 
+    pub fn get_mut(&mut self, broker_id: i32) -> Option<&mut LeaderPreparedRecords> {
+        self.0.iter_mut().find(|entry| entry.broker_id == broker_id)
+    }
+
     pub fn get_mut_or_default(&mut self, broker_id: i32) -> &mut LeaderPreparedRecords {
         let index = self.0.iter().enumerate().find_map(|(i, entry)| {
             if entry.broker_id == broker_id {
