@@ -238,8 +238,6 @@ impl ProducerTask {
     fn populate_arena(&mut self, chunk: ProduceChunk<'_, impl Partitioner>) {
         let cluster = &self.client.borrow_cluster();
 
-        tracing::debug!("{:#?}", cluster.metadata);
-
         let mut partitioner = chunk.partitioner.new_partitioner(cluster);
 
         let fallback_timestamp = {
