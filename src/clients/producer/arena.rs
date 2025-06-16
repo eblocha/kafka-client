@@ -29,6 +29,10 @@ impl LeaderPreparedRecords {
     pub fn is_empty(&self) -> bool {
         self.partitions.is_empty()
     }
+
+    pub fn gc(&mut self) {
+        self.partitions.retain(|_, records| !records.is_empty());
+    }
 }
 
 /// A collection of leader nodes with record batches prepared to send.
@@ -38,18 +42,6 @@ pub struct ProduceLeaders(Vec<LeaderPreparedRecords>);
 impl ProduceLeaders {
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut LeaderPreparedRecords> {
         self.0.iter_mut()
-    }
-
-    pub fn remove(&mut self, broker_id: &i32) -> Option<LeaderPreparedRecords> {
-        let idx = self.0.iter().enumerate().find_map(|(i, entry)| {
-            if &entry.broker_id == broker_id {
-                Some(i)
-            } else {
-                None
-            }
-        })?;
-
-        Some(self.0.swap_remove(idx))
     }
 
     pub fn get_mut_or_default(&mut self, broker_id: i32) -> &mut LeaderPreparedRecords {
@@ -79,6 +71,10 @@ impl ProduceLeaders {
             .get_mut(index)
             .expect("the item we just pushed is not in the array")
     }
+
+    pub fn gc(&mut self) {
+        self.0.retain(|leader| !leader.is_empty());
+    }
 }
 
 /// Similar in concept to a memory arena, this structure is used by the producer task to prepare and organize [`Record`]s.
@@ -90,14 +86,6 @@ pub struct ProducerArena {
     ///
     /// This is mutated for performance during sends.
     pub brokers: ProduceLeaders,
-    /// Used while creating new requests to remove unused mappings from `brokers`.
-    ///
-    /// This is mutated for performance during sends.
-    pub empty_leaders: Vec<i32>,
-    /// Used while creating new requests to remove unused mappings from `brokers`.
-    ///
-    /// This is mutated for performance during sends.
-    pub empty_partitions: Vec<TopicPartition>,
     /// Reusable mapping for organizing topic batches
     pub topic_data: FxHashMap<TopicName, TopicProduceData>,
 }

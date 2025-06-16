@@ -133,20 +133,13 @@ impl ProducerTask {
 
         self.populate_arena(chunk);
 
-        for leader in self.arena.brokers.iter_mut() {
-            if leader.is_empty() {
-                self.arena.empty_leaders.push(leader.broker_id);
-                continue;
-            }
+        self.arena.brokers.gc();
 
+        for leader in self.arena.brokers.iter_mut() {
             let mut req = ProduceRequest::default();
+            leader.gc();
 
             for (tp, prepared_records) in &mut leader.partitions {
-                if prepared_records.is_empty() {
-                    self.arena.empty_partitions.push(tp.clone());
-                    continue;
-                }
-
                 let mut records = BytesMut::new();
 
                 if let Err(e) = RecordBatchEncoder::encode(
@@ -182,14 +175,13 @@ impl ProducerTask {
                 }
             }
 
-            for tp in self.arena.empty_partitions.drain(..) {
-                leader.partitions.remove(&tp);
-            }
-
             for (name, mut data) in self.arena.topic_data.drain() {
                 data.name = name;
                 req.topic_data.push(data);
             }
+
+            let broker_id = leader.broker_id;
+            let client = self.client.clone();
 
             let build_req = with_max_version(|_ver| {
                 // TODO config
@@ -200,7 +192,7 @@ impl ProducerTask {
                 Some(req)
             });
 
-            let res = self.client.send_to(build_req, leader.broker_id).await;
+            let res = client.send_to(build_req, broker_id).await;
 
             match res {
                 Ok(response) => Self::handle_produce_response(response, &mut leader.partitions),
@@ -214,10 +206,6 @@ impl ProducerTask {
                     }
                 }
             }
-        }
-
-        for leader_id in self.arena.empty_leaders.drain(..) {
-            self.arena.brokers.remove(&leader_id);
         }
 
         Ok(())
