@@ -203,6 +203,14 @@ impl TopicMetadata {
     pub fn len(&self) -> usize {
         self.partitions.len()
     }
+
+    #[cfg(test)]
+    pub(crate) fn new_from_parts(
+        name: TopicName,
+        partitions: Vec<Result<PartitionMetadata, ErrorCode>>,
+    ) -> Self {
+        Self { name, partitions }
+    }
 }
 
 impl TryFrom<(TopicName, MetadataResponseTopic)> for TopicMetadata {

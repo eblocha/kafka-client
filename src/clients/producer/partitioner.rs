@@ -150,3 +150,58 @@ impl PartitionerSession for KeyHashPartitioner {
         record.partition = Some(index);
     }
 }
+
+#[cfg(test)]
+mod test {
+    use bytes::Bytes;
+    use indexmap::IndexMap;
+    use kafka_protocol::messages::TopicName;
+
+    use crate::util::TopicNameExt;
+
+    use super::*;
+
+    #[quickcheck_macros::quickcheck]
+    fn test_key_hash_partitioner_always_within_bounds(key: Option<Vec<u8>>) {
+        let mut partitioner = KeyHashPartitioner;
+
+        let topic_name = TopicName::from_string("test".to_owned());
+
+        let mut record = ProducerRecord {
+            topic: topic_name.clone(),
+            partition: None,
+            timestamp: None,
+            key: key.map(|bytes| Bytes::copy_from_slice(&bytes)),
+            value: None,
+            headers: IndexMap::default(),
+        };
+
+        let partition_count: i32 = 10;
+
+        let topic_data = TopicMetadata::new_from_parts(
+            topic_name,
+            (0..partition_count)
+                .map(|i| {
+                    Ok(PartitionMetadata {
+                        index: i,
+                        isr_nodes: vec![],
+                        leader_epoch: 0,
+                        leader_id: 0,
+                        replica_nodes: vec![],
+                    })
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        partitioner.partition(&mut record, &topic_data);
+
+        assert!(record.partition.is_some(), "record partition was not set");
+
+        let partition = record.partition.unwrap();
+
+        assert!(
+            partition < partition_count,
+            "partition was set to {partition} but only {partition_count} partitions exist",
+        );
+    }
+}
