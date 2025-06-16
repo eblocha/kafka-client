@@ -285,7 +285,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             }
         }
 
-        let _ = self.cluster.store(Arc::new(Cluster::default()));
+        self.cluster.store(Arc::new(Cluster::default()));
 
         if clean_shutdown {
             tracing::info!("shut down gracefully");
