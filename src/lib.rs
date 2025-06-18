@@ -1,8 +1,10 @@
 mod backoff;
+pub(crate) mod cancel;
 pub mod clients;
 pub mod common;
 pub mod config;
 mod conn;
 pub mod error;
+pub mod producer;
 mod proto;
 mod util;

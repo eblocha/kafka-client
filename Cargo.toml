@@ -19,6 +19,7 @@ indicatif = "0.17.9"
 itertools = "0.14.0"
 kafka-protocol = { version = "0.14.0", features = ["messages_enums"] }
 paste = "1.0.15"
+pin-project-lite = "0.2.16"
 rand = "0.8.5"
 rustc-hash = "2.1.0"
 thiserror = "1.0.63"

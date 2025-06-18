@@ -259,6 +259,15 @@ pub struct Cluster {
     pub metadata: ClusterMetadata,
 }
 
+impl Cluster {
+    pub(crate) fn new(brokers: BrokerMap) -> Self {
+        Self {
+            brokers,
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ClusterMetadata {
     /// The cluster id returned by the metadata.
@@ -277,15 +286,6 @@ pub struct ClusterMetadata {
     /// - The request was successful, and
     /// - The server supports topic uuids
     topic_keys_by_name: FxHashMap<TopicName, TopicKey>,
-}
-
-impl Cluster {
-    pub(crate) fn new(brokers: BrokerMap) -> Self {
-        Self {
-            brokers,
-            ..Default::default()
-        }
-    }
 }
 
 impl ClusterMetadata {
