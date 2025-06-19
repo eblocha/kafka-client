@@ -143,7 +143,7 @@ impl ConnectionTaskHandle {
 }
 
 impl BrokerTaskHandle for ConnectionTaskHandle {
-    async fn send<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
+    async fn send<R: Sendable + Send, F: FromVersionRange<Req = R> + GetApiKey + Send>(
         &self,
         req: F,
     ) -> Result<R::Response, KafkaError> {
@@ -156,7 +156,10 @@ impl BrokerTaskHandle for ConnectionTaskHandle {
         result
     }
 
-    async fn send_and_forget<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
+    async fn send_and_forget<
+        R: Sendable + Send,
+        F: FromVersionRange<Req = R> + GetApiKey + Send,
+    >(
         &self,
         req: F,
     ) -> Result<(), KafkaError> {

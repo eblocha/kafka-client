@@ -13,24 +13,23 @@ use crate::{
     proto::ver::{FromVersionRange, GetApiKey},
 };
 
-pub struct ProducerTaskFactory {
-    // TODO config goes here
-}
-
 #[derive(Debug, Clone)]
 pub struct ProducerTaskHandle {
     connection_handle: ConnectionTaskHandle,
 }
 
 impl BrokerTaskHandle for ProducerTaskHandle {
-    async fn send<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
+    async fn send<R: Sendable + Send, F: FromVersionRange<Req = R> + GetApiKey + Send>(
         &self,
         req: F,
     ) -> Result<R::Response, KafkaError> {
         self.connection_handle.send(req).await
     }
 
-    async fn send_and_forget<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
+    async fn send_and_forget<
+        R: Sendable + Send,
+        F: FromVersionRange<Req = R> + GetApiKey + Send,
+    >(
         &self,
         req: F,
     ) -> Result<(), KafkaError> {
@@ -54,14 +53,18 @@ impl BrokerTaskHandle for ProducerTaskHandle {
     }
 }
 
-impl<Conn: Connect + Send + 'static> BrokerTaskFactory<Conn> for ProducerTaskHandle {
+pub struct ProducerTaskFactory {
+    // TODO config goes here
+}
+
+impl<Conn: Connect + Send + 'static> BrokerTaskFactory<Conn> for ProducerTaskFactory {
     type Task = ProducerTask<Conn>;
     type Handle = ProducerTaskHandle;
 
     fn new(&self, connector: NodeConnector<Conn>) -> (Self::Handle, Self::Task) {
         let (connection_handle, connection_task) = ConnectionTaskFactory.new(connector);
 
-        let handle = Self {
+        let handle = ProducerTaskHandle {
             connection_handle: connection_handle.clone(),
         };
 

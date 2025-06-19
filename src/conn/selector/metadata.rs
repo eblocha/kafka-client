@@ -32,21 +32,24 @@ fn create_metadata_request(
     r
 }
 
-pub struct MetadataRefreshContext {
-    pub entry: BrokerMapEntry,
+pub struct MetadataRefreshContext<TaskHandle> {
+    pub entry: BrokerMapEntry<TaskHandle>,
     pub request: Option<RefreshMetadataRequest>,
     pub backoff: BackoffSession<()>,
 }
 
-pub struct MetadataRefreshTask {
-    pub context: MetadataRefreshContext,
+pub struct MetadataRefreshTask<TaskHandle> {
+    pub context: MetadataRefreshContext<TaskHandle>,
     pub topics: Option<Vec<MetadataRequestTopic>>,
 }
 
-pub type MetadataRefreshResult = (MetadataRefreshContext, Result<MetadataResponse, KafkaError>);
+pub type MetadataRefreshResult<TaskHandle> = (
+    MetadataRefreshContext<TaskHandle>,
+    Result<MetadataResponse, KafkaError>,
+);
 
-impl MetadataRefreshTask {
-    pub async fn run(mut self) -> MetadataRefreshResult {
+impl<TaskHandle: BrokerTaskHandle + Send + 'static> MetadataRefreshTask<TaskHandle> {
+    pub async fn run(mut self) -> MetadataRefreshResult<TaskHandle> {
         self.context.backoff.wait_next().await;
 
         let metadata = self

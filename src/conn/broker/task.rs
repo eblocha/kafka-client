@@ -30,8 +30,8 @@ pub struct BrokerTaskContext {
     pub cancellation_token: CancellationToken,
 }
 
-pub trait BrokerTask {
-    type PartitionMessage;
+pub trait BrokerTask: Send + 'static {
+    type PartitionMessage: Send;
 
     /// Run the task.
     ///
@@ -39,7 +39,7 @@ pub trait BrokerTask {
     fn run(self, ctx: BrokerTaskContext) -> impl Future<Output = Self> + Send;
 
     /// Stop the connection
-    fn shutdown(self) -> impl Future<Output = Self>;
+    fn shutdown(self) -> impl Future<Output = Self> + Send;
 
     /// Get a mutable reference to the mapping of topic partition to a queue of messages for the partition.
     ///
@@ -51,16 +51,16 @@ pub trait BrokerTask {
     fn set_node(&mut self, node: Node);
 }
 
-pub trait BrokerTaskHandle: Clone {
-    fn send<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
+pub trait BrokerTaskHandle: Clone + Send + Sync + 'static {
+    fn send<R: Sendable + Send, F: FromVersionRange<Req = R> + GetApiKey + Send>(
         &self,
         req: F,
-    ) -> impl Future<Output = Result<R::Response, KafkaError>>;
+    ) -> impl Future<Output = Result<R::Response, KafkaError>> + Send;
 
-    fn send_and_forget<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
+    fn send_and_forget<R: Sendable + Send, F: FromVersionRange<Req = R> + GetApiKey + Send>(
         &self,
         req: F,
-    ) -> impl Future<Output = Result<(), KafkaError>>;
+    ) -> impl Future<Output = Result<(), KafkaError>> + Send;
 
     fn requests_in_flight(&self) -> usize;
 

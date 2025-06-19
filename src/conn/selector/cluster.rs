@@ -10,44 +10,57 @@ use kafka_protocol::{
     protocol::StrBytes,
 };
 use rustc_hash::FxHashMap;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    common::Node,
-    conn::broker::{connection_task::ConnectionTaskHandle, task::BrokerTaskHandle},
+    common::{Node, TopicPartition},
+    conn::broker::task::{BrokerTask, BrokerTaskHandle},
     error::ErrorCode,
     util::UuidExt,
 };
 
 #[derive(Debug, Clone)]
-pub struct BrokerMapEntry {
+pub struct BrokerMapEntry<TaskHandle> {
     pub node: Node,
-    pub(crate) handle: ConnectionTaskHandle,
+    pub(crate) handle: TaskHandle,
     pub(crate) cancellation_token: CancellationToken,
 }
 
 /// Mapping of broker id to [`BrokerMapEntry`].
 ///
 /// Used to send requests to specific brokers, or the current least-loaded broker.
-#[derive(Debug, Clone, From, Default)]
-pub struct BrokerMap(#[from] Vec<BrokerMapEntry>);
+#[derive(Debug, Clone, From)]
+pub struct BrokerMap<TaskHandle>(#[from] Vec<BrokerMapEntry<TaskHandle>>);
 
-fn least_in_flight(left: &&BrokerMapEntry, right: &&BrokerMapEntry) -> Ordering {
+impl<TaskHandle> Default for BrokerMap<TaskHandle> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+fn least_in_flight<TaskHandle: BrokerTaskHandle>(
+    left: &&BrokerMapEntry<TaskHandle>,
+    right: &&BrokerMapEntry<TaskHandle>,
+) -> Ordering {
     left.handle
         .requests_in_flight()
         .cmp(&right.handle.requests_in_flight())
 }
 
-fn least_failure_streak(left: &&BrokerMapEntry, right: &&BrokerMapEntry) -> Ordering {
+fn least_failure_streak<TaskHandle: BrokerTaskHandle>(
+    left: &&BrokerMapEntry<TaskHandle>,
+    right: &&BrokerMapEntry<TaskHandle>,
+) -> Ordering {
     left.handle
         .connect_failure_streak()
         .cmp(&right.handle.connect_failure_streak())
 }
 
-impl BrokerMap {
+impl<TaskHandle: BrokerTaskHandle> BrokerMap<TaskHandle> {
     /// Get a broker map entry for a specific broker by id.
-    pub fn get_connection_for(&self, broker_id: i32) -> Option<&BrokerMapEntry> {
+    pub fn get_connection_for(&self, broker_id: i32) -> Option<&BrokerMapEntry<TaskHandle>> {
         self.0.iter().find(|entry| entry.node.id == broker_id)
     }
 
@@ -55,7 +68,7 @@ impl BrokerMap {
     ///
     /// This will prefer connected brokers with the minimum number of pending requests, then favor the minimum number of
     /// pending requests, connected or not.
-    pub fn get_best_connection(&self) -> Option<BrokerMapEntry> {
+    pub fn get_best_connection(&self) -> Option<BrokerMapEntry<TaskHandle>> {
         // TODO shuffle before selecting
         // prefer connected, non-saturated nodes with least in-flight requests
         let least_loaded_connected = self
@@ -87,22 +100,24 @@ impl BrokerMap {
         self.0.iter().map(|entry| &entry.node).collect()
     }
 
-    pub(super) fn drain(&mut self) -> impl Iterator<Item = BrokerMapEntry> + use<'_> {
+    pub(super) fn drain(
+        &mut self,
+    ) -> impl Iterator<Item = BrokerMapEntry<TaskHandle>> + use<'_, TaskHandle> {
         self.0.drain(..)
     }
 
     pub(super) fn retain<F>(&mut self, mut f: F)
     where
-        F: FnMut(&mut BrokerMapEntry) -> bool,
+        F: FnMut(&mut BrokerMapEntry<TaskHandle>) -> bool,
     {
         self.0.retain_mut(|entry| f(entry));
     }
 
-    pub(super) fn get_mut(&mut self, broker_id: &i32) -> Option<&mut BrokerMapEntry> {
+    pub(super) fn get_mut(&mut self, broker_id: &i32) -> Option<&mut BrokerMapEntry<TaskHandle>> {
         self.0.iter_mut().find(|entry| entry.node.id == *broker_id)
     }
 
-    pub(super) fn insert(&mut self, entry: BrokerMapEntry) {
+    pub(super) fn insert(&mut self, entry: BrokerMapEntry<TaskHandle>) {
         if let Some(existing) = self.get_mut(&entry.node.id) {
             *existing = entry;
         } else {
@@ -110,7 +125,7 @@ impl BrokerMap {
         }
     }
 
-    pub(super) fn remove(&mut self, broker_id: &i32) -> Option<BrokerMapEntry> {
+    pub(super) fn remove(&mut self, broker_id: &i32) -> Option<BrokerMapEntry<TaskHandle>> {
         let idx = self.0.iter().enumerate().find_map(|(i, entry)| {
             if &entry.node.id == broker_id {
                 Some(i)
@@ -258,16 +273,37 @@ impl TryFrom<(TopicName, MetadataResponseTopic)> for TopicMetadata {
     }
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct Cluster {
+#[derive(Debug)]
+pub struct Cluster<Task: BrokerTask, TaskHandle> {
     /// Mapping of all currently-known broker nodes.
-    pub brokers: BrokerMap,
+    pub brokers: BrokerMap<TaskHandle>,
+    pub partitions: FxHashMap<TopicPartition, mpsc::Sender<Task::PartitionMessage>>,
     /// The cluster's metadata.
     pub metadata: ClusterMetadata,
 }
 
-impl Cluster {
-    pub(crate) fn new(brokers: BrokerMap) -> Self {
+impl<Task: BrokerTask, TaskHandle: Clone> Clone for Cluster<Task, TaskHandle> {
+    fn clone(&self) -> Self {
+        Self {
+            brokers: self.brokers.clone(),
+            partitions: self.partitions.clone(),
+            metadata: self.metadata.clone(),
+        }
+    }
+}
+
+impl<Task: BrokerTask, TaskHandle> Default for Cluster<Task, TaskHandle> {
+    fn default() -> Self {
+        Self {
+            brokers: Default::default(),
+            partitions: Default::default(),
+            metadata: Default::default(),
+        }
+    }
+}
+
+impl<Task: BrokerTask, TaskHandle> Cluster<Task, TaskHandle> {
+    pub(crate) fn new(brokers: BrokerMap<TaskHandle>) -> Self {
         Self {
             brokers,
             ..Default::default()
