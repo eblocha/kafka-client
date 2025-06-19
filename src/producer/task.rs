@@ -22,18 +22,16 @@ use crate::{
     cancel::OrCancelled,
     common::{Node, TopicPartition},
     conn::{
-        broker::{
-            connection_task::{ConnectionTask, ConnectionTaskHandle},
-            task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle, PartitionQueueMap},
-        },
-        selector::connect::Connect,
+        broker::task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle, PartitionQueueMap},
+        connect::Connect,
         RecordBatchEncoder,
     },
     error::{ErrorCode, KafkaError},
+    network::{handle::NetworkTaskHandle, task::NetworkTask},
     producer::prepared_record::PreparedRecord,
 };
 
-pub struct ProducerSendRecord {
+pub(super) struct ProducerSendRecord {
     pub topic_partition: TopicPartition,
     pub timestamp: Option<i64>,
     pub key: Option<Bytes>,
@@ -41,22 +39,22 @@ pub struct ProducerSendRecord {
     pub headers: indexmap::IndexMap<StrBytes, Option<Bytes>>,
 }
 
-pub struct ProducerSendMessage {
+pub(super) struct ProducerSendMessage {
     pub record: ProducerSendRecord,
     pub tx: oneshot::Sender<Result<(), KafkaError>>,
 }
 
 pub struct ProducerTask<Conn> {
-    pub partitions: PartitionQueueMap<ProducerSendMessage>,
-    pub connection_handle: ConnectionTaskHandle,
-    pub connection_task: ConnectionTask<Conn>,
+    pub(super) partitions: PartitionQueueMap<ProducerSendMessage>,
+    pub(super) inner_handle: NetworkTaskHandle,
+    pub(super) inner_task: NetworkTask<Conn>,
 }
 
 impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
     type PartitionMessage = ProducerSendMessage;
 
     async fn run(mut self, ctx: BrokerTaskContext) -> Self {
-        let connection_join_handle = tokio::spawn(self.connection_task.run(ctx.clone()));
+        let connection_join_handle = tokio::spawn(self.inner_task.run(ctx.clone()));
 
         // TODO batch.size and linger.ms config
         let chunks = (&mut self.partitions).chunks_timeout(2000, Duration::from_millis(500));
@@ -73,7 +71,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             let (request, partitions) = create_request(chunk);
 
             let Some(response) = self
-                .connection_handle
+                .inner_handle
                 .send(request)
                 .or_cancel(&ctx.cancellation_token)
                 .await
@@ -103,18 +101,18 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
 
         Self {
             partitions: self.partitions,
-            connection_handle: self.connection_handle,
-            connection_task,
+            inner_handle: self.inner_handle,
+            inner_task: connection_task,
         }
     }
 
     async fn shutdown(self) -> Self {
-        let connection_task = self.connection_task.shutdown().await;
+        let connection_task = self.inner_task.shutdown().await;
 
         Self {
             partitions: self.partitions,
-            connection_handle: self.connection_handle,
-            connection_task,
+            inner_handle: self.inner_handle,
+            inner_task: connection_task,
         }
     }
 
@@ -123,11 +121,11 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
     }
 
     fn get_node(&self) -> &Node {
-        self.connection_task.get_node()
+        self.inner_task.get_node()
     }
 
     fn set_node(&mut self, node: Node) {
-        self.connection_task.set_node(node);
+        self.inner_task.set_node(node);
     }
 }
 

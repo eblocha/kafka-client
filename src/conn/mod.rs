@@ -2,6 +2,7 @@ pub mod broker;
 mod channel;
 mod codec;
 pub mod config;
+pub mod connect;
 pub mod selector;
 
 pub use channel::KafkaChannelError;

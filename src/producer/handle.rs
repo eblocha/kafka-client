@@ -1,21 +1,21 @@
 use crate::{
     conn::{
         broker::{
-            connection_task::{ConnectionTaskFactory, ConnectionTaskHandle},
             connector::NodeConnector,
             task::{BrokerTaskFactory, BrokerTaskHandle, PartitionQueueMap},
         },
-        selector::connect::Connect,
+        connect::Connect,
         Sendable,
     },
     error::KafkaError,
+    network::handle::{NetworkTaskFactory, NetworkTaskHandle},
     producer::task::ProducerTask,
     proto::ver::{FromVersionRange, GetApiKey},
 };
 
 #[derive(Debug, Clone)]
 pub struct ProducerTaskHandle {
-    connection_handle: ConnectionTaskHandle,
+    inner_handle: NetworkTaskHandle,
 }
 
 impl BrokerTaskHandle for ProducerTaskHandle {
@@ -23,7 +23,7 @@ impl BrokerTaskHandle for ProducerTaskHandle {
         &self,
         req: F,
     ) -> Result<R::Response, KafkaError> {
-        self.connection_handle.send(req).await
+        self.inner_handle.send(req).await
     }
 
     async fn send_and_forget<
@@ -33,23 +33,23 @@ impl BrokerTaskHandle for ProducerTaskHandle {
         &self,
         req: F,
     ) -> Result<(), KafkaError> {
-        self.connection_handle.send_and_forget(req).await
+        self.inner_handle.send_and_forget(req).await
     }
 
     fn requests_in_flight(&self) -> usize {
-        self.connection_handle.requests_in_flight()
+        self.inner_handle.requests_in_flight()
     }
 
     fn connect_failure_streak(&self) -> usize {
-        self.connection_handle.connect_failure_streak()
+        self.inner_handle.connect_failure_streak()
     }
 
     fn capacity(&self) -> Option<usize> {
-        self.connection_handle.capacity()
+        self.inner_handle.capacity()
     }
 
     fn is_closed(&self) -> bool {
-        self.connection_handle.is_closed()
+        self.inner_handle.is_closed()
     }
 }
 
@@ -62,16 +62,16 @@ impl<Conn: Connect + Send + 'static> BrokerTaskFactory<Conn> for ProducerTaskFac
     type Handle = ProducerTaskHandle;
 
     fn new(&self, connector: NodeConnector<Conn>) -> (Self::Handle, Self::Task) {
-        let (connection_handle, connection_task) = ConnectionTaskFactory.new(connector);
+        let (inner_handle, inner_task) = NetworkTaskFactory.new(connector);
 
         let handle = ProducerTaskHandle {
-            connection_handle: connection_handle.clone(),
+            inner_handle: inner_handle.clone(),
         };
 
         let task = ProducerTask {
             partitions: PartitionQueueMap::default(),
-            connection_handle,
-            connection_task,
+            inner_handle,
+            inner_task,
         };
 
         (handle, task)

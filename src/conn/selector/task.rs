@@ -19,6 +19,7 @@ use crate::{
             task::{BrokerTask, BrokerTaskContext, BrokerTaskFactory, BrokerTaskHandle},
         },
         config::{ConnectionManagerConfig, ConnectionRetryConfig, MetadataRefreshConfig},
+        connect::{Connect, Tcp},
         selector::{
             cluster::BrokerMapEntry,
             metadata::{MetadataRefreshContext, MetadataRefreshTask},
@@ -29,7 +30,6 @@ use crate::{
 
 use super::{
     cluster::{BrokerMap, Cluster},
-    connect::{Connect, Tcp},
     metadata::MetadataRefreshResult,
 };
 

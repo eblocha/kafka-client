@@ -1,6 +1,6 @@
 pub mod client;
-pub mod handle;
+pub(crate) mod handle;
 pub mod partitioner;
 mod prepared_record;
 pub mod record;
-pub mod task;
+pub(crate) mod task;

@@ -1,10 +1,13 @@
 mod backoff;
-pub(crate) mod cancel;
+mod cancel;
 pub mod clients;
 pub mod common;
 pub mod config;
 mod conn;
 pub mod error;
+pub mod network;
 pub mod producer;
 mod proto;
 mod util;
+
+pub use crate::conn::connect::{Connect, Tcp};

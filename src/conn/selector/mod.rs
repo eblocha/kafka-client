@@ -1,5 +1,4 @@
 mod cluster;
-pub mod connect;
 mod metadata;
 mod task;
 

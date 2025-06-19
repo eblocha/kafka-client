@@ -7,93 +7,28 @@ use arc_swap::ArcSwapOption;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    cancel::OrCancelled,
-    common::Node,
     conn::{
         broker::{
             connector::{NodeConnector, VersionedConnection},
-            init_error::ConnectionInitError,
-            task::{
-                BrokerTask, BrokerTaskContext, BrokerTaskFactory, BrokerTaskHandle,
-                PartitionQueueMap,
-            },
+            task::{BrokerTaskFactory, BrokerTaskHandle, PartitionQueueMap},
         },
-        selector::connect::Connect,
+        connect::Connect,
         Sendable,
     },
     error::KafkaError,
+    network::task::{NetworkTask, NetworkTaskMessage},
     proto::ver::{FromVersionRange, GetApiKey},
 };
 
-#[derive(Debug)]
-pub struct ConnectionTaskMessage {
-    pub tx: oneshot::Sender<Result<Arc<VersionedConnection>, ConnectionInitError>>,
-}
-
-pub struct ConnectionTask<Conn> {
-    connector: NodeConnector<Conn>,
-    rx: mpsc::Receiver<ConnectionTaskMessage>,
-    partitions: PartitionQueueMap<()>,
-}
-
-impl<Conn: Connect + Send + 'static> BrokerTask for ConnectionTask<Conn> {
-    type PartitionMessage = ();
-
-    async fn run(mut self, ctx: BrokerTaskContext) -> Self {
-        loop {
-            let Some(Some(ConnectionTaskMessage { tx })) =
-                self.rx.recv().or_cancel(&ctx.cancellation_token).await
-            else {
-                break;
-            };
-
-            let Some(conn) = self
-                .connector
-                .connect()
-                .or_cancel(&ctx.cancellation_token)
-                .await
-            else {
-                break;
-            };
-
-            let _ = tx.send(conn);
-        }
-
-        self
-    }
-
-    async fn shutdown(self) -> Self {
-        let connector = self.connector.shutdown().await;
-
-        Self {
-            connector,
-            rx: self.rx,
-            partitions: self.partitions,
-        }
-    }
-
-    fn get_partitions_mut(&mut self) -> &mut PartitionQueueMap<Self::PartitionMessage> {
-        &mut self.partitions
-    }
-
-    fn get_node(&self) -> &Node {
-        &self.connector.node
-    }
-
-    fn set_node(&mut self, node: Node) {
-        self.connector.node = node;
-    }
-}
-
 #[derive(Debug, Clone)]
-pub struct ConnectionTaskHandle {
-    tx: mpsc::Sender<ConnectionTaskMessage>,
+pub struct NetworkTaskHandle {
+    tx: mpsc::Sender<NetworkTaskMessage>,
     connection: Arc<ArcSwapOption<VersionedConnection>>,
     in_flight: Arc<AtomicUsize>,
     failure_streak: Arc<AtomicUsize>,
 }
 
-impl ConnectionTaskHandle {
+impl NetworkTaskHandle {
     async fn send_inner<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
         &self,
         req: F,
@@ -134,7 +69,7 @@ impl ConnectionTaskHandle {
 
         let (tx, rx) = oneshot::channel();
 
-        let msg = ConnectionTaskMessage { tx };
+        let msg = NetworkTaskMessage { tx };
 
         self.tx.send(msg).await?;
 
@@ -142,7 +77,7 @@ impl ConnectionTaskHandle {
     }
 }
 
-impl BrokerTaskHandle for ConnectionTaskHandle {
+impl BrokerTaskHandle for NetworkTaskHandle {
     async fn send<R: Sendable + Send, F: FromVersionRange<Req = R> + GetApiKey + Send>(
         &self,
         req: F,
@@ -189,24 +124,24 @@ impl BrokerTaskHandle for ConnectionTaskHandle {
     }
 }
 
-pub struct ConnectionTaskFactory;
+pub struct NetworkTaskFactory;
 
-impl<Conn: Connect + Send + 'static> BrokerTaskFactory<Conn> for ConnectionTaskFactory {
-    type Task = ConnectionTask<Conn>;
-    type Handle = ConnectionTaskHandle;
+impl<Conn: Connect + Send + 'static> BrokerTaskFactory<Conn> for NetworkTaskFactory {
+    type Task = NetworkTask<Conn>;
+    type Handle = NetworkTaskHandle;
 
     fn new(&self, connector: NodeConnector<Conn>) -> (Self::Handle, Self::Task) {
         // We only need 1 slot because we are just waiting for a shared connection, not sending messages.
         let (tx, rx) = mpsc::channel(1);
 
-        let handle = ConnectionTaskHandle {
+        let handle = NetworkTaskHandle {
             connection: connector.connection.clone(),
             tx,
             in_flight: Arc::new(AtomicUsize::new(0)),
             failure_streak: Arc::new(AtomicUsize::new(0)),
         };
 
-        let task = ConnectionTask {
+        let task = NetworkTask {
             rx,
             connector,
             partitions: PartitionQueueMap::default(),

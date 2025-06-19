@@ -14,7 +14,7 @@ use crate::{
     common::{BrokerHost, Node},
     conn::{
         broker::init_error::ConnectionInitError, channel::KafkaChannel,
-        config::ConnectionRetryConfig, selector::connect::Connect, Sendable,
+        config::ConnectionRetryConfig, connect::Connect, Sendable,
     },
     error::{ErrorCode, KafkaError},
     proto::ver::{FromVersionRange, GetApiKey},

@@ -4,10 +4,8 @@ use crate::{
     common::{BrokerHost, TopicPartition},
     conn::{
         config::ConnectionManagerConfig,
-        selector::{
-            connect::{Connect, Tcp},
-            SelectorTaskHandle,
-        },
+        connect::{Connect, Tcp},
+        selector::SelectorTaskHandle,
     },
     error::{ErrorCode, KafkaError},
     producer::{
