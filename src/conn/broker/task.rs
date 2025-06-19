@@ -1,12 +1,34 @@
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use futures::Stream;
+use tokio::sync::oneshot;
 use tokio_stream::StreamMap;
 use tokio_util::sync::CancellationToken;
 
-use crate::{common::TopicPartition, conn::broker::connection_task::ConnectionTaskHandle};
+use crate::{
+    common::{Node, TopicPartition},
+    conn::{
+        broker::{
+            connector::{NodeConnector, VersionedConnection},
+            init_error::ConnectionInitError,
+        },
+        Sendable,
+    },
+    error::KafkaError,
+    proto::ver::{FromVersionRange, GetApiKey},
+};
 
 pub type PartitionQueueMap<M> = StreamMap<TopicPartition, Pin<Box<dyn Stream<Item = M> + Send>>>;
+
+#[derive(Debug)]
+pub struct BrokerTaskMessage {
+    pub tx: oneshot::Sender<Result<Arc<VersionedConnection>, ConnectionInitError>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BrokerTaskContext {
+    pub cancellation_token: CancellationToken,
+}
 
 pub trait BrokerTask {
     type PartitionMessage;
@@ -14,16 +36,44 @@ pub trait BrokerTask {
     /// Run the task.
     ///
     /// This must return itself to be able to reconfigure when a metadata refresh is received.
-    fn run(self, cancellation_token: CancellationToken) -> impl Future<Output = Self> + Send;
+    fn run(self, ctx: BrokerTaskContext) -> impl Future<Output = Self> + Send;
+
+    /// Stop the connection
+    fn shutdown(self) -> impl Future<Output = Self>;
 
     /// Get a mutable reference to the mapping of topic partition to a queue of messages for the partition.
     ///
     /// This mapping will be modified when a metadata refresh is received.
     fn get_partitions_mut(&mut self) -> &mut PartitionQueueMap<Self::PartitionMessage>;
+
+    fn get_node(&self) -> &Node;
+
+    fn set_node(&mut self, node: Node);
 }
 
-pub trait BrokerTaskHandleFactory: Send + 'static {
-    type Task: BrokerTask;
+pub trait BrokerTaskHandle: Clone {
+    fn send<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
+        &self,
+        req: F,
+    ) -> impl Future<Output = Result<R::Response, KafkaError>>;
 
-    fn new(&self, connection_handle: ConnectionTaskHandle) -> Self::Task;
+    fn send_and_forget<R: Sendable, F: FromVersionRange<Req = R> + GetApiKey>(
+        &self,
+        req: F,
+    ) -> impl Future<Output = Result<(), KafkaError>>;
+
+    fn requests_in_flight(&self) -> usize;
+
+    fn connect_failure_streak(&self) -> usize;
+
+    fn capacity(&self) -> Option<usize>;
+
+    fn is_closed(&self) -> bool;
+}
+
+pub trait BrokerTaskFactory<Conn>: Send + 'static {
+    type Task: BrokerTask;
+    type Handle: BrokerTaskHandle;
+
+    fn new(&self, connector: NodeConnector<Conn>) -> (Self::Handle, Self::Task);
 }

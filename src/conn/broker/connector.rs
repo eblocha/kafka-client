@@ -11,12 +11,10 @@ use tokio::time::error::Elapsed;
 
 use crate::{
     backoff::{exponential_backoff, BackoffSession},
-    common::BrokerHost,
+    common::{BrokerHost, Node},
     conn::{
-        channel::KafkaChannel,
-        config::ConnectionRetryConfig,
-        selector::{connect::Connect, ConnectionInitError},
-        Sendable,
+        broker::init_error::ConnectionInitError, channel::KafkaChannel,
+        config::ConnectionRetryConfig, selector::connect::Connect, Sendable,
     },
     error::{ErrorCode, KafkaError},
     proto::ver::{FromVersionRange, GetApiKey},
@@ -77,12 +75,37 @@ impl VersionedConnection {
 #[derive(Debug)]
 /// Manages a connection to a broker node.
 pub struct NodeConnector<Conn> {
-    pub broker_id: i32,
-    pub host: BrokerHost,
+    pub node: Node,
     pub retry_config: ConnectionRetryConfig,
     pub connection: Arc<ArcSwapOption<VersionedConnection>>,
     connect: Conn,
     backoff: BackoffSession<()>,
+}
+
+impl<Conn> NodeConnector<Conn> {
+    pub fn new(node: Node, retry_config: ConnectionRetryConfig, connect: Conn) -> Self {
+        Self {
+            node,
+            retry_config,
+            connection: Arc::new(ArcSwapOption::empty()),
+            connect,
+            backoff: BackoffSession::default(),
+        }
+    }
+
+    pub async fn shutdown(self) -> Self {
+        if let Some(conn) = self.connection.swap(None) {
+            conn.connection.shutdown().await;
+        }
+
+        tracing::debug!(
+            broker_id = self.node.id,
+            host = ?self.node.host,
+            "shut down gracefully"
+        );
+
+        self
+    }
 }
 
 #[derive(Debug, From)]
@@ -125,8 +148,8 @@ impl<Conn: Connect> NodeConnector<Conn> {
             let backoff = exponential_backoff(min, max, self.backoff.count());
 
             tracing::error!(
-                broker_id = self.broker_id,
-                host = ?self.host,
+                broker_id = self.node.id,
+                host = ?self.node.host,
                 retries = self.backoff.count(),
                 backoff = ?backoff,
                 "failed to connect: {e}",
@@ -161,8 +184,8 @@ impl<Conn: Connect> NodeConnector<Conn> {
         // create a new connection to the broker
 
         tracing::debug!(
-            broker_id = self.broker_id,
-            host = ?self.host,
+            broker_id = self.node.id,
+            host = ?self.node.host,
             retries = self.backoff.count(),
             "connecting to broker"
         );
@@ -177,12 +200,12 @@ impl<Conn: Connect> NodeConnector<Conn> {
     }
 
     async fn try_connect(&mut self) -> Result<VersionedConnection, ConnectAttemptError> {
-        let connect_fut = self.connect.connect(&self.host);
+        let connect_fut = self.connect.connect(&self.node.host);
 
         let channel =
             tokio::time::timeout(self.retry_config.connection_timeout, connect_fut).await??;
 
-        let versions = negotiate(self.broker_id, &self.host, &channel)
+        let versions = negotiate(self.node.id, &self.node.host, &channel)
             .await?
             .api_keys
             .into_iter()

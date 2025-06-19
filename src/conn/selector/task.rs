@@ -13,11 +13,16 @@ use crate::{
     backoff::{exponential_backoff, BackoffSession},
     common::{BrokerHost, Node},
     conn::{
+        broker::{
+            connection_task::{ConnectionTask, ConnectionTaskFactory},
+            connector::NodeConnector,
+            init_error::ConnectionInitError,
+            task::{BrokerTask, BrokerTaskContext, BrokerTaskFactory, BrokerTaskHandle},
+        },
         config::{ConnectionManagerConfig, ConnectionRetryConfig, MetadataRefreshConfig},
         selector::{
             cluster::BrokerMapEntry,
             metadata::{MetadataRefreshContext, MetadataRefreshTask},
-            ConnectionInitError,
         },
     },
     error::KafkaError,
@@ -27,7 +32,6 @@ use super::{
     cluster::{BrokerMap, Cluster},
     connect::{Connect, Tcp},
     metadata::MetadataRefreshResult,
-    node_task::{new_pair, NodeTask},
 };
 
 /// A request to fetch metadata for a specific set of topics, or all topics
@@ -52,13 +56,13 @@ pub struct RefreshMetadataRequest {
 ///
 /// If a [`NodeTask`] panics, then pending requests for the broker will recieve a [`crate::conn::KafkaConnectionError::Closed`]
 /// error, and a new [`NodeTask`] and [`NodeTaskHandle`] pair will be created and spawned.
-struct SelectorTask<Conn> {
+struct SelectorTask<Conn, AuxTask, Factory: BrokerTaskFactory<Conn, Task = AuxTask>> {
     /// Mapping of broker id to its host
     hosts: BrokerMap,
     /// Shared global cluster state. Contains the latest metadata and mapping of broker id to connection
     cluster: Arc<ArcSwap<Cluster>>,
     /// Join set for running connection tasks. Used to detect failed connections
-    join_set: JoinSet<NodeTask<Conn>>,
+    join_set: JoinSet<ConnectionTask<Conn>>,
     /// Configuration settings for retries
     retry_config: ConnectionRetryConfig,
     /// Configuration for metadata refresh process
@@ -75,6 +79,8 @@ struct SelectorTask<Conn> {
     bootstrap_signal: Option<oneshot::Sender<()>>,
     /// Used to create new tcp streams
     connect: Conn,
+    /// Used to spawn auxiliary tasks specific to a broker id.
+    task_factory: Factory,
 }
 
 enum Event<Conn> {
@@ -85,10 +91,15 @@ enum Event<Conn> {
     RefreshComplete(MetadataRefreshResult),
     /// A node stopped. Note this doesn't necessarily indicate that it should be running.
     /// The [`SelectorTask`] will restart it if it points to a valid broker in the cluster.
-    NodeDied(NodeTask<Conn>),
+    NodeDied(ConnectionTask<Conn>),
 }
 
-impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
+impl<
+        Conn: Connect + Send + Clone + 'static,
+        AuxTask,
+        Factory: BrokerTaskFactory<Conn, Task = AuxTask> + Send + 'static,
+    > SelectorTask<Conn, AuxTask, Factory>
+{
     async fn run(mut self) -> Result<(), KafkaError> {
         let mut metadata_interval = tokio::time::interval(self.metadata_config.interval);
         metadata_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -260,7 +271,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
         }
 
         for entry in self.hosts.drain() {
-            entry.handle.cancellation_token.cancel();
+            entry.cancellation_token.cancel();
         }
 
         let mut clean_shutdown = true;
@@ -325,7 +336,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                     host = ?entry.node.host,
                     "removing connection to broker"
                 );
-                entry.handle.cancellation_token.cancel();
+                entry.cancellation_token.cancel();
             }
 
             keep
@@ -340,7 +351,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             if let Some(entry) = self.hosts.get_mut(&broker_id) {
                 let host = &entry.node.host;
 
-                if entry.handle.tx.is_closed() {
+                if entry.handle.is_closed() {
                     // the node is not running, and the receiver dropped - it likely panicked
                     self.start_new_task(broker_id, new_node);
                 }
@@ -352,7 +363,7 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
                         new_host = ?new_node.host,
                         "changing hosts"
                     );
-                    entry.handle.cancellation_token.cancel();
+                    entry.cancellation_token.cancel();
                     entry.node = new_node;
                     broker_ids_changing_hosts.insert(broker_id);
                 }
@@ -377,22 +388,33 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             "creating new connection task"
         );
 
-        let (handle, task) = new_pair(
-            broker_id,
-            node.host.clone(),
+        let connector = NodeConnector::new(
+            node.clone(),
             self.retry_config.clone(),
             self.connect.clone(),
         );
 
-        self.join_set.spawn(task.run());
+        let cancellation_token = CancellationToken::new();
 
-        self.hosts.insert(BrokerMapEntry { node, handle });
+        let (handle, task) = ConnectionTaskFactory.new(connector);
+
+        self.join_set.spawn(task.run(BrokerTaskContext {
+            cancellation_token: cancellation_token.clone(),
+        }));
+
+        self.hosts.insert(BrokerMapEntry {
+            node,
+            handle,
+            cancellation_token,
+        });
     }
 
-    async fn restart_if_needed(&mut self, mut dead_task: NodeTask<Conn>) {
-        if let Some(mut entry) = self.hosts.remove(&dead_task.broker_id) {
+    async fn restart_if_needed(&mut self, mut dead_task: ConnectionTask<Conn>) {
+        let task_node = dead_task.get_node();
+
+        if let Some(mut entry) = self.hosts.remove(&task_node.id) {
             tracing::debug!(
-                broker_id = dead_task.broker_id,
+                broker_id = task_node.id,
                 host = ?entry.node.host,
                 "restarting connection handle",
             );
@@ -400,23 +422,23 @@ impl<Conn: Connect + Send + Clone + 'static> SelectorTask<Conn> {
             // create new cancellation token to not immediately exit when the task starts
             let cancellation_token = CancellationToken::new();
 
-            dead_task.cancellation_token = cancellation_token.clone();
-            entry.handle.cancellation_token = cancellation_token;
+            entry.cancellation_token = cancellation_token.clone();
 
             // if the host is different, stop the existing connection
-            if dead_task.host != entry.node.host {
+            if task_node.host != entry.node.host {
                 tracing::debug!(
-                    host = ?dead_task.host,
-                    broker_id = dead_task.broker_id,
+                    host = ?task_node.host,
+                    broker_id = task_node.id,
                     "stopping existing connection"
                 );
-                dead_task = dead_task.shutdown_existing_connection().await;
+                dead_task = dead_task.shutdown().await;
             }
 
-            dead_task.host = entry.node.host.clone();
+            dead_task.set_node(entry.node.clone());
 
             self.hosts.insert(entry);
-            self.join_set.spawn(dead_task.run());
+            self.join_set
+                .spawn(dead_task.run(BrokerTaskContext { cancellation_token }));
         }
     }
 }
@@ -443,9 +465,10 @@ pub(crate) struct SelectorTaskHandle {
 
 impl SelectorTaskHandle {
     /// Create a new selector task handle using TCP without TLS.
-    pub async fn try_new_tcp(
+    pub async fn try_new_tcp<Factory: BrokerTaskFactory<Tcp> + Send + 'static>(
         bootstrap: &[BrokerHost],
         config: ConnectionManagerConfig,
+        task_factory: Factory,
     ) -> Result<Self, KafkaError> {
         Self::try_new_with_connect(
             bootstrap,
@@ -454,6 +477,7 @@ impl SelectorTaskHandle {
                 nodelay: true,
                 config: config.conn.io,
             },
+            task_factory,
         )
         .await
     }
@@ -468,20 +492,38 @@ impl SelectorTaskHandle {
         self.await_shutdown().await;
     }
 
-    async fn try_new_with_connect<Conn: Connect + Clone + Send + 'static>(
+    async fn try_new_with_connect<
+        Conn: Connect + Clone + Send + 'static,
+        Factory: BrokerTaskFactory<Conn> + Send + 'static,
+    >(
         bootstrap: &[BrokerHost],
         config: ConnectionManagerConfig,
         connect: Conn,
+        task_factory: Factory,
     ) -> Result<Self, KafkaError> {
         let mut hosts: BrokerMap = BrokerMap::default();
         let mut join_set = JoinSet::new();
 
         for (id, host) in bootstrap.iter().enumerate() {
             let id = id as i32;
-            let (handle, task) =
-                new_pair(id, host.clone(), config.conn.retry.clone(), connect.clone());
 
-            join_set.spawn(task.run());
+            let connector = NodeConnector::new(
+                Node {
+                    id,
+                    host: host.clone(),
+                    rack: None,
+                },
+                config.conn.retry.clone(),
+                connect.clone(),
+            );
+
+            let cancellation_token = CancellationToken::new();
+
+            let (handle, task) = ConnectionTaskFactory.new(connector);
+
+            join_set.spawn(task.run(BrokerTaskContext {
+                cancellation_token: cancellation_token.clone(),
+            }));
 
             hosts.insert(BrokerMapEntry {
                 node: Node {
@@ -490,6 +532,7 @@ impl SelectorTaskHandle {
                     rack: None,
                 },
                 handle,
+                cancellation_token,
             });
         }
 
@@ -517,6 +560,7 @@ impl SelectorTaskHandle {
             cancellation_token: cancellation_token.clone(),
             bootstrap_signal: Some(tx_bootstrap),
             connect,
+            task_factory,
         };
 
         let join_handle = task_tracker.spawn(selector_task.run());

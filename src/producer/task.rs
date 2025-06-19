@@ -17,16 +17,16 @@ use kafka_protocol::{
 use rustc_hash::FxHashMap;
 use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
-use tokio_util::sync::CancellationToken;
 
 use crate::{
     cancel::OrCancelled,
-    common::TopicPartition,
+    common::{Node, TopicPartition},
     conn::{
         broker::{
-            connection_task::ConnectionTaskHandle,
-            task::{BrokerTask, PartitionQueueMap},
+            connection_task::{ConnectionTask, ConnectionTaskHandle},
+            task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle, PartitionQueueMap},
         },
+        selector::connect::Connect,
         RecordBatchEncoder,
     },
     error::{ErrorCode, KafkaError},
@@ -46,31 +46,36 @@ pub struct ProducerSendMessage {
     pub tx: oneshot::Sender<Result<(), KafkaError>>,
 }
 
-pub struct ProducerTask {
-    pub connection_task: ConnectionTaskHandle,
+pub struct ProducerTask<Conn> {
     pub partitions: PartitionQueueMap<ProducerSendMessage>,
+    pub connection_handle: ConnectionTaskHandle,
+    pub connection_task: ConnectionTask<Conn>,
 }
 
-impl BrokerTask for ProducerTask {
+impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
     type PartitionMessage = ProducerSendMessage;
 
-    async fn run(mut self, cancellation_token: CancellationToken) -> Self {
+    async fn run(mut self, ctx: BrokerTaskContext) -> Self {
+        let connection_join_handle = tokio::spawn(self.connection_task.run(ctx.clone()));
+
         // TODO batch.size and linger.ms config
         let chunks = (&mut self.partitions).chunks_timeout(2000, Duration::from_millis(500));
 
         tokio::pin!(chunks);
 
         loop {
-            let Some(Some(chunk)) = chunks.next().or_cancel(&cancellation_token).await else {
+            // TODO stop if connection task stops
+
+            let Some(Some(chunk)) = chunks.next().or_cancel(&ctx.cancellation_token).await else {
                 break;
             };
 
             let (request, partitions) = create_request(chunk);
 
             let Some(response) = self
-                .connection_task
+                .connection_handle
                 .send(request)
-                .or_cancel(&cancellation_token)
+                .or_cancel(&ctx.cancellation_token)
                 .await
             else {
                 break;
@@ -90,11 +95,39 @@ impl BrokerTask for ProducerTask {
             }
         }
 
-        self
+        ctx.cancellation_token.cancel();
+
+        // TODO any way to handle this more gracefully?
+        // This is err if the task is aborted forcefully, or it panics
+        let connection_task = connection_join_handle.await.unwrap();
+
+        Self {
+            partitions: self.partitions,
+            connection_handle: self.connection_handle,
+            connection_task,
+        }
+    }
+
+    async fn shutdown(self) -> Self {
+        let connection_task = self.connection_task.shutdown().await;
+
+        Self {
+            partitions: self.partitions,
+            connection_handle: self.connection_handle,
+            connection_task,
+        }
     }
 
     fn get_partitions_mut(&mut self) -> &mut PartitionQueueMap<Self::PartitionMessage> {
         &mut self.partitions
+    }
+
+    fn get_node(&self) -> &Node {
+        self.connection_task.get_node()
+    }
+
+    fn set_node(&mut self, node: Node) {
+        self.connection_task.set_node(node);
     }
 }
 

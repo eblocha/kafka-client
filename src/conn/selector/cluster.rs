@@ -10,16 +10,21 @@ use kafka_protocol::{
     protocol::StrBytes,
 };
 use rustc_hash::FxHashMap;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::{common::Node, error::ErrorCode, util::UuidExt};
-
-use super::NodeTaskHandle;
+use crate::{
+    common::Node,
+    conn::broker::{connection_task::ConnectionTaskHandle, task::BrokerTaskHandle},
+    error::ErrorCode,
+    util::UuidExt,
+};
 
 #[derive(Debug, Clone)]
 pub struct BrokerMapEntry {
     pub node: Node,
-    pub(crate) handle: NodeTaskHandle,
+    pub(crate) handle: ConnectionTaskHandle,
+    pub(crate) cancellation_token: CancellationToken,
 }
 
 /// Mapping of broker id to [`BrokerMapEntry`].
@@ -29,13 +34,15 @@ pub struct BrokerMapEntry {
 pub struct BrokerMap(#[from] Vec<BrokerMapEntry>);
 
 fn least_in_flight(left: &&BrokerMapEntry, right: &&BrokerMapEntry) -> Ordering {
-    left.handle.in_flight().cmp(&right.handle.in_flight())
+    left.handle
+        .requests_in_flight()
+        .cmp(&right.handle.requests_in_flight())
 }
 
 fn least_failure_streak(left: &&BrokerMapEntry, right: &&BrokerMapEntry) -> Ordering {
     left.handle
-        .failure_streak()
-        .cmp(&right.handle.failure_streak())
+        .connect_failure_streak()
+        .cmp(&right.handle.connect_failure_streak())
 }
 
 impl BrokerMap {
@@ -65,7 +72,7 @@ impl BrokerMap {
         let least_loaded_no_failures = self
             .0
             .iter()
-            .filter(|entry| entry.handle.failure_streak() == 0)
+            .filter(|entry| entry.handle.connect_failure_streak() == 0)
             .min_by(least_in_flight);
 
         if let Some(entry) = least_loaded_no_failures {

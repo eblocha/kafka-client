@@ -2,7 +2,10 @@ use kafka_protocol::messages::{
     metadata_request::MetadataRequestTopic, MetadataRequest, MetadataResponse,
 };
 
-use crate::{backoff::BackoffSession, error::KafkaError, proto::ver::with_max_version};
+use crate::{
+    backoff::BackoffSession, conn::broker::task::BrokerTaskHandle, error::KafkaError,
+    proto::ver::with_max_version,
+};
 
 use super::{cluster::BrokerMapEntry, RefreshMetadataRequest};
 
