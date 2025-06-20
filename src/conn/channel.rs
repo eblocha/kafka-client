@@ -253,7 +253,7 @@ impl KafkaChannel {
         Self {
             sender: tx,
             task_tracker,
-            cancellation_token: cancellation_token.clone(),
+            cancellation_token: cancellation_token,
         }
     }
 

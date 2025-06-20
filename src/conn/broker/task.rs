@@ -1,8 +1,7 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, sync::Arc};
 
-use futures::Stream;
-use tokio::sync::oneshot;
-use tokio_stream::StreamMap;
+use tokio::sync::{mpsc, oneshot};
+use tokio_stream::{wrappers::ReceiverStream, StreamMap};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -18,7 +17,13 @@ use crate::{
     proto::ver::{FromVersionRange, GetApiKey},
 };
 
-pub type PartitionQueueMap<M> = StreamMap<TopicPartition, Pin<Box<dyn Stream<Item = M> + Send>>>;
+pub type PartitionQueue<M> = ReceiverStream<M>;
+pub type PartitionQueueMap<M> = StreamMap<TopicPartition, PartitionQueue<M>>;
+
+/// Create a new [`PartitionQueue`] from an [`mpsc::Receiver`].
+pub fn into_partition_queue<M: Send + 'static>(rx: mpsc::Receiver<M>) -> PartitionQueue<M> {
+    ReceiverStream::new(rx)
+}
 
 #[derive(Debug)]
 pub struct BrokerTaskMessage {

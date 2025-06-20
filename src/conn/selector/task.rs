@@ -11,12 +11,15 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     backoff::{exponential_backoff, BackoffSession},
-    common::{BrokerHost, Node},
+    common::{BrokerHost, Node, TopicPartition},
     conn::{
         broker::{
             connector::NodeConnector,
             init_error::ConnectionInitError,
-            task::{BrokerTask, BrokerTaskContext, BrokerTaskFactory, BrokerTaskHandle},
+            task::{
+                into_partition_queue, BrokerTask, BrokerTaskContext, BrokerTaskFactory,
+                BrokerTaskHandle, PartitionQueue,
+            },
         },
         config::{ConnectionManagerConfig, ConnectionRetryConfig, MetadataRefreshConfig},
         connect::{Connect, Tcp},
@@ -159,7 +162,7 @@ impl<
                             let throttle_ms: u64 =
                                 metadata.throttle_time_ms.try_into().unwrap_or_default();
 
-                            self.update_metadata(metadata);
+                            self.update_metadata(metadata).await;
 
                             tracing::debug!(
                                 broker_id = ctx.entry.node.id,
@@ -312,12 +315,10 @@ impl<
         Ok(())
     }
 
-    fn update_metadata(&mut self, metadata: MetadataResponse) {
+    async fn update_metadata(&mut self, metadata: MetadataResponse) {
         if metadata.brokers.is_empty() {
             tracing::warn!("metadata response has no brokers, ignoring");
         }
-
-        // TODO rearrange/create topic partition queues
 
         // mapping of broker id to broker host information in the new metadata
         let new_broker_ids: FxHashMap<_, _> = metadata
@@ -326,16 +327,11 @@ impl<
             .map(|broker| (broker.node_id.0, broker))
             .collect();
 
-        let new_broker_hosts: FxHashSet<BrokerHost> =
-            metadata.brokers.iter().map(BrokerHost::from).collect();
-
-        // remove backoff state for nodes not in the cluster
-        self.metadata_backoff
-            .retain(|host, _| new_broker_hosts.contains(host));
-
-        // remove nodes that are not in the cluster
+        // Remove nodes that are not in the cluster
         self.hosts.retain(|entry| {
             let keep = new_broker_ids.contains_key(&entry.node.id);
+            // Always stop the task to reassign partitions
+            entry.cancellation_token.cancel();
 
             if !keep {
                 tracing::debug!(
@@ -343,54 +339,133 @@ impl<
                     host = ?entry.node.host,
                     "removing connection to broker"
                 );
-                entry.cancellation_token.cancel();
             }
 
             keep
         });
 
-        let mut broker_ids_changing_hosts = FxHashSet::default();
+        let mut partitions: FxHashMap<TopicPartition, PartitionQueue<Task::PartitionMessage>> =
+            Default::default();
+        let mut tasks: FxHashMap<i32, Task> = Default::default();
 
-        // spawn nodes that should be in the cluster
-        for (broker_id, broker) in new_broker_ids {
-            let new_node = Node::from(broker);
+        // Stop existing tasks.
+        // Revoke and collect all partition streams.
+        // Shutdown connections for brokers that don't exist or changed hosts
+        while let Some(task_result) = self.join_set.join_next().await {
+            match task_result {
+                Ok(mut task) => {
+                    let node = task.get_node();
+                    let id = node.id;
 
-            if let Some(entry) = self.hosts.get_mut(&broker_id) {
-                let host = &entry.node.host;
+                    if let Some(metadata) = new_broker_ids.get(&id) {
+                        // Node is supposed to exist
+                        let new_node = Node::from(*metadata);
+                        let current_node = task.get_node();
 
-                if entry.handle.is_closed() {
-                    // the node is not running, and the receiver dropped - it likely panicked
-                    self.start_new_task(broker_id, new_node);
+                        if current_node.host != new_node.host {
+                            tracing::debug!(
+                                broker_id = current_node.id,
+                                host = ?current_node.host,
+                                new_host = ?new_node.host,
+                                "changing hosts"
+                            );
+                            // Stop the existing connection to the wrong host
+                            task = task.shutdown().await;
+                        }
+
+                        // Revoke existing partitions
+                        task.set_node(Node::from(*metadata));
+                        let parts = task.get_partitions_mut();
+                        let tps = parts.keys().cloned().collect::<Vec<_>>();
+
+                        for part in tps {
+                            let stream = parts.remove(&part)
+                                .expect("expected partition stream to exist since we are iterating over known keys");
+                            partitions.insert(part, stream);
+                        }
+
+                        tasks.insert(id, task);
+                    } else {
+                        // This broker is no longer in the cluster. Stop the connection to its host.
+                        task.shutdown().await;
+                    }
                 }
-                // if the host is different, stop it (it will restart automatically with the new host)
-                else if host != &new_node.host {
-                    tracing::debug!(
-                        broker_id = broker_id,
-                        host = ?host,
-                        new_host = ?new_node.host,
-                        "changing hosts"
-                    );
-                    entry.cancellation_token.cancel();
-                    entry.node = new_node;
-                    broker_ids_changing_hosts.insert(broker_id);
-                }
-            } else {
-                // we don't have a handle to the broker - create one
-                self.start_new_task(broker_id, new_node);
+                Err(e) => tracing::error!("broker task stopped unexpectedly: {e}"),
             }
         }
 
         // TODO optimize
         let mut new_state = self.cluster.load().as_ref().clone();
-        new_state.brokers = self.hosts.clone();
-        new_state.metadata.update_with(metadata);
+        new_state.metadata.update_with(metadata.clone());
 
+        // Create new tasks for new brokers
+        // Assign partitions to tasks
+        for broker in &metadata.brokers {
+            let (mut task, cancellation_token) = match tasks.remove(&broker.node_id.0) {
+                Some(task) => {
+                    match self.hosts.get_mut(&broker.node_id.0) {
+                        Some(entry) => (task, entry.cancellation_token.clone()),
+                        None => {
+                            // We have a task which does not have a handle.
+                            // Shutdown the task and start fresh.
+                            task.shutdown().await;
+                            self.create_new_task(Node::from(broker))
+                        }
+                    }
+                }
+                None => self.create_new_task(Node::from(broker)),
+            };
+
+            let task_partitions = task.get_partitions_mut();
+
+            for topic in &metadata.topics {
+                let Some(ref topic_name) = topic.name else {
+                    // No topic name means it was requested by id but does not exist
+                    continue;
+                };
+
+                for partition in &topic.partitions {
+                    if partition.leader_id != broker.node_id {
+                        // This partition is not led by this broker
+                        continue;
+                    }
+
+                    let tp = TopicPartition::new(topic_name.clone(), partition.partition_index);
+
+                    let stream = match partitions.remove(&tp) {
+                        Some(s) => s,
+                        None => {
+                            // TODO config
+                            let (tx, rx) = mpsc::channel(1000);
+                            new_state.partitions.insert(tp.clone(), tx);
+                            into_partition_queue(rx)
+                        }
+                    };
+
+                    // Assign this partition to the broker task
+                    task_partitions.insert(tp, stream);
+                }
+            }
+
+            // Restart the task
+            self.join_set
+                .spawn(task.run(BrokerTaskContext { cancellation_token }));
+        }
+
+        let new_broker_hosts: FxHashSet<BrokerHost> =
+            metadata.brokers.iter().map(BrokerHost::from).collect();
+
+        // remove backoff state for nodes not in the cluster
+        self.metadata_backoff
+            .retain(|host, _| new_broker_hosts.contains(host));
+
+        new_state.brokers = self.hosts.clone();
         self.cluster.store(Arc::new(new_state));
     }
 
-    fn start_new_task(&mut self, broker_id: i32, node: Node) {
+    fn create_new_task(&mut self, node: Node) -> (Task, CancellationToken) {
         tracing::debug!(
-            broker_id = broker_id,
+            broker_id = node.id,
             host = ?node.host,
             "creating new connection task"
         );
@@ -401,19 +476,17 @@ impl<
             self.connect.clone(),
         );
 
-        let cancellation_token = CancellationToken::new();
-
         let (handle, task) = self.task_factory.new(connector);
 
-        self.join_set.spawn(task.run(BrokerTaskContext {
-            cancellation_token: cancellation_token.clone(),
-        }));
+        let cancellation_token = self.cancellation_token.child_token();
 
         self.hosts.insert(BrokerMapEntry {
             node,
             handle,
-            cancellation_token,
+            cancellation_token: cancellation_token.clone(),
         });
+
+        (task, cancellation_token)
     }
 
     async fn restart_if_needed(&mut self, mut dead_task: Task) {
@@ -427,7 +500,7 @@ impl<
             );
 
             // create new cancellation token to not immediately exit when the task starts
-            let cancellation_token = CancellationToken::new();
+            let cancellation_token = self.cancellation_token.child_token();
 
             entry.cancellation_token = cancellation_token.clone();
 
@@ -510,6 +583,8 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
     ) -> Result<Self, KafkaError> {
         let mut hosts: BrokerMap<TaskHandle> = BrokerMap::default();
         let mut join_set = JoinSet::new();
+        let cancellation_token = CancellationToken::new();
+        let task_tracker = TaskTracker::new();
 
         for (id, host) in bootstrap.iter().enumerate() {
             let id = id as i32;
@@ -524,7 +599,7 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
                 connect.clone(),
             );
 
-            let cancellation_token = CancellationToken::new();
+            let cancellation_token = cancellation_token.child_token();
 
             let (handle, task) = task_factory.new(connector);
 
@@ -542,9 +617,6 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
                 cancellation_token,
             });
         }
-
-        let cancellation_token = CancellationToken::new();
-        let task_tracker = TaskTracker::new();
 
         // create the watch channel for the metadata
         let cluster = Arc::new(ArcSwap::new(Arc::new(Cluster::new(hosts.clone()))));
