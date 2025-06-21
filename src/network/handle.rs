@@ -42,7 +42,7 @@ impl NetworkTaskHandle {
         req: F,
     ) -> Result<(), KafkaError> {
         let conn = self.get_connection().await?;
-        Ok(conn.send_and_forget(req).await?)
+        conn.send_and_forget(req).await
     }
 
     async fn get_connection(&self) -> Result<Arc<VersionedConnection>, KafkaError> {
@@ -130,7 +130,7 @@ impl<Conn: Connect + Send + 'static> BrokerTaskFactory<Conn> for NetworkTaskFact
     type Task = NetworkTask<Conn>;
     type Handle = NetworkTaskHandle;
 
-    fn new(&self, connector: NodeConnector<Conn>) -> (Self::Handle, Self::Task) {
+    fn new_task(&self, connector: NodeConnector<Conn>) -> (Self::Handle, Self::Task) {
         // We only need 1 slot because we are just waiting for a shared connection, not sending messages.
         let (tx, rx) = mpsc::channel(1);
 

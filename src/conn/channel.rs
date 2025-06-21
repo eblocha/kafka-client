@@ -107,11 +107,7 @@ impl<IO> KafkaChannelTask<IO> {
 
         let mut correlation_id = 0;
 
-        let client_id = self
-            .config
-            .client_id
-            .clone()
-            .map(|s| StrBytes::from_string(s));
+        let client_id = self.config.client_id.clone().map(StrBytes::from_string);
 
         loop {
             let either = tokio::select! {
@@ -260,7 +256,7 @@ impl KafkaChannel {
         Self {
             sender: tx,
             task_tracker,
-            cancellation_token: cancellation_token,
+            cancellation_token,
         }
     }
 

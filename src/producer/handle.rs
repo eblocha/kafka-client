@@ -62,8 +62,8 @@ impl<Conn: Connect + Send + 'static> BrokerTaskFactory<Conn> for ProducerTaskFac
     type Task = ProducerTask<Conn>;
     type Handle = ProducerTaskHandle;
 
-    fn new(&self, connector: NodeConnector<Conn>) -> (Self::Handle, Self::Task) {
-        let (inner_handle, inner_task) = NetworkTaskFactory.new(connector);
+    fn new_task(&self, connector: NodeConnector<Conn>) -> (Self::Handle, Self::Task) {
+        let (inner_handle, inner_task) = NetworkTaskFactory.new_task(connector);
 
         let handle = ProducerTaskHandle {
             inner_handle: inner_handle.clone(),

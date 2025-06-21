@@ -92,5 +92,5 @@ pub trait BrokerTaskFactory<Conn>: Send + 'static {
     type Task: BrokerTask;
     type Handle: BrokerTaskHandle;
 
-    fn new(&self, connector: NodeConnector<Conn>) -> (Self::Handle, Self::Task);
+    fn new_task(&self, connector: NodeConnector<Conn>) -> (Self::Handle, Self::Task);
 }

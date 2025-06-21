@@ -551,7 +551,7 @@ impl<
 
         let connector = NodeConnector::new(node.clone(), self.config.clone(), self.connect.clone());
 
-        let (handle, task) = self.task_factory.new(connector);
+        let (handle, task) = self.task_factory.new_task(connector);
 
         let cancellation_token = self.cancellation_token.child_token();
 
@@ -677,7 +677,7 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
 
             let cancellation_token = cancellation_token.child_token();
 
-            let (handle, task) = task_factory.new(connector);
+            let (handle, task) = task_factory.new_task(connector);
 
             join_set.spawn(task.run(BrokerTaskContext {
                 cancellation_token: cancellation_token.clone(),
