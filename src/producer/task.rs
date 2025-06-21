@@ -1,18 +1,16 @@
 use std::{
-    io,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    i32, io,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bytes::{Bytes, BytesMut};
 use kafka_protocol::{
     messages::{
         produce_request::{PartitionProduceData, TopicProduceData},
-        ProduceRequest, ProduceResponse, TopicName,
+        ProduceRequest, ProduceResponse, TopicName, TransactionalId,
     },
     protocol::StrBytes,
-    records::{
-        Compression, Record, RecordEncodeOptions, TimestampType, NO_PRODUCER_EPOCH, NO_PRODUCER_ID,
-    },
+    records::{Record, RecordEncodeOptions, TimestampType, NO_PRODUCER_EPOCH, NO_PRODUCER_ID},
 };
 use rustc_hash::FxHashMap;
 use tokio::sync::oneshot;
@@ -21,6 +19,7 @@ use tokio_stream::StreamExt;
 use crate::{
     cancel::OrCancelled,
     common::{Node, TopicPartition},
+    config::KafkaConfig,
     conn::{
         broker::task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle, PartitionQueueMap},
         connect::Connect,
@@ -48,6 +47,7 @@ pub struct ProducerTask<Conn> {
     pub(super) partitions: PartitionQueueMap<ProducerSendMessage>,
     pub(super) inner_handle: NetworkTaskHandle,
     pub(super) inner_task: NetworkTask<Conn>,
+    pub(super) config: KafkaConfig,
 }
 
 impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
@@ -56,10 +56,20 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
     async fn run(mut self, ctx: BrokerTaskContext) -> Self {
         let connection_join_handle = tokio::spawn(self.inner_task.run(ctx.clone()));
 
-        // TODO batch.size and linger.ms config
-        let chunks = (&mut self.partitions).chunks_timeout(2000, Duration::from_millis(500));
+        let chunks = (&mut self.partitions).chunks_timeout(
+            self.config.producer.batch_count,
+            self.config.producer.linger,
+        );
 
         tokio::pin!(chunks);
+
+        let transactional_id = self
+            .config
+            .producer
+            .transactional_id
+            .clone()
+            .map(StrBytes::from_string)
+            .map(TransactionalId);
 
         loop {
             // TODO stop if connection task stops
@@ -68,7 +78,8 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
                 break;
             };
 
-            let (request, partitions) = create_request(chunk);
+            let (request, partitions) =
+                create_request(chunk, &self.config, transactional_id.clone());
 
             let Some(response) = self
                 .inner_handle
@@ -103,6 +114,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             partitions: self.partitions,
             inner_handle: self.inner_handle,
             inner_task: connection_task,
+            config: self.config,
         }
     }
 
@@ -113,6 +125,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             partitions: self.partitions,
             inner_handle: self.inner_handle,
             inner_task: connection_task,
+            config: self.config,
         }
     }
 
@@ -131,6 +144,8 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
 
 fn create_request(
     chunk: Vec<(TopicPartition, ProducerSendMessage)>,
+    config: &KafkaConfig,
+    transactional_id: Option<TransactionalId>,
 ) -> (
     ProduceRequest,
     FxHashMap<TopicPartition, Vec<PreparedRecord>>,
@@ -180,7 +195,7 @@ fn create_request(
             records.iter().map(|ctx| &ctx.record),
             &RecordEncodeOptions {
                 version: 2,
-                compression: Compression::None, // TODO config
+                compression: config.producer.compression_codec.into(),
             },
         ) {
             tracing::error!("failed to encode record batch for topic {tp}: {e}");
@@ -211,10 +226,9 @@ fn create_request(
         req.topic_data.push(data);
     }
 
-    // TODO config
-    req.acks = 1;
-    req.timeout_ms = 1000;
-    req.transactional_id = None;
+    req.acks = config.producer.required_acks;
+    req.timeout_ms = i32::try_from(config.producer.request_timeout.as_millis()).unwrap_or(i32::MAX);
+    req.transactional_id = transactional_id;
 
     (req, partitions)
 }

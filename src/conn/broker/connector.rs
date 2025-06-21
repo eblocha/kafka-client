@@ -12,9 +12,9 @@ use tokio::time::error::Elapsed;
 use crate::{
     backoff::{exponential_backoff, BackoffSession},
     common::{BrokerHost, Node},
+    config::KafkaConfig,
     conn::{
-        broker::init_error::ConnectionInitError, channel::KafkaChannel,
-        config::ConnectionRetryConfig, connect::Connect, Sendable,
+        broker::init_error::ConnectionInitError, channel::KafkaChannel, connect::Connect, Sendable,
     },
     error::{ErrorCode, KafkaError},
     proto::ver::{FromVersionRange, GetApiKey},
@@ -76,17 +76,17 @@ impl VersionedConnection {
 /// Manages a connection to a broker node.
 pub struct NodeConnector<Conn> {
     pub node: Node,
-    pub retry_config: ConnectionRetryConfig,
+    pub config: KafkaConfig,
     pub connection: Arc<ArcSwapOption<VersionedConnection>>,
     connect: Conn,
     backoff: BackoffSession<()>,
 }
 
 impl<Conn> NodeConnector<Conn> {
-    pub fn new(node: Node, retry_config: ConnectionRetryConfig, connect: Conn) -> Self {
+    pub fn new(node: Node, config: KafkaConfig, connect: Conn) -> Self {
         Self {
             node,
-            retry_config,
+            config,
             connection: Arc::new(ArcSwapOption::empty()),
             connect,
             backoff: BackoffSession::default(),
@@ -144,7 +144,10 @@ impl<Conn: Connect> NodeConnector<Conn> {
         let conn_result = self.get_connection().await;
 
         if let Err(ref e) = conn_result {
-            let (min, max) = (self.retry_config.min_backoff, self.retry_config.max_backoff);
+            let (min, max) = (
+                self.config.socket.reconnect_backoff,
+                self.config.socket.reconnect_backoff_max,
+            );
             let backoff = exponential_backoff(min, max, self.backoff.count());
 
             tracing::error!(
@@ -163,7 +166,10 @@ impl<Conn: Connect> NodeConnector<Conn> {
         if conn_result.is_ok() {
             self.backoff.success();
         } else {
-            let (min, max) = (self.retry_config.min_backoff, self.retry_config.max_backoff);
+            let (min, max) = (
+                self.config.socket.reconnect_backoff,
+                self.config.socket.reconnect_backoff_max,
+            );
             let backoff = exponential_backoff(min, max, self.backoff.count());
             self.backoff.schedule_next(backoff, ());
         }
@@ -203,22 +209,26 @@ impl<Conn: Connect> NodeConnector<Conn> {
         let connect_fut = self.connect.connect(&self.node.host);
 
         let channel =
-            tokio::time::timeout(self.retry_config.connection_timeout, connect_fut).await??;
+            tokio::time::timeout(self.config.socket.connection_setup_timeout, connect_fut)
+                .await??;
 
-        let versions = negotiate(self.node.id, &self.node.host, &channel)
-            .await?
-            .api_keys
-            .into_iter()
-            .map(|key| {
-                (
-                    key.api_key,
-                    VersionRange {
-                        min: key.min_version,
-                        max: key.max_version,
-                    },
-                )
-            })
-            .collect();
+        let versions = tokio::time::timeout(
+            self.config.api_version_request_timeout,
+            negotiate(self.node.id, &self.node.host, &channel),
+        )
+        .await??
+        .api_keys
+        .into_iter()
+        .map(|key| {
+            (
+                key.api_key,
+                VersionRange {
+                    min: key.min_version,
+                    max: key.max_version,
+                },
+            )
+        })
+        .collect();
 
         // TODO authenticate
 

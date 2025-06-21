@@ -9,8 +9,8 @@ use tokio::sync::oneshot;
 
 use crate::{
     common::{BrokerHost, TopicPartition},
+    config::KafkaConfig,
     conn::{
-        config::ConnectionManagerConfig,
         connect::{Connect, Tcp},
         selector::SelectorTaskHandle,
     },
@@ -58,10 +58,14 @@ impl<Conn: Connect + Send + 'static, P: Clone> Clone for Producer<Conn, P> {
 impl Producer<Tcp, KeyHashPartitioner> {
     pub async fn try_new(
         bootstrap: &[BrokerHost],
-        config: ConnectionManagerConfig,
+        config: KafkaConfig,
     ) -> Result<Self, KafkaError> {
-        let selector =
-            SelectorTaskHandle::try_new_tcp(bootstrap, config, ProducerTaskFactory {}).await?;
+        let selector = SelectorTaskHandle::try_new_tcp(
+            bootstrap,
+            config.clone(),
+            ProducerTaskFactory { config },
+        )
+        .await?;
 
         Ok(Self {
             selector,

@@ -15,6 +15,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use crate::{
     backoff::{exponential_backoff, BackoffSession},
     common::{BrokerHost, Node, TopicPartition},
+    config::KafkaConfig,
     conn::{
         broker::{
             connector::NodeConnector,
@@ -23,7 +24,6 @@ use crate::{
                 BrokerTask, BrokerTaskContext, BrokerTaskFactory, BrokerTaskHandle, PartitionQueue,
             },
         },
-        config::{ConnectionManagerConfig, ConnectionRetryConfig, MetadataRefreshConfig},
         connect::{Connect, Tcp},
         selector::{
             cluster::BrokerMapEntry,
@@ -58,8 +58,8 @@ pub struct RefreshMetadataRequest {
 /// If any nodes fail to connect or close their connection unexpectedly, this task will re-spawn those connection
 /// tasks to keep connections alive.
 ///
-/// If a [`NodeTask`] panics, then pending requests for the broker will recieve a [`crate::conn::KafkaConnectionError::Closed`]
-/// error, and a new [`NodeTask`] and [`NodeTaskHandle`] pair will be created and spawned.
+/// If a task panics, then pending requests for the broker will recieve a [`crate::conn::KafkaConnectionError::Closed`]
+/// error, and a new task and handle pair will be created and spawned.
 struct SelectorTask<
     Conn,
     Task: BrokerTask,
@@ -72,10 +72,8 @@ struct SelectorTask<
     cluster: Arc<ArcSwap<Cluster<Task, TaskHandle>>>,
     /// Join set for running connection tasks. Used to detect failed connections
     join_set: JoinSet<Task>,
-    /// Configuration settings for retries
-    retry_config: ConnectionRetryConfig,
-    /// Configuration for metadata refresh process
-    metadata_config: MetadataRefreshConfig,
+    /// Configuration
+    config: KafkaConfig,
     /// Receiver for requests to refresh metadata now
     rx_topic_metadata: mpsc::Receiver<RefreshMetadataRequest>,
     /// Container to store metadata backoff state per-broker
@@ -111,7 +109,7 @@ impl<
     > SelectorTask<Conn, Task, TaskHandle, Factory>
 {
     async fn run(mut self) -> Result<(), KafkaError> {
-        let mut metadata_interval = tokio::time::interval(self.metadata_config.interval);
+        let mut metadata_interval = tokio::time::interval(self.config.metadata.refresh_interval);
         metadata_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         let mut bootstrap_sucessful = false;
@@ -193,8 +191,8 @@ impl<
                             // Check if we've exceeded our limit for bootstrap retries
                             if !bootstrap_sucessful
                                 && self
-                                    .metadata_config
-                                    .max_retries
+                                    .config
+                                    .bootstrap_max_retries
                                     .is_some_and(|max| ctx.backoff.count() >= max)
                             {
                                 tracing::error!(
@@ -220,8 +218,8 @@ impl<
                             }
 
                             let backoff = exponential_backoff(
-                                self.metadata_config.min_backoff,
-                                self.metadata_config.max_backoff,
+                                self.config.metadata.backoff,
+                                self.config.metadata.backoff_max,
                                 ctx.backoff.count(),
                             );
 
@@ -380,8 +378,8 @@ impl<
                 let stream = match partition_streams.remove(&tp) {
                     Some(s) => s,
                     None => {
-                        // TODO config
-                        let (tx, rx) = mpsc::channel(1000);
+                        // Using a size of 1 since the broker task should accumulate messages before applying backpressure.
+                        let (tx, rx) = mpsc::channel(1);
                         new_state.partitions.insert(tp.clone(), tx);
                         PartitionQueue::new(rx)
                     }
@@ -551,11 +549,7 @@ impl<
             "creating new connection task"
         );
 
-        let connector = NodeConnector::new(
-            node.clone(),
-            self.retry_config.clone(),
-            self.connect.clone(),
-        );
+        let connector = NodeConnector::new(node.clone(), self.config.clone(), self.connect.clone());
 
         let (handle, task) = self.task_factory.new(connector);
 
@@ -638,19 +632,10 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
     /// Create a new selector task handle using TCP without TLS.
     pub async fn try_new_tcp<Factory: BrokerTaskFactory<Tcp, Task = Task, Handle = TaskHandle>>(
         bootstrap: &[BrokerHost],
-        config: ConnectionManagerConfig,
+        config: KafkaConfig,
         task_factory: Factory,
     ) -> Result<Self, KafkaError> {
-        Self::try_new_with_connect(
-            bootstrap,
-            config.clone(),
-            Tcp {
-                nodelay: true,
-                config: config.conn.io,
-            },
-            task_factory,
-        )
-        .await
+        Self::try_new_with_connect(bootstrap, config.clone(), Tcp { config }, task_factory).await
     }
 
     pub async fn await_shutdown(&self) {
@@ -668,7 +653,7 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
         Factory: BrokerTaskFactory<Conn, Task = Task, Handle = TaskHandle>,
     >(
         bootstrap: &[BrokerHost],
-        config: ConnectionManagerConfig,
+        config: KafkaConfig,
         connect: Conn,
         task_factory: Factory,
     ) -> Result<Self, KafkaError> {
@@ -686,7 +671,7 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
                     host: host.clone(),
                     rack: None,
                 },
-                config.conn.retry.clone(),
+                config.clone(),
                 connect.clone(),
             );
 
@@ -712,8 +697,8 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
         // create the watch channel for the metadata
         let cluster = Arc::new(ArcSwap::new(Arc::new(Cluster::new(hosts.clone()))));
 
-        // TODO: what size for refresh channel?
-        let (tx_topic_metadata, rx_topic_metadata) = mpsc::channel(1);
+        let (tx_topic_metadata, rx_topic_metadata) =
+            mpsc::channel(config.metadata.refresh_batch_count);
 
         let (tx_bootstrap, rx_bootstrap) = oneshot::channel();
 
@@ -723,8 +708,7 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
             cluster: cluster.clone(),
             rx_topic_metadata,
             join_set,
-            retry_config: config.conn.retry,
-            metadata_config: config.metadata,
+            config,
             metadata_backoff: Default::default(),
             metadata_join_set: JoinSet::new(),
             cancellation_token: cancellation_token.clone(),

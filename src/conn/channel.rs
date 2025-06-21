@@ -3,6 +3,7 @@
 use std::{future::Future, io};
 
 use futures::{future::Either, SinkExt, StreamExt};
+use kafka_protocol::protocol::StrBytes;
 use rustc_hash::FxHashMap;
 use thiserror::Error;
 use tokio::{
@@ -11,14 +12,11 @@ use tokio::{
 };
 use tokio_util::{codec::Framed, sync::CancellationToken, task::TaskTracker};
 
-use crate::conn::codec::sendable::RequestRecord;
+use crate::{config::KafkaConfig, conn::codec::sendable::RequestRecord};
 
-use super::{
-    codec::{
-        sendable::{DecodableResponse, Sendable},
-        CorrelationId, EncodableRequest, KafkaCodec, VersionedRequest,
-    },
-    config::KafkaConnectionConfig,
+use super::codec::{
+    sendable::{DecodableResponse, Sendable},
+    CorrelationId, EncodableRequest, KafkaCodec, VersionedRequest,
 };
 
 #[derive(Debug, Error)]
@@ -87,7 +85,7 @@ struct KafkaChannelTask<IO> {
     io: IO,
     rx: mpsc::Receiver<KafkaChannelMessage>,
     cancellation_token: CancellationToken,
-    config: KafkaConnectionConfig,
+    config: KafkaConfig,
 }
 
 impl<IO> KafkaChannelTask<IO> {
@@ -95,23 +93,32 @@ impl<IO> KafkaChannelTask<IO> {
     where
         IO: AsyncRead + AsyncWrite,
     {
-        let (mut sink, mut stream) =
-            Framed::new(self.io, KafkaCodec::new(self.config.max_frame_length)).split();
+        let (mut sink, mut stream) = Framed::new(
+            self.io,
+            KafkaCodec::new(self.config.socket.max_frame_length),
+        )
+        .split();
 
         let mut in_flight =
-            FxHashMap::<CorrelationId, (RequestRecord, AwaitResponseSender)>::with_capacity_and_hasher(self.config.send_buffer_size, Default::default());
+            FxHashMap::<CorrelationId, (RequestRecord, AwaitResponseSender)>::with_capacity_and_hasher(self.config.socket.send_buffer_size, Default::default());
 
-        let mut request_buffer = Vec::with_capacity(self.config.send_buffer_size);
-        let mut sender_batch = Vec::with_capacity(self.config.send_buffer_size);
+        let mut request_buffer = Vec::with_capacity(self.config.socket.send_buffer_size);
+        let mut sender_batch = Vec::with_capacity(self.config.socket.send_buffer_size);
 
         let mut correlation_id = 0;
+
+        let client_id = self
+            .config
+            .client_id
+            .clone()
+            .map(|s| StrBytes::from_string(s));
 
         loop {
             let either = tokio::select! {
                 biased;
                 () = self.cancellation_token.cancelled() => break,
                 next_res = stream.next() => Either::Right(next_res),
-                count = self.rx.recv_many(&mut request_buffer, self.config.send_buffer_size) => Either::Left(count),
+                count = self.rx.recv_many(&mut request_buffer, self.config.socket.send_buffer_size) => Either::Left(count),
             };
 
             match either {
@@ -136,7 +143,7 @@ impl<IO> KafkaChannelTask<IO> {
                         let encodable = EncodableRequest::from_versioned(
                             message.versioned,
                             id,
-                            self.config.client_id.clone(),
+                            client_id.clone(),
                         );
 
                         let api_key = encodable.api_key();
@@ -233,11 +240,11 @@ impl KafkaChannel {
     /// Wrap an IO stream to use as the transport for a Kafka connection.
     pub fn connect<IO: AsyncRead + AsyncWrite + Send + 'static>(
         io: IO,
-        config: &KafkaConnectionConfig,
+        config: &KafkaConfig,
     ) -> Self {
         let cancellation_token = CancellationToken::new();
 
-        let (tx, rx) = mpsc::channel(config.send_buffer_size);
+        let (tx, rx) = mpsc::channel(config.socket.send_buffer_size);
 
         let task_runner = KafkaChannelTask {
             io,

@@ -1,4 +1,5 @@
 use crate::{
+    config::KafkaConfig,
     conn::{
         broker::{
             connector::NodeConnector,
@@ -54,7 +55,7 @@ impl BrokerTaskHandle for ProducerTaskHandle {
 }
 
 pub struct ProducerTaskFactory {
-    // TODO config goes here
+    pub config: KafkaConfig,
 }
 
 impl<Conn: Connect + Send + 'static> BrokerTaskFactory<Conn> for ProducerTaskFactory {
@@ -72,6 +73,7 @@ impl<Conn: Connect + Send + 'static> BrokerTaskFactory<Conn> for ProducerTaskFac
             partitions: PartitionQueueMap::default(),
             inner_handle,
             inner_task,
+            config: self.config.clone(),
         };
 
         (handle, task)
