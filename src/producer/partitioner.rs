@@ -1,5 +1,3 @@
-use std::hash::{DefaultHasher, Hash, Hasher};
-
 use crate::{conn::selector::TopicMetadata, producer::record::ProducerRecord};
 
 pub trait Partitioner {
@@ -15,10 +13,13 @@ impl Partitioner for KeyHashPartitioner {
             return;
         }
 
-        let mut hasher = DefaultHasher::new();
-        record.key.hash(&mut hasher);
-        let index = hasher.finish() as i32 % topic_data.len() as i32;
+        let Some(ref key) = record.key else {
+            record.partition = Some(0);
+            return;
+        };
 
-        record.partition = Some(index);
+        let index = crc32fast::hash(key.as_ref()) as usize % topic_data.len();
+
+        record.partition = Some(index as i32);
     }
 }

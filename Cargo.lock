@@ -567,6 +567,7 @@ dependencies = [
  "arc-swap",
  "bytes",
  "clap",
+ "crc32fast",
  "derive_more",
  "extend",
  "futures",
