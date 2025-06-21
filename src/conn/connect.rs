@@ -8,27 +8,30 @@ pub trait Connect {
     fn connect(
         &self,
         host: &BrokerHost,
+        config: &KafkaConfig,
     ) -> impl Future<Output = Result<KafkaChannel, io::Error>> + Send;
 }
 
 /// [`Connect`] for creating a non-TLS [`TcpStream`].
 #[derive(Debug, Clone)]
-pub struct Tcp {
-    pub config: KafkaConfig,
-}
+pub struct Tcp;
 
 impl Connect for Tcp {
-    async fn connect(&self, host: &BrokerHost) -> Result<KafkaChannel, io::Error> {
+    async fn connect(
+        &self,
+        host: &BrokerHost,
+        config: &KafkaConfig,
+    ) -> Result<KafkaChannel, io::Error> {
         let conn = TcpStream::connect((host.0.as_ref(), host.1)).await?;
 
-        if let Err(err) = conn.set_nodelay(self.config.socket.nodelay) {
+        if let Err(err) = conn.set_nodelay(config.socket.nodelay) {
             tracing::warn!(
                 "failed to set TCP_NODELAY={} on stream: {err:?}",
-                self.config.socket.nodelay
+                config.socket.nodelay
             );
         };
 
-        Ok(KafkaChannel::connect(conn, &self.config))
+        Ok(KafkaChannel::connect(conn, config))
     }
 }
 
@@ -36,13 +39,18 @@ impl<C: Connect> Connect for Arc<C> {
     fn connect(
         &self,
         host: &BrokerHost,
+        config: &KafkaConfig,
     ) -> impl Future<Output = Result<KafkaChannel, io::Error>> + Send {
-        self.as_ref().connect(host)
+        self.as_ref().connect(host, config)
     }
 }
 
 impl Connect for KafkaChannel {
-    async fn connect(&self, _host: &BrokerHost) -> Result<KafkaChannel, io::Error> {
+    async fn connect(
+        &self,
+        _host: &BrokerHost,
+        _config: &KafkaConfig,
+    ) -> Result<KafkaChannel, io::Error> {
         Ok(self.clone())
     }
 }

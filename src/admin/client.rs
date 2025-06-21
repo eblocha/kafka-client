@@ -15,6 +15,7 @@ use crate::{
     common::{BrokerHost, TopicCollection},
     config::KafkaConfig,
     conn::{broker::task::BrokerTaskHandle, selector::SelectorTaskHandle, KafkaChannelError},
+    connect::{Connect, Tcp},
     error::KafkaError,
     network::{
         handle::{NetworkTaskFactory, NetworkTaskHandle},
@@ -22,7 +23,6 @@ use crate::{
     },
     proto::ver::with_max_version,
     util::TopicNameExt,
-    Connect, Tcp,
 };
 
 pub struct Admin<Conn: Connect + Send + 'static> {
@@ -229,6 +229,14 @@ impl Admin<Tcp> {
             .into_iter()
             .map(DeletedTopic::try_from)
             .collect())
+    }
+
+    pub async fn shutdown(&self) {
+        self.selector.shutdown().await;
+    }
+
+    pub async fn await_shutdown(&self) {
+        self.selector.await_shutdown().await;
     }
 
     fn get_best_handle(&self) -> Result<NetworkTaskHandle, KafkaError> {

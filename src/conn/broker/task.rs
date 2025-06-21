@@ -1,24 +1,17 @@
 use std::{
     future::Future,
     pin::Pin,
-    sync::Arc,
     task::{Context, Poll},
 };
 
 use futures::Stream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_stream::StreamMap;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     common::{Node, TopicPartition},
-    conn::{
-        broker::{
-            connector::{NodeConnector, VersionedConnection},
-            init_error::ConnectionInitError,
-        },
-        Sendable,
-    },
+    conn::{broker::connector::NodeConnector, Sendable},
     error::KafkaError,
     proto::ver::{FromVersionRange, GetApiKey},
 };
@@ -48,11 +41,6 @@ impl<M> Stream for PartitionQueue<M> {
 }
 
 pub type PartitionQueueMap<M> = StreamMap<TopicPartition, PartitionQueue<M>>;
-
-#[derive(Debug)]
-pub struct BrokerTaskMessage {
-    pub tx: oneshot::Sender<Result<Arc<VersionedConnection>, ConnectionInitError>>,
-}
 
 #[derive(Debug, Clone)]
 pub struct BrokerTaskContext {

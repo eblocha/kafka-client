@@ -7,7 +7,7 @@ use kafka_client::{
     admin::{client::Admin, AutoAssignmentNewTopic, NewTopic},
     common::{BrokerHost, TopicCollection},
     config::KafkaConfig,
-    Tcp,
+    connect::Tcp,
 };
 
 use super::Run;
@@ -238,6 +238,10 @@ impl Run for AdminCommands {
             .await
             .context("failed to bootstrap client")?;
 
-        self.run_inner(&client).await
+        let res = self.run_inner(&client).await;
+
+        client.shutdown().await;
+
+        res
     }
 }

@@ -1,7 +1,6 @@
 pub mod admin;
 mod backoff;
 mod cancel;
-pub mod clients;
 pub mod common;
 pub mod config;
 mod conn;
@@ -11,4 +10,6 @@ pub mod producer;
 mod proto;
 mod util;
 
-pub use crate::conn::connect::{Connect, Tcp};
+pub mod connect {
+    pub use crate::conn::connect::{Connect, Tcp};
+}

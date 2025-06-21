@@ -635,7 +635,7 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
         config: KafkaConfig,
         task_factory: Factory,
     ) -> Result<Self, KafkaError> {
-        Self::try_new_with_connect(bootstrap, config.clone(), Tcp { config }, task_factory).await
+        Self::try_new_with_connect(bootstrap, config, Tcp, task_factory).await
     }
 
     pub async fn await_shutdown(&self) {

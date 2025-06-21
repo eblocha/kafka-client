@@ -76,8 +76,8 @@ impl VersionedConnection {
 /// Manages a connection to a broker node.
 pub struct NodeConnector<Conn> {
     pub node: Node,
-    pub config: KafkaConfig,
     pub connection: Arc<ArcSwapOption<VersionedConnection>>,
+    config: KafkaConfig,
     connect: Conn,
     backoff: BackoffSession<()>,
 }
@@ -206,7 +206,7 @@ impl<Conn: Connect> NodeConnector<Conn> {
     }
 
     async fn try_connect(&mut self) -> Result<VersionedConnection, ConnectAttemptError> {
-        let connect_fut = self.connect.connect(&self.node.host);
+        let connect_fut = self.connect.connect(&self.node.host, &self.config);
 
         let channel =
             tokio::time::timeout(self.config.socket.connection_setup_timeout, connect_fut)
