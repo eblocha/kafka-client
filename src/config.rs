@@ -1,11 +1,20 @@
-use std::time::Duration;
+use std::{fmt::Debug, time::Duration};
 
 use kafka_protocol::records::Compression;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SaslCredentials {
     pub username: String,
     pub password: String,
+}
+
+impl Debug for SaslCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SaslCredentials")
+            .field("username", &self.username)
+            .field("password", &"********")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
