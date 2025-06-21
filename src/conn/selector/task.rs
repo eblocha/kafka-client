@@ -1,7 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
-use kafka_protocol::messages::{metadata_request::MetadataRequestTopic, MetadataResponse};
+use kafka_protocol::messages::{
+    metadata_request::MetadataRequestTopic, metadata_response::MetadataResponseBroker,
+    MetadataResponse,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::{
     sync::{mpsc, oneshot},
@@ -17,8 +20,7 @@ use crate::{
             connector::NodeConnector,
             init_error::ConnectionInitError,
             task::{
-                into_partition_queue, BrokerTask, BrokerTaskContext, BrokerTaskFactory,
-                BrokerTaskHandle, PartitionQueue,
+                BrokerTask, BrokerTaskContext, BrokerTaskFactory, BrokerTaskHandle, PartitionQueue,
             },
         },
         config::{ConnectionManagerConfig, ConnectionRetryConfig, MetadataRefreshConfig},
@@ -28,7 +30,7 @@ use crate::{
             metadata::{MetadataRefreshContext, MetadataRefreshTask},
         },
     },
-    error::KafkaError,
+    error::{ErrorCode, KafkaError},
 };
 
 use super::{
@@ -330,7 +332,7 @@ impl<
         // Remove nodes that are not in the cluster
         self.hosts.retain(|entry| {
             let keep = new_broker_ids.contains_key(&entry.node.id);
-            // Always stop the task to reassign partitions
+            // Stop the broker task but keep the connection alive
             entry.cancellation_token.cancel();
 
             if !keep {
@@ -344,112 +346,70 @@ impl<
             keep
         });
 
-        let mut partitions: FxHashMap<TopicPartition, PartitionQueue<Task::PartitionMessage>> =
-            Default::default();
-        let mut tasks: FxHashMap<i32, Task> = Default::default();
+        let (mut tasks, mut partition_streams) =
+            self.collect_current_tasks(&new_broker_ids, &metadata).await;
 
-        // Stop existing tasks.
-        // Revoke and collect all partition streams.
-        // Shutdown connections for brokers that don't exist or changed hosts
-        while let Some(task_result) = self.join_set.join_next().await {
-            match task_result {
-                Ok(mut task) => {
-                    let node = task.get_node();
-                    let id = node.id;
-
-                    if let Some(metadata) = new_broker_ids.get(&id) {
-                        // Node is supposed to exist
-                        let new_node = Node::from(*metadata);
-                        let current_node = task.get_node();
-
-                        if current_node.host != new_node.host {
-                            tracing::debug!(
-                                broker_id = current_node.id,
-                                host = ?current_node.host,
-                                new_host = ?new_node.host,
-                                "changing hosts"
-                            );
-                            // Stop the existing connection to the wrong host
-                            task = task.shutdown().await;
-                        }
-
-                        // Revoke existing partitions
-                        task.set_node(Node::from(*metadata));
-                        let parts = task.get_partitions_mut();
-                        let tps = parts.keys().cloned().collect::<Vec<_>>();
-
-                        for part in tps {
-                            let stream = parts.remove(&part)
-                                .expect("expected partition stream to exist since we are iterating over known keys");
-                            partitions.insert(part, stream);
-                        }
-
-                        tasks.insert(id, task);
-                    } else {
-                        // This broker is no longer in the cluster. Stop the connection to its host.
-                        task.shutdown().await;
-                    }
-                }
-                Err(e) => tracing::error!("broker task stopped unexpectedly: {e}"),
-            }
-        }
-
-        // TODO optimize
         let mut new_state = self.cluster.load().as_ref().clone();
-        new_state.metadata.update_with(metadata.clone());
 
-        // Create new tasks for new brokers
-        // Assign partitions to tasks
-        for broker in &metadata.brokers {
-            let (mut task, cancellation_token) = match tasks.remove(&broker.node_id.0) {
-                Some(task) => {
-                    match self.hosts.get_mut(&broker.node_id.0) {
-                        Some(entry) => (task, entry.cancellation_token.clone()),
-                        None => {
-                            // We have a task which does not have a handle.
-                            // Shutdown the task and start fresh.
-                            task.shutdown().await;
-                            self.create_new_task(Node::from(broker))
-                        }
-                    }
-                }
-                None => self.create_new_task(Node::from(broker)),
+        // Assign topic partitions
+        for topic in &metadata.topics {
+            let Some(ref topic_name) = topic.name else {
+                // No topic name means it was requested by id but does not exist
+                continue;
             };
 
-            let task_partitions = task.get_partitions_mut();
+            for partition in &topic.partitions {
+                if partition.error_code != ErrorCode::None as i16 {
+                    continue;
+                }
 
-            for topic in &metadata.topics {
-                let Some(ref topic_name) = topic.name else {
-                    // No topic name means it was requested by id but does not exist
+                let broker_id = partition.leader_id.0;
+
+                let Some(broker) = new_broker_ids.get(&broker_id) else {
+                    tracing::warn!(
+                        broker_id = broker_id,
+                        topic_name = ?topic_name,
+                        partition = partition.partition_index,
+                        "found a partition which refers to a leader_id not in the cluster"
+                    );
                     continue;
                 };
 
-                for partition in &topic.partitions {
-                    if partition.leader_id != broker.node_id {
-                        // This partition is not led by this broker
-                        continue;
+                let tp = TopicPartition::new(topic_name.clone(), partition.partition_index);
+
+                let stream = match partition_streams.remove(&tp) {
+                    Some(s) => s,
+                    None => {
+                        // TODO config
+                        let (tx, rx) = mpsc::channel(1000);
+                        new_state.partitions.insert(tp.clone(), tx);
+                        PartitionQueue::new(rx)
                     }
+                };
 
-                    let tp = TopicPartition::new(topic_name.clone(), partition.partition_index);
+                let task = tasks
+                    .entry(broker_id)
+                    .or_insert_with(|| self.create_new_task(Node::from(*broker)));
 
-                    let stream = match partitions.remove(&tp) {
-                        Some(s) => s,
-                        None => {
-                            // TODO config
-                            let (tx, rx) = mpsc::channel(1000);
-                            new_state.partitions.insert(tp.clone(), tx);
-                            into_partition_queue(rx)
-                        }
-                    };
-
-                    // Assign this partition to the broker task
-                    task_partitions.insert(tp, stream);
-                }
+                // Assign this partition to the broker task
+                task.get_partitions_mut().insert(tp, stream);
             }
+        }
 
-            // Restart the task
-            self.join_set
-                .spawn(task.run(BrokerTaskContext { cancellation_token }));
+        // Restart each task
+        for (broker_id, task) in tasks.drain() {
+            let Some(entry) = self.hosts.get_mut(&broker_id) else {
+                tracing::error!(
+                    broker_id = broker_id,
+                    "detected a broker task with no handle"
+                );
+                task.shutdown().await;
+                continue;
+            };
+
+            self.join_set.spawn(task.run(BrokerTaskContext {
+                cancellation_token: entry.cancellation_token.clone(),
+            }));
         }
 
         let new_broker_hosts: FxHashSet<BrokerHost> =
@@ -459,11 +419,132 @@ impl<
         self.metadata_backoff
             .retain(|host, _| new_broker_hosts.contains(host));
 
+        // remove partition queues which no longer exist
+        for (tp, _) in partition_streams.drain() {
+            new_state.partitions.remove(&tp);
+        }
+
+        new_state.metadata.update_with(metadata.clone());
         new_state.brokers = self.hosts.clone();
+
         self.cluster.store(Arc::new(new_state));
     }
 
-    fn create_new_task(&mut self, node: Node) -> (Task, CancellationToken) {
+    async fn collect_current_tasks(
+        &mut self,
+        new_broker_ids: &FxHashMap<i32, &MetadataResponseBroker>,
+        metadata: &MetadataResponse,
+    ) -> (
+        FxHashMap<i32, Task>,
+        FxHashMap<TopicPartition, PartitionQueue<Task::PartitionMessage>>,
+    ) {
+        let mut partition_streams: FxHashMap<
+            TopicPartition,
+            PartitionQueue<Task::PartitionMessage>,
+        > = Default::default();
+        let mut tasks: FxHashMap<i32, Task> = Default::default();
+
+        let requested_topics = metadata
+            .topics
+            .iter()
+            .filter_map(|topic| {
+                topic.name.as_ref().map(|topic_name| {
+                    let partition_map = topic
+                        .partitions
+                        .iter()
+                        .map(|part| (part.partition_index, part))
+                        .collect::<FxHashMap<_, _>>();
+
+                    (topic_name, (topic, partition_map))
+                })
+            })
+            .collect::<FxHashMap<_, _>>();
+
+        while let Some(task_result) = self.join_set.join_next().await {
+            let mut task = match task_result {
+                Ok(task) => task,
+                Err(e) => {
+                    tracing::error!("broker task stopped unexpectedly: {e}");
+                    continue;
+                }
+            };
+
+            let current_node = task.get_node();
+            let id = current_node.id;
+            let current_host = current_node.host.clone();
+
+            let Some(broker) = new_broker_ids.get(&id) else {
+                // This broker is no longer in the cluster. Stop the connection to its host and collect its partitions.
+                let parts = task.get_partitions_mut();
+                let tps = parts.keys().cloned().collect::<Vec<_>>();
+                for part in tps {
+                    let stream = parts.remove(&part).expect(
+                        "expected partition stream to exist since we are iterating over known keys",
+                    );
+                    partition_streams.insert(part, stream);
+                }
+
+                task.shutdown().await;
+                continue;
+            };
+
+            let new_node = Node::from(*broker);
+
+            if current_host != new_node.host {
+                tracing::debug!(
+                    broker_id = id,
+                    host = ?current_host,
+                    new_host = ?new_node.host,
+                    "changing hosts"
+                );
+                // Stop the existing connection
+                task = task.shutdown().await;
+            }
+
+            let parts = task.get_partitions_mut();
+            let tps = parts.keys().cloned().collect::<Vec<_>>();
+
+            // Revoke existing partitions
+            for part in tps {
+                let Some((topic, partitions)) = requested_topics.get(part.name()) else {
+                    // Topic was not requested
+                    continue;
+                };
+
+                if topic.error_code != ErrorCode::None as i16
+                    && topic.error_code != ErrorCode::UnknownTopicOrPartition as i16
+                {
+                    // Topic has an error, but not an unknown topic error
+                    continue;
+                }
+
+                if let Some(part_meta) = partitions.get(&part.partition()) {
+                    if part_meta.error_code != ErrorCode::None as i16 {
+                        // Partition has an error
+                        continue;
+                    }
+
+                    if part_meta.leader_id == id {
+                        // This broker is the leader of the partition
+                        continue;
+                    }
+                }
+                // else -> partition does not exist
+
+                let stream = parts.remove(&part).expect(
+                    "expected partition stream to exist since we are iterating over known keys",
+                );
+                partition_streams.insert(part, stream);
+            }
+
+            task.set_node(Node::from(*broker));
+            tasks.insert(id, task);
+        }
+
+        (tasks, partition_streams)
+    }
+
+    fn create_new_task(&mut self, node: Node) -> Task {
         tracing::debug!(
             broker_id = node.id,
             host = ?node.host,
@@ -483,10 +564,10 @@ impl<
         self.hosts.insert(BrokerMapEntry {
             node,
             handle,
-            cancellation_token: cancellation_token.clone(),
+            cancellation_token,
         });
 
-        (task, cancellation_token)
+        task
     }
 
     async fn restart_if_needed(&mut self, mut dead_task: Task) {
