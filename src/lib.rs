@@ -1,3 +1,4 @@
+pub mod admin;
 mod backoff;
 mod cancel;
 pub mod clients;

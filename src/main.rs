@@ -3,10 +3,9 @@ mod shutdown;
 
 use std::io;
 
-use anyhow::Context;
 use clap::{Parser, Subcommand};
-use cmd::{admin::AdminCommands, consumer::EchoTopics, producer::ProducerCommands, Run};
-use kafka_client::{clients::network::NetworkClient, common::BrokerHost, config::KafkaConfig};
+use cmd::{admin::AdminCommands, Run};
+use kafka_client::{common::BrokerHost, config::KafkaConfig};
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
@@ -32,15 +31,15 @@ enum Client {
     /// Perform administrative commands.
     #[command(subcommand)]
     Admin(AdminCommands),
-    /// Produce messages to a topic.
-    #[command(subcommand)]
-    Producer(ProducerCommands),
-    /// Start a consumer and print any record values from the topic to stdout.
-    Consumer {
-        /// A comma-separated list of topic names to listen on.
-        #[arg(short, long, value_delimiter = ',', num_args = 1.., required = true)]
-        topics: Vec<String>,
-    },
+    // /// Produce messages to a topic.
+    // #[command(subcommand)]
+    // Producer(ProducerCommands),
+    // /// Start a consumer and print any record values from the topic to stdout.
+    // Consumer {
+    //     /// A comma-separated list of topic names to listen on.
+    //     #[arg(short, long, value_delimiter = ',', num_args = 1.., required = true)]
+    //     topics: Vec<String>,
+    // },
 }
 
 #[tokio::main]
@@ -56,16 +55,10 @@ pub async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    let cfg = KafkaConfig::default();
-
-    let manager = NetworkClient::try_new(&cli.bootstrap_servers, (&cfg).into())
-        .await
-        .context("failed to bootstrap client")?;
+    let config = KafkaConfig::default();
 
     match cli.client {
-        Client::Admin(cmd) => cmd.run(manager).await?,
-        Client::Producer(cmd) => cmd.run(manager).await?,
-        Client::Consumer { topics } => EchoTopics { topics }.run(manager).await?,
+        Client::Admin(cmd) => cmd.run(&cli.bootstrap_servers, config).await?,
     }
 
     Ok(())

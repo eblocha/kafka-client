@@ -102,7 +102,6 @@ impl<Conn: Connect + Send + 'static, P: Partitioner> Producer<Conn, P> {
         tx_partition
             .send(ProducerSendMessage {
                 record: ProducerSendRecord {
-                    topic_partition: tp,
                     value: record.value,
                     key: record.key,
                     headers: record.headers,

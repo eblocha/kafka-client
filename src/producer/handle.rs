@@ -54,7 +54,7 @@ impl BrokerTaskHandle for ProducerTaskHandle {
     }
 }
 
-pub struct ProducerTaskFactory {
+pub(super) struct ProducerTaskFactory {
     pub config: KafkaConfig,
 }
 

@@ -7,32 +7,50 @@ use kafka_protocol::messages::{
 };
 
 use crate::{
-    clients::{admin::delete_topic_result::DeletedTopic, network::NetworkClient},
-    common::TopicCollection,
+    admin::{
+        delete_topic_result::{DeleteTopicsResult, DeletedTopic},
+        ClusterDescription, CreateTopicsResult, DescribeTopicsResult, NewTopic, TopicDescription,
+        TopicListing, TopicMetadataAndConfig,
+    },
+    common::{BrokerHost, TopicCollection},
+    config::KafkaConfig,
+    conn::{broker::task::BrokerTaskHandle, selector::SelectorTaskHandle, KafkaChannelError},
     error::KafkaError,
+    network::{
+        handle::{NetworkTaskFactory, NetworkTaskHandle},
+        task::NetworkTask,
+    },
     proto::ver::with_max_version,
     util::TopicNameExt,
+    Connect, Tcp,
 };
 
-use super::{
-    delete_topic_result::DeleteTopicsResult, ClusterDescription, CreateTopicsResult,
-    DescribeTopicsResult, NewTopic, TopicDescription, TopicListing, TopicMetadataAndConfig,
-};
-
-#[derive(Clone)]
-pub struct AdminClient {
-    client: NetworkClient,
+pub struct Admin<Conn: Connect + Send + 'static> {
+    selector: SelectorTaskHandle<NetworkTask<Conn>, NetworkTaskHandle>,
 }
 
-impl AdminClient {
-    #[must_use]
-    pub fn new(client: NetworkClient) -> Self {
-        Self { client }
+impl<Conn: Connect + Send + 'static> Clone for Admin<Conn> {
+    fn clone(&self) -> Self {
+        Self {
+            selector: self.selector.clone(),
+        }
+    }
+}
+
+impl Admin<Tcp> {
+    pub async fn try_new(
+        bootstrap: &[BrokerHost],
+        config: KafkaConfig,
+    ) -> Result<Self, KafkaError> {
+        let selector =
+            SelectorTaskHandle::try_new_tcp(bootstrap, config.clone(), NetworkTaskFactory).await?;
+
+        Ok(Self { selector })
     }
 
     pub async fn describe_cluster(&self) -> Result<ClusterDescription, KafkaError> {
         let response = self
-            .client
+            .get_best_handle()?
             .send(
                 DescribeClusterRequest::default().with_include_cluster_authorized_operations(true),
             )
@@ -43,7 +61,7 @@ impl AdminClient {
 
     pub async fn list_topics(&self) -> Result<Vec<TopicListing>, KafkaError> {
         let response = self
-            .client
+            .get_best_handle()?
             .send(MetadataRequest::default().with_topics(None))
             .await?;
 
@@ -59,7 +77,7 @@ impl AdminClient {
         topics: Vec<String>,
     ) -> Result<DescribeTopicsResult, KafkaError> {
         let response = self
-            .client
+            .get_best_handle()?
             .send(with_max_version(|ver| {
                 let mut req = MetadataRequest::default();
 
@@ -105,7 +123,7 @@ impl AdminClient {
         topics: Vec<NewTopic>,
     ) -> Result<CreateTopicsResult, KafkaError> {
         let response = self
-            .client
+            .get_best_handle()?
             .send(with_max_version(|_ver| {
                 let mut req = CreateTopicsRequest::default();
 
@@ -166,7 +184,7 @@ impl AdminClient {
         topics: TopicCollection,
     ) -> Result<DeleteTopicsResult, KafkaError> {
         let response = self
-            .client
+            .get_best_handle()?
             .send(with_max_version(move |ver| {
                 let mut req = DeleteTopicsRequest::default();
                 req.timeout_ms = 5000; // TODO config
@@ -213,11 +231,10 @@ impl AdminClient {
             .collect())
     }
 
-    pub async fn shutdown(&self) {
-        self.client.shutdown().await;
-    }
-
-    pub async fn await_shutdown(&self) {
-        self.client.await_shutdown().await;
+    fn get_best_handle(&self) -> Result<NetworkTaskHandle, KafkaError> {
+        let Some(entry) = self.selector.cluster.load().brokers.get_best_connection() else {
+            return Err(KafkaChannelError::Closed.into());
+        };
+        Ok(entry.handle)
     }
 }

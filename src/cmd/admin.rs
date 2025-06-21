@@ -1,14 +1,13 @@
 use std::iter::zip;
 
-use anyhow::bail;
+use anyhow::{bail, Context};
 use clap::Subcommand;
 
 use kafka_client::{
-    clients::{
-        admin::{AdminClient, AutoAssignmentNewTopic, NewTopic},
-        network::NetworkClient,
-    },
-    common::TopicCollection,
+    admin::{client::Admin, AutoAssignmentNewTopic, NewTopic},
+    common::{BrokerHost, TopicCollection},
+    config::KafkaConfig,
+    Tcp,
 };
 
 use super::Run;
@@ -50,7 +49,7 @@ pub enum AdminCommands {
 }
 
 impl AdminCommands {
-    async fn run_inner(self, client: &AdminClient) -> anyhow::Result<()> {
+    async fn run_inner(self, client: &Admin<Tcp>) -> anyhow::Result<()> {
         match self {
             AdminCommands::ListTopics { exclude_internal } => {
                 let topics = client.list_topics().await?;
@@ -230,13 +229,15 @@ impl AdminCommands {
 impl Run for AdminCommands {
     type Response = ();
 
-    async fn run(self, conn: NetworkClient) -> anyhow::Result<Self::Response> {
-        let client = AdminClient::new(conn);
+    async fn run(
+        self,
+        bootstrap: &[BrokerHost],
+        config: KafkaConfig,
+    ) -> anyhow::Result<Self::Response> {
+        let client = Admin::try_new(bootstrap, config)
+            .await
+            .context("failed to bootstrap client")?;
 
-        let result = self.run_inner(&client).await;
-
-        client.shutdown().await;
-
-        result
+        self.run_inner(&client).await
     }
 }

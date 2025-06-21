@@ -1,4 +1,4 @@
-mod client;
+pub mod client;
 
 mod cluster_description;
 mod create_topics_result;
@@ -7,8 +7,6 @@ mod new_topic;
 mod topic_description;
 mod topic_listing;
 mod topic_partition_info;
-
-pub use client::*;
 
 pub use cluster_description::*;
 pub use create_topics_result::*;

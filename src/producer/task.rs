@@ -31,7 +31,6 @@ use crate::{
 };
 
 pub(super) struct ProducerSendRecord {
-    pub topic_partition: TopicPartition,
     pub timestamp: Option<i64>,
     pub key: Option<Bytes>,
     pub value: Option<Bytes>,
@@ -43,7 +42,7 @@ pub(super) struct ProducerSendMessage {
     pub tx: oneshot::Sender<Result<(), KafkaError>>,
 }
 
-pub struct ProducerTask<Conn> {
+pub(super) struct ProducerTask<Conn> {
     pub(super) partitions: PartitionQueueMap<ProducerSendMessage>,
     pub(super) inner_handle: NetworkTaskHandle,
     pub(super) inner_task: NetworkTask<Conn>,
