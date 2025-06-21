@@ -1,3 +1,10 @@
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
+
+use futures::FutureExt;
 use tokio::sync::oneshot;
 
 use crate::{
@@ -16,9 +23,36 @@ use crate::{
     },
 };
 
+/// A future that resolves to [`RecordMetadata`] once the server has acknowledged the record.
+pub struct ProduceFuture {
+    rx: oneshot::Receiver<Result<(), KafkaError>>,
+}
+
+impl Unpin for ProduceFuture {}
+
+impl Future for ProduceFuture {
+    type Output = Result<(), KafkaError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.rx.poll_unpin(cx) {
+            Poll::Ready(rdy) => Poll::Ready(rdy.unwrap_or_else(|e| Err(e.into()))),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 pub struct Producer<Conn: Connect + Send + 'static, P> {
     selector: SelectorTaskHandle<ProducerTask<Conn>, ProducerTaskHandle>,
     partitioner: P,
+}
+
+impl<Conn: Connect + Send + 'static, P: Clone> Clone for Producer<Conn, P> {
+    fn clone(&self) -> Self {
+        Self {
+            selector: self.selector.clone(),
+            partitioner: self.partitioner.clone(),
+        }
+    }
 }
 
 impl Producer<Tcp, KeyHashPartitioner> {
@@ -37,7 +71,7 @@ impl Producer<Tcp, KeyHashPartitioner> {
 }
 
 impl<Conn: Connect + Send + 'static, P: Partitioner> Producer<Conn, P> {
-    pub async fn produce(&self, mut record: ProducerRecord) -> Result<(), KafkaError> {
+    pub async fn produce(&self, mut record: ProducerRecord) -> Result<ProduceFuture, KafkaError> {
         let cluster = self.selector.cluster.load();
 
         // TODO: if err, refresh the metadata for the topic
@@ -74,6 +108,6 @@ impl<Conn: Connect + Send + 'static, P: Partitioner> Producer<Conn, P> {
             })
             .await?;
 
-        rx.await?
+        Ok(ProduceFuture { rx })
     }
 }

@@ -616,12 +616,22 @@ impl<
 /// when the request is queued, it will remain queued and be sent to the new host for the broker. If the new cluster
 /// config does not contain the broker id, the request will be dropped and the sender will receive an error indicating
 /// the connection is closed.
-#[derive(Clone)]
 pub(crate) struct SelectorTaskHandle<Task: BrokerTask, TaskHandle> {
     pub cluster: Arc<ArcSwap<Cluster<Task, TaskHandle>>>,
     pub tx_topic_metadata: mpsc::Sender<RefreshMetadataRequest>,
     cancellation_token: CancellationToken,
     task_tracker: TaskTracker,
+}
+
+impl<Task: BrokerTask, TaskHandle> Clone for SelectorTaskHandle<Task, TaskHandle> {
+    fn clone(&self) -> Self {
+        Self {
+            cluster: self.cluster.clone(),
+            tx_topic_metadata: self.tx_topic_metadata.clone(),
+            cancellation_token: self.cancellation_token.clone(),
+            task_tracker: self.task_tracker.clone(),
+        }
+    }
 }
 
 impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, TaskHandle> {
