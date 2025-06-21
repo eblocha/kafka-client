@@ -31,7 +31,7 @@ pub trait FromVersionRange {
 
 /// Determine the maximum version in the intersection of two version ranges.
 pub fn max_intersecting_version(client: &VersionRange, broker: &VersionRange) -> Option<i16> {
-    let intersection = client.intersect(broker);
+    let intersection = client.intersect(*broker);
 
     if intersection.is_empty() {
         None
@@ -103,7 +103,7 @@ impl<R: Request, F: FnOnce(VersionRange) -> Option<(R, i16)>> FromVersionRange
     type Req = R;
 
     fn from_version_range(self, range: VersionRange) -> Option<(Self::Req, i16)> {
-        let intersection = R::VERSIONS.intersect(&range);
+        let intersection = R::VERSIONS.intersect(range);
 
         if intersection.is_empty() {
             None

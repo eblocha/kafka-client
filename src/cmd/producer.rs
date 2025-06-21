@@ -14,11 +14,11 @@ use tokio::{
 };
 
 use kafka_client::{
-    clients::{
-        network::NetworkClient,
-        producer::{Producer, ProducerRecord, RecordMetadata},
-    },
+    common::BrokerHost,
+    config::KafkaConfig,
+    connect::Tcp,
     error::KafkaError,
+    producer::{client::Producer, partitioner::KeyHashPartitioner, record::ProducerRecord},
 };
 
 use super::Run;
@@ -55,13 +55,15 @@ pub enum ProducerCommands {
 impl Run for ProducerCommands {
     type Response = ();
 
-    async fn run(self, client: NetworkClient) -> anyhow::Result<()> {
+    async fn run(self, bootstrap: &[BrokerHost], config: KafkaConfig) -> anyhow::Result<()> {
         match self {
             ProducerCommands::Random { topic, count, size } => {
-                ProduceRandom { topic, count, size }.run(client).await
+                ProduceRandom { topic, count, size }
+                    .run(bootstrap, config)
+                    .await
             }
             ProducerCommands::File { file, topic } => {
-                ProduceFromFile { topic, file }.run(client).await
+                ProduceFromFile { topic, file }.run(bootstrap, config).await
             }
         }
     }
@@ -76,8 +78,13 @@ pub struct ProduceRandom {
 impl Run for ProduceRandom {
     type Response = ();
 
-    async fn run(self, client: NetworkClient) -> anyhow::Result<Self::Response> {
-        let producer = Producer::new(client);
+    async fn run(
+        self,
+        bootstrap: &[BrokerHost],
+        config: KafkaConfig,
+    ) -> anyhow::Result<Self::Response> {
+        let producer = Producer::try_new(bootstrap, config).await?;
+
         let topic = TopicName(StrBytes::from_string(self.topic));
 
         let now = Instant::now();
@@ -102,9 +109,9 @@ impl Run for ProduceRandom {
             let msg = Bytes::from(msg);
 
             producer
-                .send(ProducerRecord {
+                .produce(ProducerRecord {
                     headers: IndexMap::default(),
-                    key: None,
+                    key: Some(msg.clone()),
                     partition: None,
                     timestamp: None,
                     topic: topic.clone(),
@@ -115,7 +122,7 @@ impl Run for ProduceRandom {
             bar.inc(u64_usize);
         }
 
-        producer.flush_and_shutdown().await;
+        // producer.flush_and_shutdown().await;
 
         bar.finish();
 
@@ -134,10 +141,10 @@ pub struct ProduceFromFile {
 
 impl ProduceFromFile {
     async fn run_inner(
-        producer: &Producer,
+        producer: &Producer<Tcp, KeyHashPartitioner>,
         file: File,
         topic: String,
-    ) -> anyhow::Result<JoinSet<Result<RecordMetadata, KafkaError>>> {
+    ) -> anyhow::Result<JoinSet<Result<(), KafkaError>>> {
         let mut reader = io::BufReader::new(file).lines();
 
         let topic = TopicName(StrBytes::from_string(topic));
@@ -146,7 +153,7 @@ impl ProduceFromFile {
 
         while let Some(line) = reader.next_line().await? {
             let rx = producer
-                .send(ProducerRecord {
+                .produce(ProducerRecord {
                     headers: IndexMap::default(),
                     key: None,
                     partition: None,
@@ -166,15 +173,19 @@ impl ProduceFromFile {
 impl Run for ProduceFromFile {
     type Response = ();
 
-    async fn run(self, client: NetworkClient) -> anyhow::Result<Self::Response> {
+    async fn run(
+        self,
+        bootstrap: &[BrokerHost],
+        config: KafkaConfig,
+    ) -> anyhow::Result<Self::Response> {
         let file = File::open(self.file).await?;
-        let producer = Producer::new(client);
+        let producer = Producer::try_new(bootstrap, config).await?;
 
         let now = Instant::now();
 
         let result = Self::run_inner(&producer, file, self.topic).await;
 
-        producer.flush_and_shutdown().await;
+        // producer.flush_and_shutdown().await;
 
         let finish = now.elapsed();
 

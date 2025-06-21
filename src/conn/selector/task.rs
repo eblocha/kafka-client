@@ -1,9 +1,12 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use arc_swap::ArcSwap;
 use kafka_protocol::messages::{
     metadata_request::MetadataRequestTopic, metadata_response::MetadataResponseBroker,
-    MetadataResponse,
+    MetadataResponse, TopicName,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::{
@@ -337,7 +340,7 @@ impl<
                 tracing::debug!(
                     broker_id = entry.node.id,
                     host = ?entry.node.host,
-                    "removing connection to broker"
+                    "removing broker task"
                 );
             }
 
@@ -378,8 +381,7 @@ impl<
                 let stream = match partition_streams.remove(&tp) {
                     Some(s) => s,
                     None => {
-                        // Using a size of 1 since the broker task should accumulate messages before applying backpressure.
-                        let (tx, rx) = mpsc::channel(1);
+                        let (tx, rx) = mpsc::channel(self.config.producer.batch_count);
                         new_state.partitions.insert(tp.clone(), tx);
                         PartitionQueue::new(rx)
                     }
@@ -387,7 +389,7 @@ impl<
 
                 let task = tasks
                     .entry(broker_id)
-                    .or_insert_with(|| self.create_new_task(Node::from(*broker)));
+                    .or_insert_with(|| self.create_new_task(Node::from(*broker)).0);
 
                 // Assign this partition to the broker task
                 task.get_partitions_mut().insert(tp, stream);
@@ -405,9 +407,18 @@ impl<
                 continue;
             };
 
-            self.join_set.spawn(task.run(BrokerTaskContext {
-                cancellation_token: entry.cancellation_token.clone(),
-            }));
+            let cancellation_token = self.cancellation_token.child_token();
+            entry.cancellation_token = cancellation_token.clone();
+            let node = task.get_node();
+
+            tracing::debug!(
+                broker_id = node.id,
+                host = ?node.host,
+                "starting broker task"
+            );
+
+            self.join_set
+                .spawn(task.run(BrokerTaskContext { cancellation_token }));
         }
 
         let new_broker_hosts: FxHashSet<BrokerHost> =
@@ -417,12 +428,15 @@ impl<
         self.metadata_backoff
             .retain(|host, _| new_broker_hosts.contains(host));
 
+        tracing::debug!("removing {} partitions", partition_streams.len());
         // remove partition queues which no longer exist
         for (tp, _) in partition_streams.drain() {
             new_state.partitions.remove(&tp);
         }
 
-        new_state.metadata.update_with(metadata.clone());
+        new_state
+            .metadata
+            .update_with(metadata.clone(), Instant::now());
         new_state.brokers = self.hosts.clone();
 
         self.cluster.store(Arc::new(new_state));
@@ -470,6 +484,12 @@ impl<
             let current_node = task.get_node();
             let id = current_node.id;
             let current_host = current_node.host.clone();
+
+            tracing::debug!(
+                broker_id = id,
+                host = ?current_host,
+                "stopped broker task"
+            );
 
             let Some(broker) = new_broker_ids.get(&id) else {
                 // This broker is no longer in the cluster. Stop the connection to its host and collect its partitions.
@@ -542,7 +562,7 @@ impl<
         (tasks, partition_streams)
     }
 
-    fn create_new_task(&mut self, node: Node) -> Task {
+    fn create_new_task(&mut self, node: Node) -> (Task, CancellationToken) {
         tracing::debug!(
             broker_id = node.id,
             host = ?node.host,
@@ -558,10 +578,10 @@ impl<
         self.hosts.insert(BrokerMapEntry {
             node,
             handle,
-            cancellation_token,
+            cancellation_token: cancellation_token.clone(),
         });
 
-        task
+        (task, cancellation_token)
     }
 
     async fn restart_if_needed(&mut self, mut dead_task: Task) {
@@ -576,7 +596,6 @@ impl<
 
             // create new cancellation token to not immediately exit when the task starts
             let cancellation_token = self.cancellation_token.child_token();
-
             entry.cancellation_token = cancellation_token.clone();
 
             // if the host is different, stop the existing connection
@@ -615,6 +634,7 @@ pub(crate) struct SelectorTaskHandle<Task: BrokerTask, TaskHandle> {
     pub tx_topic_metadata: mpsc::Sender<RefreshMetadataRequest>,
     cancellation_token: CancellationToken,
     task_tracker: TaskTracker,
+    config: KafkaConfig,
 }
 
 impl<Task: BrokerTask, TaskHandle> Clone for SelectorTaskHandle<Task, TaskHandle> {
@@ -624,6 +644,7 @@ impl<Task: BrokerTask, TaskHandle> Clone for SelectorTaskHandle<Task, TaskHandle
             tx_topic_metadata: self.tx_topic_metadata.clone(),
             cancellation_token: self.cancellation_token.clone(),
             task_tracker: self.task_tracker.clone(),
+            config: self.config.clone(),
         }
     }
 }
@@ -657,45 +678,8 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
         connect: Conn,
         task_factory: Factory,
     ) -> Result<Self, KafkaError> {
-        let mut hosts: BrokerMap<TaskHandle> = BrokerMap::default();
-        let mut join_set = JoinSet::new();
         let cancellation_token = CancellationToken::new();
         let task_tracker = TaskTracker::new();
-
-        for (id, host) in bootstrap.iter().enumerate() {
-            let id = id as i32;
-
-            let connector = NodeConnector::new(
-                Node {
-                    id,
-                    host: host.clone(),
-                    rack: None,
-                },
-                config.clone(),
-                connect.clone(),
-            );
-
-            let cancellation_token = cancellation_token.child_token();
-
-            let (handle, task) = task_factory.new_task(connector);
-
-            join_set.spawn(task.run(BrokerTaskContext {
-                cancellation_token: cancellation_token.clone(),
-            }));
-
-            hosts.insert(BrokerMapEntry {
-                node: Node {
-                    id,
-                    host: host.clone(),
-                    rack: None,
-                },
-                handle,
-                cancellation_token,
-            });
-        }
-
-        // create the watch channel for the metadata
-        let cluster = Arc::new(ArcSwap::new(Arc::new(Cluster::new(hosts.clone()))));
 
         let (tx_topic_metadata, rx_topic_metadata) =
             mpsc::channel(config.metadata.refresh_batch_count);
@@ -703,12 +687,12 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
         let (tx_bootstrap, rx_bootstrap) = oneshot::channel();
 
         // start the selector task to manage broker connections
-        let selector_task = SelectorTask {
-            hosts,
-            cluster: cluster.clone(),
+        let mut selector_task = SelectorTask {
+            hosts: BrokerMap::default(),
+            cluster: Default::default(),
             rx_topic_metadata,
-            join_set,
-            config,
+            join_set: JoinSet::new(),
+            config: config.clone(),
             metadata_backoff: Default::default(),
             metadata_join_set: JoinSet::new(),
             cancellation_token: cancellation_token.clone(),
@@ -716,6 +700,24 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
             connect,
             task_factory,
         };
+
+        for (id, host) in bootstrap.iter().enumerate() {
+            let node = Node {
+                id: id as i32,
+                host: host.clone(),
+                rack: None,
+            };
+
+            let (task, cancellation_token) = selector_task.create_new_task(node);
+
+            selector_task
+                .join_set
+                .spawn(task.run(BrokerTaskContext { cancellation_token }));
+        }
+
+        let cluster = selector_task.cluster.clone();
+
+        cluster.store(Arc::new(Cluster::new(selector_task.hosts.clone())));
 
         let join_handle = task_tracker.spawn(selector_task.run());
 
@@ -734,10 +736,11 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
             tx_topic_metadata,
             cancellation_token,
             task_tracker,
+            config,
         })
     }
 
-    pub async fn refresh_metadata_for_topics(
+    async fn refresh_metadata_for_topics(
         &self,
         topics: Option<Vec<MetadataRequestTopic>>,
     ) -> Result<(), KafkaError> {
@@ -748,6 +751,26 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
             .await?;
 
         rx.await??;
+
+        Ok(())
+    }
+
+    pub async fn check_topic_metadata(&self, topic: &TopicName) -> Result<(), KafkaError> {
+        let cluster = self.cluster.load();
+        let Some(topic_result) = cluster.metadata.get_topic_metadata_by_name(topic) else {
+            self.refresh_metadata_for_topics(Some(vec![
+                MetadataRequestTopic::default().with_name(Some(topic.clone()))
+            ]))
+            .await?;
+            return Ok(());
+        };
+
+        if topic_result.timestamp.elapsed() > self.config.metadata.max_age {
+            self.refresh_metadata_for_topics(Some(vec![
+                MetadataRequestTopic::default().with_name(Some(topic.clone()))
+            ]))
+            .await?;
+        }
 
         Ok(())
     }

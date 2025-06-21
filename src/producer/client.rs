@@ -2,6 +2,7 @@ use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use futures::FutureExt;
@@ -44,6 +45,7 @@ impl Future for ProduceFuture {
 pub struct Producer<Conn: Connect + Send + 'static, P> {
     selector: SelectorTaskHandle<ProducerTask<Conn>, ProducerTaskHandle>,
     partitioner: P,
+    config: KafkaConfig,
 }
 
 impl<Conn: Connect + Send + 'static, P: Clone> Clone for Producer<Conn, P> {
@@ -51,6 +53,7 @@ impl<Conn: Connect + Send + 'static, P: Clone> Clone for Producer<Conn, P> {
         Self {
             selector: self.selector.clone(),
             partitioner: self.partitioner.clone(),
+            config: self.config.clone(),
         }
     }
 }
@@ -60,26 +63,36 @@ impl Producer<Tcp, KeyHashPartitioner> {
         bootstrap: &[BrokerHost],
         config: KafkaConfig,
     ) -> Result<Self, KafkaError> {
+        tracing::debug!("{config:#?}");
+
         let selector = SelectorTaskHandle::try_new_tcp(
             bootstrap,
             config.clone(),
-            ProducerTaskFactory { config },
+            ProducerTaskFactory {
+                config: config.clone(),
+            },
         )
         .await?;
 
         Ok(Self {
             selector,
             partitioner: KeyHashPartitioner,
+            config,
         })
     }
 }
 
 impl<Conn: Connect + Send + 'static, P: Partitioner> Producer<Conn, P> {
     pub async fn produce(&self, mut record: ProducerRecord) -> Result<ProduceFuture, KafkaError> {
+        self.selector.check_topic_metadata(&record.topic).await?;
+
         let cluster = self.selector.cluster.load();
 
-        // TODO: if err, refresh the metadata for the topic
-        let topic_data = cluster.metadata.get_topic_metadata_by_name(&record.topic)?;
+        let Some(topic_data) = cluster.metadata.get_topic_metadata_by_name(&record.topic) else {
+            return Err(ErrorCode::UnknownTopicOrPartition.into());
+        };
+
+        let topic_data = topic_data.metadata.as_ref().map_err(Clone::clone)?;
 
         if record.partition.is_none() {
             self.partitioner.partition(&mut record, topic_data);
@@ -89,7 +102,7 @@ impl<Conn: Connect + Send + 'static, P: Partitioner> Producer<Conn, P> {
             return Err(ErrorCode::UnknownTopicOrPartition.into());
         };
 
-        topic_data.get_partition_metadata(partition)?;
+        let partition_metadata = topic_data.get_partition_metadata(partition)?;
 
         let tp = TopicPartition::new(record.topic.clone(), partition);
 
@@ -99,13 +112,22 @@ impl<Conn: Connect + Send + 'static, P: Partitioner> Producer<Conn, P> {
 
         let (tx, rx) = oneshot::channel();
 
+        let timestamp = record.timestamp.unwrap_or_else(|| {
+            let start = SystemTime::now();
+            start.duration_since(UNIX_EPOCH).map_or_else(
+                |e| -(e.duration().as_millis() as i64),
+                |ts| ts.as_millis() as i64,
+            )
+        });
+
         tx_partition
             .send(ProducerSendMessage {
                 record: ProducerSendRecord {
                     value: record.value,
                     key: record.key,
                     headers: record.headers,
-                    timestamp: record.timestamp,
+                    timestamp,
+                    leader_epoch: partition_metadata.leader_epoch,
                 },
                 tx,
             })

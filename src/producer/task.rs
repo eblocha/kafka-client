@@ -1,7 +1,4 @@
-use std::{
-    io,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::io;
 
 use bytes::{Bytes, BytesMut};
 use kafka_protocol::{
@@ -31,10 +28,11 @@ use crate::{
 };
 
 pub(super) struct ProducerSendRecord {
-    pub timestamp: Option<i64>,
+    pub timestamp: i64,
     pub key: Option<Bytes>,
     pub value: Option<Bytes>,
     pub headers: indexmap::IndexMap<StrBytes, Option<Bytes>>,
+    pub leader_epoch: i32,
 }
 
 pub(super) struct ProducerSendMessage {
@@ -53,6 +51,29 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
     type PartitionMessage = ProducerSendMessage;
 
     async fn run(mut self, ctx: BrokerTaskContext) -> Self {
+        let node = self.inner_task.get_node().clone();
+
+        if self.partitions.is_empty() {
+            tracing::debug!(
+                broker_id = node.id,
+                host = ?node.host,
+                "falling back to network task since this broker is not assigned any partitions"
+            );
+            let inner_task = self.inner_task.run(ctx).await;
+            return Self {
+                partitions: self.partitions,
+                inner_handle: self.inner_handle,
+                inner_task,
+                config: self.config,
+            };
+        }
+
+        tracing::debug!(
+            broker_id = node.id,
+            host = ?node.host,
+            "started producer task"
+        );
+
         let connection_join_handle = tokio::spawn(self.inner_task.run(ctx.clone()));
 
         let chunks = (&mut self.partitions).chunks_timeout(
@@ -80,6 +101,12 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             let (request, partitions) =
                 create_request(chunk, &self.config, transactional_id.clone());
 
+            tracing::trace!(
+                broker_id = node.id,
+                host = ?node.host,
+                "sending produce request"
+            );
+
             let Some(response) = self
                 .inner_handle
                 .send(request)
@@ -89,8 +116,21 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
                 break;
             };
 
+            tracing::trace!(
+                broker_id = node.id,
+                host = ?node.host,
+                "handling produce response"
+            );
+
             match response {
-                Ok(response) => handle_produce_response(response, partitions),
+                Ok(_) => {
+                    for (_, records) in partitions {
+                        for record in records {
+                            let _ = record.tx.send(Ok(()));
+                        }
+                    }
+                }
+                // Ok(response) => handle_produce_response(response, partitions),
                 Err(e) => {
                     tracing::error!("failed to send produce request: {e}");
 
@@ -151,31 +191,21 @@ fn create_request(
 ) {
     let mut req = ProduceRequest::default();
 
-    let fallback_timestamp = {
-        let start = SystemTime::now();
-        start.duration_since(UNIX_EPOCH).map_or_else(
-            |e| -(e.duration().as_millis() as i64),
-            |ts| ts.as_millis() as i64,
-        )
-    };
-
     let mut partitions = FxHashMap::<TopicPartition, Vec<PreparedRecord>>::default();
 
     for (tp, msg) in chunk {
         let records = partitions.entry(tp.clone()).or_default();
 
-        let timestamp = msg.record.timestamp.unwrap_or(fallback_timestamp);
-
         let record = Record {
             transactional: false,
             control: false,
-            partition_leader_epoch: -1, // TODO
+            partition_leader_epoch: msg.record.leader_epoch,
             producer_id: NO_PRODUCER_ID,
             producer_epoch: NO_PRODUCER_EPOCH,
             timestamp_type: TimestampType::Creation,
             offset: records.len() as i64,
             sequence: records.len() as i32,
-            timestamp,
+            timestamp: msg.record.timestamp,
             key: msg.record.key,
             value: msg.record.value,
             headers: msg.record.headers,

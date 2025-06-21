@@ -112,7 +112,10 @@ impl<IO> KafkaChannelTask<IO> {
         loop {
             let either = tokio::select! {
                 biased;
-                () = self.cancellation_token.cancelled() => break,
+                () = self.cancellation_token.cancelled() => {
+                    tracing::debug!("kafka channel task was cancelled, closing connection");
+                    break
+                },
                 next_res = stream.next() => Either::Right(next_res),
                 count = self.rx.recv_many(&mut request_buffer, self.config.socket.send_buffer_size) => Either::Left(count),
             };
@@ -120,6 +123,7 @@ impl<IO> KafkaChannelTask<IO> {
             match either {
                 Either::Left(count) => {
                     if count == 0 {
+                        tracing::debug!("kafka channel was dropped, closing connection");
                         break;
                     }
 
@@ -213,7 +217,10 @@ impl<IO> KafkaChannelTask<IO> {
                         }
                         break;
                     }
-                    None => break,
+                    None => {
+                        tracing::debug!("connection closed by peer");
+                        break;
+                    }
                 },
             }
         }

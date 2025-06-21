@@ -164,6 +164,12 @@ impl<Conn: Connect> NodeConnector<Conn> {
         }
 
         if conn_result.is_ok() {
+            tracing::debug!(
+                broker_id = self.node.id,
+                host = ?self.node.host,
+                retries = self.backoff.count(),
+                "established connection"
+            );
             self.backoff.success();
         } else {
             let (min, max) = (

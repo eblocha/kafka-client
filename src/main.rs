@@ -9,6 +9,8 @@ use kafka_client::{common::BrokerHost, config::KafkaConfig};
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
+use crate::cmd::producer::ProducerCommands;
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 #[command(propagate_version = true)]
@@ -31,9 +33,9 @@ enum Client {
     /// Perform administrative commands.
     #[command(subcommand)]
     Admin(AdminCommands),
-    // /// Produce messages to a topic.
-    // #[command(subcommand)]
-    // Producer(ProducerCommands),
+    /// Produce messages to a topic.
+    #[command(subcommand)]
+    Producer(ProducerCommands),
     // /// Start a consumer and print any record values from the topic to stdout.
     // Consumer {
     //     /// A comma-separated list of topic names to listen on.
@@ -59,6 +61,7 @@ pub async fn main() -> anyhow::Result<()> {
 
     match cli.client {
         Client::Admin(cmd) => cmd.run(&cli.bootstrap_servers, config).await?,
+        Client::Producer(cmd) => cmd.run(&cli.bootstrap_servers, config).await?,
     }
 
     Ok(())

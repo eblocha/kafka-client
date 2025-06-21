@@ -50,6 +50,8 @@ pub type MetadataRefreshResult<TaskHandle> = (
 
 impl<TaskHandle: BrokerTaskHandle + Send + 'static> MetadataRefreshTask<TaskHandle> {
     pub async fn run(mut self) -> MetadataRefreshResult<TaskHandle> {
+        tracing::debug!("refreshing metadata {:?}", self.topics);
+
         self.context.backoff.wait_next().await;
 
         let metadata = self

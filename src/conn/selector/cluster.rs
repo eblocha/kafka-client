@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, time::Instant};
 
 use derive_more::derive::From;
 use kafka_protocol::{
@@ -59,11 +59,6 @@ fn least_failure_streak<TaskHandle: BrokerTaskHandle>(
 }
 
 impl<TaskHandle: BrokerTaskHandle> BrokerMap<TaskHandle> {
-    /// Get a broker map entry for a specific broker by id.
-    pub fn get_connection_for(&self, broker_id: i32) -> Option<&BrokerMapEntry<TaskHandle>> {
-        self.0.iter().find(|entry| entry.node.id == broker_id)
-    }
-
     /// Get the current "best" connection handle.
     ///
     /// This will prefer connected brokers with the minimum number of pending requests, then favor the minimum number of
@@ -273,6 +268,136 @@ impl TryFrom<(TopicName, MetadataResponseTopic)> for TopicMetadata {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct TopicResult {
+    pub metadata: Result<TopicMetadata, ErrorCode>,
+    pub timestamp: Instant,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ClusterMetadata {
+    /// The cluster id returned by the metadata.
+    pub cluster_id: Option<StrBytes>,
+    /// The broker id of the controller node.
+    pub controller_id: i32,
+    /// Maps the [`TopicKey`] to a [`Result`] containing the last metadata fetch result for the topic.
+    topics: FxHashMap<TopicKey, TopicResult>,
+    /// Maps the topic name to either the uuid or name.
+    ///
+    /// The [`TopicKey`] will be a [`TopicKey::Name`] when:
+    /// - The request for metadata failed with an error code, or
+    /// - The server does not support topic uuids
+    ///
+    /// The [`TopicKey`] will be a [`TopicKey::Uuid`] when:
+    /// - The request was successful, and
+    /// - The server supports topic uuids
+    topic_keys_by_name: FxHashMap<TopicName, TopicKey>,
+}
+
+impl ClusterMetadata {
+    #[inline]
+    pub fn get_topic_key_by_name(&self, name: &TopicName) -> Option<&TopicKey> {
+        self.topic_keys_by_name.get(name)
+    }
+
+    #[inline]
+    pub fn get_topic_metadata(&self, key: &TopicKey) -> Option<&TopicResult> {
+        self.topics.get(key)
+    }
+
+    #[inline]
+    pub fn get_topic_metadata_by_name(&self, name: &TopicName) -> Option<&TopicResult> {
+        let Some(key) = self.get_topic_key_by_name(name) else {
+            return None;
+        };
+
+        self.get_topic_metadata(key)
+    }
+
+    /// Create a [`Vec<MetadataRequestTopic>`] that will refresh metadata for all topics known to the client.
+    pub(super) fn create_topics_for_refresh(&self) -> Vec<MetadataRequestTopic> {
+        self.topic_keys_by_name
+            .iter()
+            .map(|(name, key)| {
+                let mut req = MetadataRequestTopic::default();
+                req.name = Some(name.clone());
+                if let TopicKey::Uuid(uuid) = key {
+                    req.topic_id = *uuid;
+                }
+
+                req
+            })
+            .collect()
+    }
+
+    /// Update the metadata from a successful [`MetadataResponse`].
+    pub(super) fn update_with(&mut self, response: MetadataResponse, timestamp: Instant) {
+        self.cluster_id = response.cluster_id;
+        self.controller_id = response.controller_id.0;
+        // merge topic metadata with existing metadata
+        for topic_meta in response.topics {
+            self.insert_update(topic_meta, timestamp);
+        }
+    }
+
+    fn insert_update(&mut self, topic_meta: MetadataResponseTopic, timestamp: Instant) {
+        let key = topic_meta
+            .topic_id
+            .as_optional()
+            .map(TopicKey::Uuid)
+            .map_or_else(|| topic_meta.name.clone().map(TopicKey::Name), Some);
+
+        let Some(key) = key else {
+            tracing::warn!(
+                "the server responded to a metadata request with a topic that has no name or id"
+            );
+            return;
+        };
+
+        let Some(ref topic_name) = topic_meta.name else {
+            // The topic name is empty, which means we requested a topic by id that does not exist.
+            // Remove the uuid-key from the topic mapping
+            if let Some(TopicResult {
+                metadata: Ok(metadata),
+                ..
+            }) = self.topics.remove(&key)
+            {
+                let new_metadata = TopicMetadata::try_from((metadata.name.clone(), topic_meta));
+                // Use the name for the key instead of the uuid, since it no longer exists.
+                let new_key = TopicKey::Name(metadata.name.clone());
+                self.topics.insert(
+                    new_key.clone(),
+                    TopicResult {
+                        metadata: new_metadata,
+                        timestamp,
+                    },
+                );
+                self.topic_keys_by_name.insert(metadata.name, new_key);
+            };
+            return;
+        };
+
+        self.topic_keys_by_name
+            .insert(topic_name.clone(), key.clone());
+
+        if matches!(key, TopicKey::Uuid(_)) {
+            // Remove the topic-name version if it exists.
+            // For example, if a previous request for the topic by name failed
+            self.topics.remove(&TopicKey::Name(topic_name.clone()));
+        }
+
+        let new_metadata = TopicMetadata::try_from((topic_name.clone(), topic_meta));
+
+        self.topics.insert(
+            key,
+            TopicResult {
+                metadata: new_metadata,
+                timestamp,
+            },
+        );
+    }
+}
+
 #[derive(Debug)]
 pub struct Cluster<Task: BrokerTask, TaskHandle> {
     /// Mapping of all currently-known broker nodes.
@@ -311,140 +436,10 @@ impl<Task: BrokerTask, TaskHandle> Cluster<Task, TaskHandle> {
     }
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct ClusterMetadata {
-    /// The cluster id returned by the metadata.
-    pub cluster_id: Option<StrBytes>,
-    /// The broker id of the controller node.
-    pub controller_id: i32,
-    /// Maps the [`TopicKey`] to a [`Result`] containing the last metadata fetch result for the topic.
-    topics: FxHashMap<TopicKey, Result<TopicMetadata, ErrorCode>>,
-    /// Maps the topic name to either the uuid or name.
-    ///
-    /// The [`TopicKey`] will be a [`TopicKey::Name`] when:
-    /// - The request for metadata failed with an error code, or
-    /// - The server does not support topic uuids
-    ///
-    /// The [`TopicKey`] will be a [`TopicKey::Uuid`] when:
-    /// - The request was successful, and
-    /// - The server supports topic uuids
-    topic_keys_by_name: FxHashMap<TopicName, TopicKey>,
-}
-
-impl ClusterMetadata {
-    #[inline]
-    pub fn get_topic_key_by_name(&self, name: &TopicName) -> Option<&TopicKey> {
-        self.topic_keys_by_name.get(name)
-    }
-
-    #[inline]
-    pub fn get_topic_metadata(&self, key: &TopicKey) -> Result<&TopicMetadata, ErrorCode> {
-        let Some(result) = self.topics.get(key) else {
-            return Err(ErrorCode::UnknownTopicOrPartition);
-        };
-
-        result.as_ref().map_err(|e| *e)
-    }
-
-    #[inline]
-    pub fn get_topic_metadata_by_name(
-        &self,
-        name: &TopicName,
-    ) -> Result<&TopicMetadata, ErrorCode> {
-        let Some(key) = self.get_topic_key_by_name(name) else {
-            return Err(ErrorCode::UnknownTopicOrPartition);
-        };
-
-        self.get_topic_metadata(key)
-    }
-
-    #[inline]
-    pub fn get_topic_metadata_and_key_by_name(
-        &self,
-        name: &TopicName,
-    ) -> Result<(&TopicKey, &TopicMetadata), ErrorCode> {
-        let Some(key) = self.get_topic_key_by_name(name) else {
-            return Err(ErrorCode::UnknownTopicOrPartition);
-        };
-
-        self.get_topic_metadata(key).map(|meta| (key, meta))
-    }
-
-    /// Create a [`Vec<MetadataRequestTopic>`] that will refresh metadata for all topics known to the client.
-    pub(super) fn create_topics_for_refresh(&self) -> Vec<MetadataRequestTopic> {
-        self.topic_keys_by_name
-            .iter()
-            .map(|(name, key)| {
-                let mut req = MetadataRequestTopic::default();
-                req.name = Some(name.clone());
-                if let TopicKey::Uuid(uuid) = key {
-                    req.topic_id = *uuid;
-                }
-
-                req
-            })
-            .collect()
-    }
-
-    /// Update the metadata from a successful [`MetadataResponse`].
-    pub(super) fn update_with(&mut self, response: MetadataResponse) {
-        self.cluster_id = response.cluster_id;
-        self.controller_id = response.controller_id.0;
-        // merge topic metadata with existing metadata
-        for topic_meta in response.topics {
-            self.insert_update(topic_meta);
-        }
-    }
-
-    fn insert_update(&mut self, topic_meta: MetadataResponseTopic) {
-        let key = topic_meta
-            .topic_id
-            .as_optional()
-            .map(TopicKey::Uuid)
-            .map_or_else(|| topic_meta.name.clone().map(TopicKey::Name), Some);
-
-        let Some(key) = key else {
-            tracing::warn!(
-                "the server responded to a metadata request with a topic that has no name or id"
-            );
-            return;
-        };
-
-        let Some(ref topic_name) = topic_meta.name else {
-            // The topic name is empty, which means we requested a topic by id that does not exist.
-            // Remove the uuid-key from the topic mapping
-            if let Some(Ok(meta)) = self.topics.remove(&key) {
-                // Use the name for the key instead of the uuid, since it no longer exists.
-                let new_key = TopicKey::Name(meta.name.clone());
-                self.topics.insert(
-                    new_key.clone(),
-                    TopicMetadata::try_from((meta.name.clone(), topic_meta)),
-                );
-                self.topic_keys_by_name.insert(meta.name, new_key);
-            } else {
-                // we never had this topic, or the last attempt to fetch gave an error
-            };
-            return;
-        };
-
-        self.topic_keys_by_name
-            .insert(topic_name.clone(), key.clone());
-
-        if matches!(key, TopicKey::Uuid(_)) {
-            // Remove the topic-name version if it exists.
-            // For example, if a previous request for the topic by name failed
-            self.topics.remove(&TopicKey::Name(topic_name.clone()));
-        }
-
-        self.topics.insert(
-            key,
-            TopicMetadata::try_from((topic_name.clone(), topic_meta)),
-        );
-    }
-}
-
 #[cfg(test)]
 mod test {
+    use std::time::Instant;
+
     use kafka_protocol::{
         messages::{
             metadata_response::{
@@ -512,6 +507,7 @@ mod test {
                         .with_topic_id(Uuid::nil())
                         .with_partitions(vec![]),
                 ]),
+            Instant::now(),
         );
 
         assert_eq!(metadata.controller_id, 1);
@@ -532,21 +528,25 @@ mod test {
         assert_eq!(
             metadata
                 .get_topic_metadata_by_name(&TopicName::from_string("topic-b".into()))
+                .unwrap()
+                .metadata
+                .as_ref()
                 .unwrap_err(),
-            ErrorCode::LeaderNotAvailable
+            &ErrorCode::LeaderNotAvailable
         );
 
-        // Nonexistent topics should give unknown-topic errors
-        assert_eq!(
-            metadata
-                .get_topic_metadata_by_name(&TopicName::from_string("topic-c".into()))
-                .unwrap_err(),
-            ErrorCode::UnknownTopicOrPartition
-        );
+        // Nonexistent topics should give None
+        assert!(metadata
+            .get_topic_metadata_by_name(&TopicName::from_string("topic-c".into()))
+            .is_none());
 
         // Verify good topic exists
-        let topic_metadata =
-            metadata.get_topic_metadata_by_name(&TopicName::from_string("topic-a".into()));
+        let topic_metadata = metadata
+            .get_topic_metadata_by_name(&TopicName::from_string("topic-a".into()))
+            .unwrap()
+            .metadata
+            .as_ref();
+
         assert_ok!(topic_metadata);
 
         let topic_metadata = topic_metadata.unwrap();
@@ -593,21 +593,29 @@ mod test {
         let topic_name = TopicName::from_string("topic-a".to_owned());
         let topic_id = Uuid::parse_str("e93d0c37-745f-45c7-987d-f28350ba1203").unwrap();
 
-        metadata.update_with(MetadataResponse::default().with_topics(vec![
-            MetadataResponseTopic::default().with_name(Some(topic_name.clone())),
-        ]));
+        metadata.update_with(
+            MetadataResponse::default().with_topics(vec![
+                MetadataResponseTopic::default().with_name(Some(topic_name.clone()))
+            ]),
+            Instant::now(),
+        );
 
-        metadata.update_with(MetadataResponse::default().with_topics(vec![
-            MetadataResponseTopic::default()
+        metadata.update_with(
+            MetadataResponse::default().with_topics(vec![MetadataResponseTopic::default()
                 .with_name(Some(topic_name.clone()))
-                .with_topic_id(topic_id)
-        ]));
+                .with_topic_id(topic_id)]),
+            Instant::now(),
+        );
 
         let key = metadata.get_topic_key_by_name(&topic_name);
 
         assert_eq!(key, Some(&TopicKey::Uuid(topic_id)));
 
-        let topic = metadata.get_topic_metadata(key.unwrap());
+        let topic = metadata
+            .get_topic_metadata(key.unwrap())
+            .unwrap()
+            .metadata
+            .as_ref();
 
         assert_ok!(topic);
 
@@ -615,7 +623,11 @@ mod test {
 
         assert_eq!(topic.name, topic_name);
 
-        let topic = metadata.get_topic_metadata_by_name(&topic_name);
+        let topic = metadata
+            .get_topic_metadata_by_name(&topic_name)
+            .unwrap()
+            .metadata
+            .as_ref();
 
         assert_ok!(topic);
 
@@ -639,29 +651,35 @@ mod test {
         let topic_id = Uuid::parse_str("e93d0c37-745f-45c7-987d-f28350ba1203").unwrap();
 
         // We get a response to our bootstrap query, and get a topic with an id
-        metadata.update_with(MetadataResponse::default().with_topics(
-            vec![MetadataResponseTopic::default()
+        metadata.update_with(
+            MetadataResponse::default().with_topics(vec![MetadataResponseTopic::default()
                 .with_name(Some(topic_name.clone()))
-                .with_topic_id(topic_id)],
-        ));
+                .with_topic_id(topic_id)]),
+            Instant::now(),
+        );
 
         // We try to refresh the topic, but it was deleted.
-        metadata.update_with(MetadataResponse::default().with_topics(
-            vec![MetadataResponseTopic::default()
+        metadata.update_with(
+            MetadataResponse::default().with_topics(vec![MetadataResponseTopic::default()
                 .with_error_code(ErrorCode::UnknownTopicOrPartition as i16)
                 .with_name(None)
-                .with_topic_id(topic_id)],
-        ));
+                .with_topic_id(topic_id)]),
+            Instant::now(),
+        );
 
         // Our cluster should now identify that topic by name, and return an error code for it.
         let key = metadata.get_topic_key_by_name(&topic_name);
 
         assert_eq!(key, Some(&TopicKey::Name(topic_name.clone())));
 
-        let topic = metadata.get_topic_metadata_by_name(&topic_name);
+        let topic = metadata
+            .get_topic_metadata_by_name(&topic_name)
+            .unwrap()
+            .metadata
+            .as_ref();
 
         assert_err!(topic);
 
-        assert_eq!(topic.unwrap_err(), ErrorCode::UnknownTopicOrPartition);
+        assert_eq!(topic.unwrap_err(), &ErrorCode::UnknownTopicOrPartition);
     }
 }
