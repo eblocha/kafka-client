@@ -13,9 +13,9 @@ use kafka_protocol::{
     },
 };
 use rustc_hash::FxHashMap;
-use tokio::sync::oneshot;
+use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_stream::StreamExt;
-use tokio_util::task::TaskTracker;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     cancel::OrCancelled,
@@ -51,38 +51,74 @@ pub(super) struct ProducerTask<Conn> {
     pub(super) config: KafkaConfig,
 }
 
-async fn send_isomorphic<Handle: BrokerTaskHandle>(
-    handle: &Handle,
-    request: ProduceRequest,
-) -> Result<Option<ProduceResponse>, KafkaError> {
-    if request.acks == 0 {
-        handle.send_and_forget(request).await?;
-        Ok(None)
-    } else {
-        Ok(Some(handle.send(request).await?))
+impl<Conn> ProducerTask<Conn> {
+    fn split(self) -> (NetworkTask<Conn>, PartialProducerTask) {
+        (
+            self.inner_task,
+            PartialProducerTask {
+                partitions: self.partitions,
+                inner_handle: self.inner_handle,
+                config: self.config,
+            },
+        )
+    }
+
+    async fn run_empty(self, ctx: BrokerTaskContext) -> Option<Self>
+    where
+        Conn: Connect + Send + 'static,
+    {
+        let node = self.inner_task.get_node();
+        tracing::debug!(
+            broker_id = node.id,
+            host = ?node.host,
+            "running as network task as this broker is not assigned any partitions"
+        );
+        let inner_task = self.inner_task.run(ctx).await?;
+        return Some(Self {
+            partitions: self.partitions,
+            inner_handle: self.inner_handle,
+            inner_task,
+            config: self.config,
+        });
+    }
+}
+
+struct PartialProducerTask {
+    partitions: PartitionQueueMap<ProducerSendMessage>,
+    inner_handle: NetworkTaskHandle,
+    config: KafkaConfig,
+}
+
+impl PartialProducerTask {
+    async fn stop<Conn>(
+        self,
+        join_handle: JoinHandle<Option<NetworkTask<Conn>>>,
+        ctx: BrokerTaskContext,
+    ) -> Option<ProducerTask<Conn>> {
+        ctx.cancellation_token.cancel();
+
+        // TODO any way to handle this more gracefully?
+        // This is err if the task is aborted forcefully, or it panics
+        let inner_task = join_handle.await.unwrap()?;
+        return Some(ProducerTask {
+            partitions: self.partitions,
+            inner_handle: self.inner_handle,
+            inner_task,
+            config: self.config,
+        });
     }
 }
 
 impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
     type PartitionMessage = ProducerSendMessage;
 
-    async fn run(mut self, ctx: BrokerTaskContext) -> Self {
-        let node = self.inner_task.get_node().clone();
-
+    async fn run(mut self, ctx: BrokerTaskContext) -> Option<Self> {
         if self.partitions.is_empty() {
-            tracing::debug!(
-                broker_id = node.id,
-                host = ?node.host,
-                "falling back to network task since this broker is not assigned any partitions"
-            );
-            let inner_task = self.inner_task.run(ctx).await;
-            return Self {
-                partitions: self.partitions,
-                inner_handle: self.inner_handle,
-                inner_task,
-                config: self.config,
-            };
+            return self.run_empty(ctx).await;
         }
+
+        let (inner_task, mut this) = self.split();
+        let node = inner_task.get_node().clone();
 
         tracing::debug!(
             broker_id = node.id,
@@ -91,17 +127,17 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
         );
 
         let network_task_tracker = TaskTracker::new();
-        let connection_join_handle = network_task_tracker.spawn(self.inner_task.run(ctx.clone()));
+        let connection_join_handle = network_task_tracker.spawn(inner_task.run(ctx.clone()));
         network_task_tracker.close();
 
-        let chunks = (&mut self.partitions).chunks_timeout(
-            self.config.producer.batch_count,
-            self.config.producer.linger,
+        let chunks = (&mut this.partitions).chunks_timeout(
+            this.config.producer.batch_count,
+            this.config.producer.linger,
         );
 
         tokio::pin!(chunks);
 
-        let transactional_id = self
+        let transactional_id = this
             .config
             .producer
             .transactional_id
@@ -116,22 +152,16 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
                 biased;
                 () = ctx.cancellation_token.cancelled() => break,
                 () = tracker_wait => {
-                    ctx.cancellation_token.cancel();
-                    return Self {
-                        partitions: self.partitions,
-                        inner_handle: self.inner_handle,
-                        inner_task: connection_join_handle.await.unwrap(),
-                        config: self.config,
-                    };
+                    return this.stop(connection_join_handle, ctx).await;
                 }
                 Some(chunk) = chunks.next() => chunk,
                 else => break,
             };
 
-            let compression: Compression = self.config.producer.compression_codec.into();
+            let compression: Compression = this.config.producer.compression_codec.into();
             let transactional_id = transactional_id.clone();
-            let acks = self.config.producer.required_acks;
-            let timeout = self.config.producer.request_timeout;
+            let acks = this.config.producer.required_acks;
+            let timeout = this.config.producer.request_timeout;
 
             let (request, partitions) = tokio::task::spawn_blocking(move || {
                 create_request(chunk, compression, transactional_id, acks, timeout)
@@ -145,7 +175,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
                 "sending produce request"
             );
 
-            let Some(response) = send_isomorphic(&self.inner_handle, request)
+            let Some(response) = send_isomorphic(&this.inner_handle, request)
                 .or_cancel(&ctx.cancellation_token)
                 .await
             else {
@@ -179,18 +209,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             }
         }
 
-        ctx.cancellation_token.cancel();
-
-        // TODO any way to handle this more gracefully?
-        // This is err if the task is aborted forcefully, or it panics
-        let connection_task = connection_join_handle.await.unwrap();
-
-        Self {
-            partitions: self.partitions,
-            inner_handle: self.inner_handle,
-            inner_task: connection_task,
-            config: self.config,
-        }
+        this.stop(connection_join_handle, ctx).await
     }
 
     async fn shutdown(self) -> Self {
@@ -214,6 +233,18 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
 
     fn set_node(&mut self, node: Node) {
         self.inner_task.set_node(node);
+    }
+}
+
+async fn send_isomorphic<Handle: BrokerTaskHandle>(
+    handle: &Handle,
+    request: ProduceRequest,
+) -> Result<Option<ProduceResponse>, KafkaError> {
+    if request.acks == 0 {
+        handle.send_and_forget(request).await?;
+        Ok(None)
+    } else {
+        Ok(Some(handle.send(request).await?))
     }
 }
 

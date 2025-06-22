@@ -29,7 +29,7 @@ pub struct NetworkTask<Conn> {
 impl<Conn: Connect + Send + 'static> BrokerTask for NetworkTask<Conn> {
     type PartitionMessage = ();
 
-    async fn run(mut self, ctx: BrokerTaskContext) -> Self {
+    async fn run(mut self, ctx: BrokerTaskContext) -> Option<Self> {
         loop {
             let Some(Some(NetworkTaskMessage { tx })) =
                 self.rx.recv().or_cancel(&ctx.cancellation_token).await
@@ -49,7 +49,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for NetworkTask<Conn> {
             let _ = tx.send(conn);
         }
 
-        self
+        Some(self)
     }
 
     async fn shutdown(self) -> Self {

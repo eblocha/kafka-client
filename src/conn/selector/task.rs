@@ -74,7 +74,7 @@ struct SelectorTask<
     /// Shared global cluster state. Contains the latest metadata and mapping of broker id to connection
     cluster: Arc<ArcSwap<Cluster<Task, TaskHandle>>>,
     /// Join set for running connection tasks. Used to detect failed connections
-    join_set: JoinSet<Task>,
+    join_set: JoinSet<Option<Task>>,
     /// Configuration
     config: KafkaConfig,
     /// Receiver for task commands
@@ -277,7 +277,11 @@ impl<
 
                     self.metadata_join_set.spawn(task.run());
                 }
-                Event::NodeDied(dead_task) => self.restart_if_needed(dead_task).await,
+                Event::NodeDied(dead_task) => {
+                    if let Some(dead_task) = dead_task {
+                        self.restart_if_needed(dead_task).await;
+                    }
+                }
             }
         }
 
@@ -306,7 +310,7 @@ impl<
 
         while let Some(result) = self.join_set.join_next().await {
             match result {
-                Ok(task) => {
+                Ok(Some(task)) => {
                     task.shutdown().await;
                 }
                 Err(join_err) if join_err.is_panic() => {
@@ -482,7 +486,8 @@ impl<
 
         while let Some(task_result) = self.join_set.join_next().await {
             let mut task = match task_result {
-                Ok(task) => task,
+                Ok(Some(task)) => task,
+                Ok(None) => continue,
                 Err(e) => {
                     tracing::error!("broker task stopped unexpectedly: {e}");
                     continue;

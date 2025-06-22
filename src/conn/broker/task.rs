@@ -47,13 +47,13 @@ pub struct BrokerTaskContext {
     pub cancellation_token: CancellationToken,
 }
 
-pub trait BrokerTask: Send + 'static {
+pub trait BrokerTask: Send + Sized + 'static {
     type PartitionMessage: Send;
 
     /// Run the task.
     ///
-    /// This must return itself to be able to reconfigure when a metadata refresh is received.
-    fn run(self, ctx: BrokerTaskContext) -> impl Future<Output = Self> + Send;
+    /// This should return [`Some`] if it is eligible to be restarted, or [`None`] if the selector should not restart it.
+    fn run(self, ctx: BrokerTaskContext) -> impl Future<Output = Option<Self>> + Send;
 
     /// Stop the connection
     fn shutdown(self) -> impl Future<Output = Self> + Send;
