@@ -29,6 +29,7 @@ use crate::{
     error::{ErrorCode, KafkaError},
     network::{handle::NetworkTaskHandle, task::NetworkTask},
     producer::{prepared_record::PreparedRecord, record::RecordMetadata},
+    proto::request,
 };
 
 pub(super) struct ProducerSendRecord {
@@ -177,11 +178,24 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             let acks = this.config.producer.required_acks;
             let timeout = this.config.producer.request_timeout;
 
-            let (request, partitions) = tokio::task::spawn_blocking(move || {
+            let spawn_result = tokio::task::spawn_blocking(move || {
                 create_request(chunk, compression, transactional_id, acks, timeout)
             })
-            .await
-            .unwrap();
+            .await;
+
+            let (request, partitions) = match spawn_result {
+                Ok(result) => result,
+                Err(e) => {
+                    if e.is_panic() {
+                        tracing::error!(
+                            broker_id = node.id,
+                            host = ?node.host,
+                            "panic while processing produce records {e}"
+                        );
+                    }
+                    return this.stop(connection_join_handle, ctx, &node).await;
+                }
+            };
 
             tracing::trace!(
                 broker_id = node.id,
