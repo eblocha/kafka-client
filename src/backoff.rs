@@ -1,11 +1,15 @@
 use std::time::Duration;
 
+use rand::Rng;
 use tokio::time::Instant;
 
-/// Compute an exponential backoff with full jitter
+const JITTER: f64 = 0.2;
+
+/// Compute an exponential backoff with jitter
 pub fn exponential_backoff(min: Duration, max: Duration, attempt: u32) -> Duration {
     let duration = std::cmp::min(max, min * 2u32.saturating_pow(attempt));
-    duration.mul_f64(rand::random())
+    // take a random value between 80% and 120% of the duration
+    duration.mul_f64(rand::thread_rng().gen_range((1.0 - JITTER)..(1.0 + JITTER)))
 }
 
 #[derive(Debug)]
