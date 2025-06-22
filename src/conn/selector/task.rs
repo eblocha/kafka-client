@@ -305,12 +305,16 @@ impl<
         }
 
         while let Some(result) = self.join_set.join_next().await {
-            if let Err(join_err) = result {
-                if join_err.is_panic() {
+            match result {
+                Ok(task) => {
+                    task.shutdown().await;
+                }
+                Err(join_err) if join_err.is_panic() => {
                     clean_shutdown = false;
                     tracing::error!("a broker connection task stopped with an error: {join_err}");
                 }
-            }
+                _ => {}
+            };
         }
 
         self.cluster.store(Arc::new(Cluster::default()));
