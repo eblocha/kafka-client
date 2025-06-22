@@ -1,12 +1,7 @@
-use std::{
-    io,
-    pin::Pin,
-    task::{Context, Poll},
-    time::Duration,
-};
+use std::{io, time::Duration};
 
 use bytes::{Bytes, BytesMut};
-use futures::{future::Either, Stream, StreamExt};
+use futures::StreamExt;
 use futures_batch::ChunksTimeoutStreamExt;
 use kafka_protocol::{
     messages::{
@@ -19,10 +14,7 @@ use kafka_protocol::{
     },
 };
 use rustc_hash::FxHashMap;
-use tokio::{
-    sync::{broadcast, oneshot},
-    task::JoinHandle,
-};
+use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
@@ -37,7 +29,6 @@ use crate::{
     error::{ErrorCode, KafkaError},
     network::{handle::NetworkTaskHandle, task::NetworkTask},
     producer::{prepared_record::PreparedRecord, record::RecordMetadata},
-    proto::request,
 };
 
 pub(super) struct ProducerSendRecord {

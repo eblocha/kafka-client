@@ -6,8 +6,7 @@ use std::{
 };
 
 use futures::FutureExt;
-use tokio::sync::{broadcast, oneshot};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::oneshot;
 
 use crate::{
     common::{BrokerHost, TopicPartition},
@@ -15,7 +14,6 @@ use crate::{
     conn::{
         connect::{Connect, Tcp},
         selector::SelectorTaskHandle,
-        KafkaChannelError,
     },
     error::{ErrorCode, KafkaError},
     producer::{
@@ -98,7 +96,7 @@ impl<Conn: Connect + Send + 'static, P: Partitioner> Producer<Conn, P> {
 
         let tp = TopicPartition::new(record.topic.clone(), partition);
 
-        let Some(tx_partition) = cluster.get_sender(&tp) else {
+        let Some(tx_partition) = cluster.partitions.get(&tp) else {
             return Err(ErrorCode::UnknownTopicOrPartition.into());
         };
 

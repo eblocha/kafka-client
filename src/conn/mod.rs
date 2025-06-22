@@ -6,6 +6,6 @@ pub mod selector;
 
 pub use channel::KafkaChannelError;
 pub use codec::{
-    records::{RecordBatchDecoder, RecordBatchEncoder},
+    records::RecordBatchEncoder,
     sendable::{DecodableResponse, Sendable},
 };

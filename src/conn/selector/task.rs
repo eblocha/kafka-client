@@ -31,16 +31,12 @@ use crate::{
         selector::{
             cluster::BrokerMapEntry,
             metadata::{MetadataRefreshContext, MetadataRefreshTask},
-            WeakCluster,
         },
     },
     error::{ErrorCode, KafkaError},
 };
 
-use super::{
-    cluster::{BrokerMap, Cluster},
-    metadata::MetadataRefreshResult,
-};
+use super::{cluster::Cluster, metadata::MetadataRefreshResult};
 
 /// A request to fetch metadata for a specific set of topics, or all topics
 pub struct RefreshMetadataRequest {
@@ -71,7 +67,7 @@ struct SelectorTask<
     Factory: BrokerTaskFactory<Conn, Task = Task, Handle = TaskHandle>,
 > {
     /// Shared global cluster state. Contains the latest metadata and mapping of broker id to connection
-    weak_cluster: Arc<ArcSwap<WeakCluster<Task, TaskHandle>>>,
+    shared_cluster: Arc<ArcSwap<Cluster<Task, TaskHandle>>>,
     /// Local cluster state to maintain the sender refcount
     cluster: Cluster<Task, TaskHandle>,
     /// Join set for running connection tasks. Used to detect failed connections
@@ -306,6 +302,8 @@ impl<
     async fn await_shutdown(mut self) {
         drop(self.cluster);
 
+        self.shared_cluster.store(Default::default());
+
         let mut clean_shutdown = true;
 
         self.metadata_join_set.abort_all();
@@ -456,8 +454,7 @@ impl<
             .metadata
             .update_with(metadata.clone(), Instant::now());
 
-        self.weak_cluster
-            .store(Arc::new(WeakCluster::clone_from(&self.cluster)));
+        self.shared_cluster.store(Arc::new(self.cluster.clone()));
     }
 
     async fn collect_current_tasks(
@@ -654,7 +651,7 @@ impl<
 /// config does not contain the broker id, the request will be dropped and the sender will receive an error indicating
 /// the connection is closed.
 pub(crate) struct SelectorTaskHandle<Task: BrokerTask, TaskHandle> {
-    pub cluster: Arc<ArcSwap<WeakCluster<Task, TaskHandle>>>,
+    pub cluster: Arc<ArcSwap<Cluster<Task, TaskHandle>>>,
     tx_topic_metadata: mpsc::Sender<RefreshMetadataRequest>,
     cancellation_token: CancellationToken,
     flush: CancellationToken,
@@ -704,7 +701,7 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
         // start the selector task to manage broker connections
         let mut selector_task = SelectorTask {
             cluster,
-            weak_cluster: Default::default(),
+            shared_cluster: Default::default(),
             rx: rx_topic_metadata,
             join_set: JoinSet::new(),
             config: config.clone(),
@@ -729,9 +726,9 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
             selector_task.join_set.spawn(task.run(ctx));
         }
 
-        let cluster = selector_task.weak_cluster.clone();
+        let cluster = selector_task.shared_cluster.clone();
 
-        cluster.store(Arc::new(WeakCluster::clone_from(&selector_task.cluster)));
+        cluster.store(Arc::new(selector_task.cluster.clone()));
 
         let join_handle = task_tracker.spawn(selector_task.run());
         task_tracker.close();
