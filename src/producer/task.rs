@@ -185,8 +185,12 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
                 biased;
                 () = ctx.cancellation_token.cancelled() => break,
                 () = tracker_wait => break,
-                Some(chunk) = chunks.next() => chunk,
-                else => break /* chunks are complete */,
+                res = chunks.next() => {
+                    match res {
+                        Some(chunk) => chunk,
+                        None => break
+                    }
+                },
             };
 
             let compression: Compression = this.config.producer.compression_codec.into();
