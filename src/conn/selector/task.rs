@@ -77,8 +77,8 @@ struct SelectorTask<
     join_set: JoinSet<Task>,
     /// Configuration
     config: KafkaConfig,
-    /// Receiver for requests to refresh metadata now
-    rx_topic_metadata: mpsc::Receiver<RefreshMetadataRequest>,
+    /// Receiver for task commands
+    rx: mpsc::Receiver<RefreshMetadataRequest>,
     /// Container to store metadata backoff state per-broker
     metadata_backoff: FxHashMap<BrokerHost, BackoffSession<()>>,
     /// Join set for the metadata refresh task. This should only have one task spawned at any time.
@@ -120,7 +120,7 @@ impl<
 
         loop {
             let allow_metadata_requests = self.metadata_join_set.is_empty();
-            let metadata_fut = async {
+            let command_fut = async {
                 // We only allow one metadata refresh task to run at a time.
                 if !allow_metadata_requests {
                     return None;
@@ -132,7 +132,7 @@ impl<
 
                 Some(tokio::select! {
                     _ = metadata_interval.tick() => None,
-                    Some(req) = self.rx_topic_metadata.recv() => Some(req),
+                    Some(req) = self.rx.recv() => Some(req),
                 })
             };
 
@@ -141,7 +141,7 @@ impl<
                 () = self.cancellation_token.cancelled() => break,
                 // An err here means it panicked. There's no way to recover the original context, so let it go.
                 Some(Ok(metadata_refreshed)) = self.metadata_join_set.join_next() => Event::RefreshComplete(metadata_refreshed),
-                Some(req) = metadata_fut => Event::RefreshStart(req),
+                Some(req) = command_fut => Event::RefreshStart(req),
                 Some(result) = self.join_set.join_next() => match result {
                     Ok(node_died) => Event::NodeDied(node_died),
                     Err(join_err) => {
@@ -285,6 +285,12 @@ impl<
             entry.cancellation_token.cancel();
         }
 
+        self.await_shutdown().await;
+
+        Ok(())
+    }
+
+    async fn await_shutdown(&mut self) {
         let mut clean_shutdown = true;
 
         self.metadata_join_set.abort_all();
@@ -314,8 +320,6 @@ impl<
         } else {
             tracing::warn!("shut down with errors");
         }
-
-        Ok(())
     }
 
     async fn update_metadata(&mut self, metadata: MetadataResponse) {
@@ -690,7 +694,7 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
         let mut selector_task = SelectorTask {
             hosts: BrokerMap::default(),
             cluster: Default::default(),
-            rx_topic_metadata,
+            rx: rx_topic_metadata,
             join_set: JoinSet::new(),
             config: config.clone(),
             metadata_backoff: Default::default(),

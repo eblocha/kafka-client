@@ -111,7 +111,7 @@ impl Run for ProduceRandom {
             producer
                 .produce(ProducerRecord {
                     headers: IndexMap::default(),
-                    key: Some(msg.clone()),
+                    key: None,
                     partition: None,
                     timestamp: None,
                     topic: topic.clone(),

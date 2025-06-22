@@ -1,4 +1,4 @@
-use std::io;
+use std::{io, time::Duration};
 
 use bytes::{Bytes, BytesMut};
 use kafka_protocol::{
@@ -7,7 +7,9 @@ use kafka_protocol::{
         ProduceRequest, ProduceResponse, TopicName, TransactionalId,
     },
     protocol::StrBytes,
-    records::{Record, RecordEncodeOptions, TimestampType, NO_PRODUCER_EPOCH, NO_PRODUCER_ID},
+    records::{
+        Compression, Record, RecordEncodeOptions, TimestampType, NO_PRODUCER_EPOCH, NO_PRODUCER_ID,
+    },
 };
 use rustc_hash::FxHashMap;
 use tokio::sync::oneshot;
@@ -98,8 +100,16 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
                 break;
             };
 
-            let (request, partitions) =
-                create_request(chunk, &self.config, transactional_id.clone());
+            let compression: Compression = self.config.producer.compression_codec.into();
+            let transactional_id = transactional_id.clone();
+            let acks = self.config.producer.required_acks;
+            let timeout = self.config.producer.request_timeout;
+
+            let (request, partitions) = tokio::task::spawn_blocking(move || {
+                create_request(chunk, compression, transactional_id, acks, timeout)
+            })
+            .await
+            .unwrap();
 
             tracing::trace!(
                 broker_id = node.id,
@@ -183,8 +193,10 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
 
 fn create_request(
     chunk: Vec<(TopicPartition, ProducerSendMessage)>,
-    config: &KafkaConfig,
+    compression: Compression,
     transactional_id: Option<TransactionalId>,
+    acks: i16,
+    timeout: Duration,
 ) -> (
     ProduceRequest,
     FxHashMap<TopicPartition, Vec<PreparedRecord>>,
@@ -224,7 +236,7 @@ fn create_request(
             records.iter().map(|ctx| &ctx.record),
             &RecordEncodeOptions {
                 version: 2,
-                compression: config.producer.compression_codec.into(),
+                compression,
             },
         ) {
             tracing::error!("failed to encode record batch for topic {tp}: {e}");
@@ -255,8 +267,8 @@ fn create_request(
         req.topic_data.push(data);
     }
 
-    req.acks = config.producer.required_acks;
-    req.timeout_ms = i32::try_from(config.producer.request_timeout.as_millis()).unwrap_or(i32::MAX);
+    req.acks = acks;
+    req.timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
     req.transactional_id = transactional_id;
 
     (req, partitions)
