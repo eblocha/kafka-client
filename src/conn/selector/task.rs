@@ -91,6 +91,8 @@ struct SelectorTask<
     connect: Conn,
     /// Used to spawn auxiliary tasks specific to a broker id.
     task_factory: Factory,
+    /// Token to flush partition queues then await shutdown
+    flush: CancellationToken,
 }
 
 enum Event<Task, TaskHandle> {
@@ -117,6 +119,7 @@ impl<
 
         let mut bootstrap_sucessful = false;
         let mut retry_metadata_immediately = false;
+        let mut flushing = false;
 
         loop {
             let allow_metadata_requests = self.metadata_join_set.is_empty();
@@ -139,6 +142,10 @@ impl<
             let event = tokio::select! {
                 biased;
                 () = self.cancellation_token.cancelled() => break,
+                () = self.flush.cancelled() => {
+                    flushing = true;
+                    break
+                },
                 // An err here means it panicked. There's no way to recover the original context, so let it go.
                 Some(Ok(metadata_refreshed)) = self.metadata_join_set.join_next() => Event::RefreshComplete(metadata_refreshed),
                 Some(req) = command_fut => Event::RefreshStart(req),
@@ -285,8 +292,8 @@ impl<
             }
         }
 
-        for entry in self.hosts.drain() {
-            entry.cancellation_token.cancel();
+        if !flushing {
+            self.cancellation_token.cancel();
         }
 
         self.await_shutdown().await;
@@ -295,6 +302,8 @@ impl<
     }
 
     async fn await_shutdown(&mut self) {
+        self.cluster.store(Arc::new(Cluster::default()));
+
         let mut clean_shutdown = true;
 
         self.metadata_join_set.abort_all();
@@ -321,8 +330,6 @@ impl<
             };
         }
 
-        self.cluster.store(Arc::new(Cluster::default()));
-
         if clean_shutdown {
             tracing::info!("shut down gracefully");
         } else {
@@ -346,7 +353,7 @@ impl<
         self.hosts.retain(|entry| {
             let keep = new_broker_ids.contains_key(&entry.node.id);
             // Stop the broker task but keep the connection alive
-            entry.cancellation_token.cancel();
+            entry.ctx.cancellation_token.cancel();
 
             if !keep {
                 tracing::debug!(
@@ -409,7 +416,7 @@ impl<
         }
 
         // Restart each task
-        for (broker_id, task) in tasks.drain() {
+        for (broker_id, task) in tasks {
             let Some(entry) = self.hosts.get_mut(&broker_id) else {
                 tracing::error!(
                     broker_id = broker_id,
@@ -420,7 +427,7 @@ impl<
             };
 
             let cancellation_token = self.cancellation_token.child_token();
-            entry.cancellation_token = cancellation_token.clone();
+            entry.ctx.cancellation_token = cancellation_token.clone();
             let node = task.get_node();
 
             tracing::debug!(
@@ -429,8 +436,7 @@ impl<
                 "starting broker task"
             );
 
-            self.join_set
-                .spawn(task.run(BrokerTaskContext { cancellation_token }));
+            self.join_set.spawn(task.run(entry.ctx.clone()));
         }
 
         let new_broker_hosts: FxHashSet<BrokerHost> =
@@ -575,7 +581,7 @@ impl<
         (tasks, partition_streams)
     }
 
-    fn create_new_task(&mut self, node: Node) -> (Task, CancellationToken) {
+    fn create_new_task(&mut self, node: Node) -> (Task, BrokerTaskContext) {
         tracing::debug!(
             broker_id = node.id,
             host = ?node.host,
@@ -587,14 +593,20 @@ impl<
         let (handle, task) = self.task_factory.new_task(connector);
 
         let cancellation_token = self.cancellation_token.child_token();
+        let flush = self.flush.child_token();
+
+        let ctx = BrokerTaskContext {
+            cancellation_token,
+            flush,
+        };
 
         self.hosts.insert(BrokerMapEntry {
             node,
             handle,
-            cancellation_token: cancellation_token.clone(),
+            ctx: ctx.clone(),
         });
 
-        (task, cancellation_token)
+        (task, ctx)
     }
 
     async fn restart_if_needed(&mut self, mut dead_task: Task) {
@@ -609,7 +621,7 @@ impl<
 
             // create new cancellation token to not immediately exit when the task starts
             let cancellation_token = self.cancellation_token.child_token();
-            entry.cancellation_token = cancellation_token.clone();
+            entry.ctx.cancellation_token = cancellation_token.clone();
 
             // if the host is different, stop the existing connection
             if task_node.host != entry.node.host {
@@ -623,9 +635,8 @@ impl<
 
             dead_task.set_node(entry.node.clone());
 
+            self.join_set.spawn(dead_task.run(entry.ctx.clone()));
             self.hosts.insert(entry);
-            self.join_set
-                .spawn(dead_task.run(BrokerTaskContext { cancellation_token }));
         }
     }
 }
@@ -644,22 +655,11 @@ impl<
 /// the connection is closed.
 pub(crate) struct SelectorTaskHandle<Task: BrokerTask, TaskHandle> {
     pub cluster: Arc<ArcSwap<Cluster<Task, TaskHandle>>>,
-    pub tx_topic_metadata: mpsc::Sender<RefreshMetadataRequest>,
+    tx_topic_metadata: mpsc::Sender<RefreshMetadataRequest>,
     cancellation_token: CancellationToken,
+    flush: CancellationToken,
     task_tracker: TaskTracker,
     config: KafkaConfig,
-}
-
-impl<Task: BrokerTask, TaskHandle> Clone for SelectorTaskHandle<Task, TaskHandle> {
-    fn clone(&self) -> Self {
-        Self {
-            cluster: self.cluster.clone(),
-            tx_topic_metadata: self.tx_topic_metadata.clone(),
-            cancellation_token: self.cancellation_token.clone(),
-            task_tracker: self.task_tracker.clone(),
-            config: self.config.clone(),
-        }
-    }
 }
 
 impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, TaskHandle> {
@@ -677,7 +677,6 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
     }
 
     pub async fn shutdown(&self) {
-        self.task_tracker.close();
         self.cancellation_token.cancel();
         self.await_shutdown().await;
     }
@@ -692,6 +691,7 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
         task_factory: Factory,
     ) -> Result<Self, KafkaError> {
         let cancellation_token = CancellationToken::new();
+        let flush = CancellationToken::new();
         let task_tracker = TaskTracker::new();
 
         let (tx_topic_metadata, rx_topic_metadata) =
@@ -712,6 +712,7 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
             bootstrap_signal: Some(tx_bootstrap),
             connect,
             task_factory,
+            flush: flush.clone(),
         };
 
         for (id, host) in bootstrap.iter().enumerate() {
@@ -721,11 +722,9 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
                 rack: None,
             };
 
-            let (task, cancellation_token) = selector_task.create_new_task(node);
+            let (task, ctx) = selector_task.create_new_task(node);
 
-            selector_task
-                .join_set
-                .spawn(task.run(BrokerTaskContext { cancellation_token }));
+            selector_task.join_set.spawn(task.run(ctx));
         }
 
         let cluster = selector_task.cluster.clone();
@@ -733,6 +732,7 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
         cluster.store(Arc::new(Cluster::new(selector_task.hosts.clone())));
 
         let join_handle = task_tracker.spawn(selector_task.run());
+        task_tracker.close();
 
         tokio::select! {
             // wait for bootstrap. Task will drop this channel when finished with bootstrap.
@@ -750,14 +750,15 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
             cancellation_token,
             task_tracker,
             config,
+            flush,
         })
     }
 
-    async fn refresh_metadata_for_topics(
-        &self,
-        topics: Option<Vec<MetadataRequestTopic>>,
-    ) -> Result<(), KafkaError> {
+    async fn refresh_metadata_for_topic(&self, topic: &TopicName) -> Result<(), KafkaError> {
         let (tx, rx) = oneshot::channel();
+        let topics = Some(vec![
+            MetadataRequestTopic::default().with_name(Some(topic.clone()))
+        ]);
 
         self.tx_topic_metadata
             .send(RefreshMetadataRequest { topics, tx })
@@ -771,21 +772,20 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
     pub async fn check_topic_metadata(&self, topic: &TopicName) -> Result<(), KafkaError> {
         let cluster = self.cluster.load();
         let Some(topic_result) = cluster.metadata.get_topic_metadata_by_name(topic) else {
-            self.refresh_metadata_for_topics(Some(vec![
-                MetadataRequestTopic::default().with_name(Some(topic.clone()))
-            ]))
-            .await?;
+            self.refresh_metadata_for_topic(topic).await?;
             return Ok(());
         };
 
         if topic_result.timestamp.elapsed() > self.config.metadata.max_age {
-            self.refresh_metadata_for_topics(Some(vec![
-                MetadataRequestTopic::default().with_name(Some(topic.clone()))
-            ]))
-            .await?;
+            self.refresh_metadata_for_topic(topic).await?;
         }
 
         Ok(())
+    }
+
+    pub async fn flush(self) {
+        self.flush.cancel();
+        self.await_shutdown().await;
     }
 }
 

@@ -45,6 +45,7 @@ pub type PartitionQueueMap<M> = StreamMap<TopicPartition, PartitionQueue<M>>;
 #[derive(Debug, Clone)]
 pub struct BrokerTaskContext {
     pub cancellation_token: CancellationToken,
+    pub flush: CancellationToken,
 }
 
 pub trait BrokerTask: Send + Sized + 'static {

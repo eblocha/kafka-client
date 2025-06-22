@@ -29,14 +29,6 @@ pub struct Admin<Conn: Connect + Send + 'static> {
     selector: SelectorTaskHandle<NetworkTask<Conn>, NetworkTaskHandle>,
 }
 
-impl<Conn: Connect + Send + 'static> Clone for Admin<Conn> {
-    fn clone(&self) -> Self {
-        Self {
-            selector: self.selector.clone(),
-        }
-    }
-}
-
 impl Admin<Tcp> {
     pub async fn try_new(
         bootstrap: &[BrokerHost],

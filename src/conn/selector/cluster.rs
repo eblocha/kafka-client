@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::{
     common::{Node, TopicPartition},
-    conn::broker::task::{BrokerTask, BrokerTaskHandle},
+    conn::broker::task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle},
     error::ErrorCode,
     util::UuidExt,
 };
@@ -25,7 +25,7 @@ use crate::{
 pub struct BrokerMapEntry<TaskHandle> {
     pub node: Node,
     pub(crate) handle: TaskHandle,
-    pub(crate) cancellation_token: CancellationToken,
+    pub(crate) ctx: BrokerTaskContext,
 }
 
 /// Mapping of broker id to [`BrokerMapEntry`].

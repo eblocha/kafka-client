@@ -31,16 +31,21 @@ impl<Conn: Connect + Send + 'static> BrokerTask for NetworkTask<Conn> {
 
     async fn run(mut self, ctx: BrokerTaskContext) -> Option<Self> {
         loop {
-            let Some(Some(NetworkTaskMessage { tx })) =
-                self.rx.recv().or_cancel(&ctx.cancellation_token).await
+            let Some(Some(Some(NetworkTaskMessage { tx }))) = self
+                .rx
+                .recv()
+                .or_cancel(&ctx.cancellation_token)
+                .or_cancel(&ctx.flush)
+                .await
             else {
                 break;
             };
 
-            let Some(conn) = self
+            let Some(Some(conn)) = self
                 .connector
                 .connect()
                 .or_cancel(&ctx.cancellation_token)
+                .or_cancel(&ctx.flush)
                 .await
             else {
                 break;
@@ -53,10 +58,8 @@ impl<Conn: Connect + Send + 'static> BrokerTask for NetworkTask<Conn> {
     }
 
     async fn shutdown(self) -> Self {
-        let connector = self.connector.shutdown().await;
-
         Self {
-            connector,
+            connector: self.connector.shutdown().await,
             rx: self.rx,
             partitions: self.partitions,
         }

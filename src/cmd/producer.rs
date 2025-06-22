@@ -126,7 +126,7 @@ impl Run for ProduceRandom {
             bar.inc(u64_usize);
         }
 
-        // producer.flush_and_shutdown().await;
+        producer.flush_and_shutdown().await;
 
         bar.finish();
 
@@ -189,7 +189,7 @@ impl Run for ProduceFromFile {
 
         let result = Self::run_inner(&producer, file, self.topic).await;
 
-        // producer.flush_and_shutdown().await;
+        producer.flush_and_shutdown().await;
 
         let finish = now.elapsed();
 

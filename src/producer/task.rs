@@ -1,7 +1,13 @@
-use std::{io, time::Duration};
+use std::{
+    io,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
 
 use bytes::{Bytes, BytesMut};
-use futures::future::Either;
+use futures::{future::Either, Stream, StreamExt};
+use futures_batch::ChunksTimeoutStreamExt;
 use kafka_protocol::{
     messages::{
         produce_request::{PartitionProduceData, TopicProduceData},
@@ -13,8 +19,10 @@ use kafka_protocol::{
     },
 };
 use rustc_hash::FxHashMap;
-use tokio::{sync::oneshot, task::JoinHandle};
-use tokio_stream::StreamExt;
+use tokio::{
+    sync::{broadcast, oneshot},
+    task::JoinHandle,
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
@@ -53,39 +61,45 @@ pub(super) struct ProducerTask<Conn> {
 }
 
 impl<Conn> ProducerTask<Conn> {
-    fn split(self) -> (NetworkTask<Conn>, PartialProducerTask) {
+    fn split(
+        self,
+    ) -> (
+        NetworkTask<Conn>,
+        PartitionQueueMap<ProducerSendMessage>,
+        PartialProducerTask,
+    ) {
         (
             self.inner_task,
+            self.partitions,
             PartialProducerTask {
-                partitions: self.partitions,
                 inner_handle: self.inner_handle,
                 config: self.config,
             },
         )
     }
 
-    async fn run_empty(self, ctx: BrokerTaskContext) -> Option<Self>
+    async fn run_empty(mut self, ctx: BrokerTaskContext) -> Option<Self>
     where
         Conn: Connect + Send + 'static,
     {
         let node = self.inner_task.get_node();
+
         tracing::debug!(
             broker_id = node.id,
             host = ?node.host,
             "running as network task as this broker is not assigned any partitions"
         );
-        let inner_task = self.inner_task.run(ctx).await?;
-        return Some(Self {
+
+        Some(Self {
             partitions: self.partitions,
             inner_handle: self.inner_handle,
-            inner_task,
+            inner_task: self.inner_task.run(ctx).await?,
             config: self.config,
-        });
+        })
     }
 }
 
 struct PartialProducerTask {
-    partitions: PartitionQueueMap<ProducerSendMessage>,
     inner_handle: NetworkTaskHandle,
     config: KafkaConfig,
 }
@@ -93,6 +107,7 @@ struct PartialProducerTask {
 impl PartialProducerTask {
     async fn stop<Conn>(
         self,
+        partitions: PartitionQueueMap<ProducerSendMessage>,
         join_handle: JoinHandle<Option<NetworkTask<Conn>>>,
         ctx: BrokerTaskContext,
         node: &Node,
@@ -115,12 +130,12 @@ impl PartialProducerTask {
             }
         };
 
-        return Some(ProducerTask {
-            partitions: self.partitions,
+        Some(ProducerTask {
+            partitions,
             inner_handle: self.inner_handle,
             inner_task,
             config: self.config,
-        });
+        })
     }
 }
 
@@ -132,7 +147,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             return self.run_empty(ctx).await;
         }
 
-        let (inner_task, mut this) = self.split();
+        let (inner_task, partitions, mut this) = self.split();
         let node = inner_task.get_node().clone();
 
         tracing::debug!(
@@ -142,15 +157,18 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
         );
 
         let network_task_tracker = TaskTracker::new();
-        let connection_join_handle = network_task_tracker.spawn(inner_task.run(ctx.clone()));
+        let connection_join_handle =
+            network_task_tracker.spawn(inner_task.run(BrokerTaskContext {
+                cancellation_token: ctx.cancellation_token.clone(),
+                // We don't want the flush to propagate to the network task since we still need it to send messages
+                flush: CancellationToken::new(),
+            }));
         network_task_tracker.close();
 
-        let chunks = (&mut this.partitions).chunks_timeout(
+        let mut chunks = partitions.chunks_timeout(
             this.config.producer.batch_count,
             this.config.producer.linger,
         );
-
-        tokio::pin!(chunks);
 
         let transactional_id = this
             .config
@@ -166,11 +184,9 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             let chunk = tokio::select! {
                 biased;
                 () = ctx.cancellation_token.cancelled() => break,
-                () = tracker_wait => {
-                    return this.stop(connection_join_handle, ctx, &node).await;
-                }
+                () = tracker_wait => break,
                 Some(chunk) = chunks.next() => chunk,
-                else => break,
+                else => break /* chunks are complete */,
             };
 
             let compression: Compression = this.config.producer.compression_codec.into();
@@ -193,7 +209,9 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
                             "panic while processing produce records {e}"
                         );
                     }
-                    return this.stop(connection_join_handle, ctx, &node).await;
+                    return this
+                        .stop(chunks.into_inner(), connection_join_handle, ctx, &node)
+                        .await;
                 }
             };
 
@@ -241,16 +259,15 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             }
         }
 
-        this.stop(connection_join_handle, ctx, &node).await
+        this.stop(chunks.into_inner(), connection_join_handle, ctx, &node)
+            .await
     }
 
     async fn shutdown(self) -> Self {
-        let connection_task = self.inner_task.shutdown().await;
-
         Self {
             partitions: self.partitions,
             inner_handle: self.inner_handle,
-            inner_task: connection_task,
+            inner_task: self.inner_task.shutdown().await,
             config: self.config,
         }
     }

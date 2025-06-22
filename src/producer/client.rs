@@ -6,7 +6,8 @@ use std::{
 };
 
 use futures::FutureExt;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     common::{BrokerHost, TopicPartition},
@@ -46,16 +47,6 @@ pub struct Producer<Conn: Connect + Send + 'static, P> {
     selector: SelectorTaskHandle<ProducerTask<Conn>, ProducerTaskHandle>,
     partitioner: P,
     config: KafkaConfig,
-}
-
-impl<Conn: Connect + Send + 'static, P: Clone> Clone for Producer<Conn, P> {
-    fn clone(&self) -> Self {
-        Self {
-            selector: self.selector.clone(),
-            partitioner: self.partitioner.clone(),
-            config: self.config.clone(),
-        }
-    }
 }
 
 impl Producer<Tcp, KeyHashPartitioner> {
@@ -134,5 +125,9 @@ impl<Conn: Connect + Send + 'static, P: Partitioner> Producer<Conn, P> {
             .await?;
 
         Ok(ProduceFuture { rx })
+    }
+
+    pub async fn flush_and_shutdown(self) {
+        self.selector.flush().await;
     }
 }
