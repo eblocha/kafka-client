@@ -94,12 +94,26 @@ impl PartialProducerTask {
         self,
         join_handle: JoinHandle<Option<NetworkTask<Conn>>>,
         ctx: BrokerTaskContext,
+        node: &Node,
     ) -> Option<ProducerTask<Conn>> {
         ctx.cancellation_token.cancel();
 
-        // TODO any way to handle this more gracefully?
-        // This is err if the task is aborted forcefully, or it panics
-        let inner_task = join_handle.await.unwrap()?;
+        let inner_task_result = join_handle.await;
+
+        let inner_task = match inner_task_result {
+            Ok(task) => task?,
+            Err(e) => {
+                if e.is_panic() {
+                    tracing::error!(
+                        broker_id = node.id,
+                        host = ?node.host,
+                        "network task panicked {e}"
+                    );
+                }
+                return None;
+            }
+        };
+
         return Some(ProducerTask {
             partitions: self.partitions,
             inner_handle: self.inner_handle,
@@ -152,7 +166,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
                 biased;
                 () = ctx.cancellation_token.cancelled() => break,
                 () = tracker_wait => {
-                    return this.stop(connection_join_handle, ctx).await;
+                    return this.stop(connection_join_handle, ctx, &node).await;
                 }
                 Some(chunk) = chunks.next() => chunk,
                 else => break,
@@ -198,7 +212,11 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
                 }
                 Ok(Some(response)) => handle_produce_response(response, partitions),
                 Err(e) => {
-                    tracing::error!("failed to send produce request: {e}");
+                    tracing::error!(
+                        broker_id = node.id,
+                        host = ?node.host,
+                        "failed to send produce request: {e}"
+                    );
 
                     for (_, records) in partitions {
                         for record in records {
@@ -209,7 +227,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             }
         }
 
-        this.stop(connection_join_handle, ctx).await
+        this.stop(connection_join_handle, ctx, &node).await
     }
 
     async fn shutdown(self) -> Self {
