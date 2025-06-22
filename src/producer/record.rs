@@ -10,3 +10,8 @@ pub struct ProducerRecord {
     pub value: Option<Bytes>,
     pub headers: indexmap::IndexMap<StrBytes, Option<Bytes>>,
 }
+
+#[derive(Debug, Clone)]
+pub struct RecordMetadata {
+    pub base_offset: i64,
+}

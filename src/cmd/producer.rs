@@ -18,7 +18,11 @@ use kafka_client::{
     config::KafkaConfig,
     connect::Tcp,
     error::KafkaError,
-    producer::{client::Producer, partitioner::KeyHashPartitioner, record::ProducerRecord},
+    producer::{
+        client::Producer,
+        partitioner::KeyHashPartitioner,
+        record::{ProducerRecord, RecordMetadata},
+    },
 };
 
 use super::Run;
@@ -144,7 +148,7 @@ impl ProduceFromFile {
         producer: &Producer<Tcp, KeyHashPartitioner>,
         file: File,
         topic: String,
-    ) -> anyhow::Result<JoinSet<Result<(), KafkaError>>> {
+    ) -> anyhow::Result<JoinSet<Result<RecordMetadata, KafkaError>>> {
         let mut reader = io::BufReader::new(file).lines();
 
         let topic = TopicName(StrBytes::from_string(topic));

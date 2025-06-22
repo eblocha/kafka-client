@@ -26,7 +26,7 @@ use crate::{
     },
     error::{ErrorCode, KafkaError},
     network::{handle::NetworkTaskHandle, task::NetworkTask},
-    producer::prepared_record::PreparedRecord,
+    producer::{prepared_record::PreparedRecord, record::RecordMetadata},
 };
 
 pub(super) struct ProducerSendRecord {
@@ -39,7 +39,7 @@ pub(super) struct ProducerSendRecord {
 
 pub(super) struct ProducerSendMessage {
     pub record: ProducerSendRecord,
-    pub tx: oneshot::Sender<Result<(), KafkaError>>,
+    pub tx: oneshot::Sender<Result<RecordMetadata, KafkaError>>,
 }
 
 pub(super) struct ProducerTask<Conn> {
@@ -47,6 +47,18 @@ pub(super) struct ProducerTask<Conn> {
     pub(super) inner_handle: NetworkTaskHandle,
     pub(super) inner_task: NetworkTask<Conn>,
     pub(super) config: KafkaConfig,
+}
+
+async fn send_isomorphic<Handle: BrokerTaskHandle>(
+    handle: &Handle,
+    request: ProduceRequest,
+) -> Result<Option<ProduceResponse>, KafkaError> {
+    if request.acks == 0 {
+        handle.send_and_forget(request).await?;
+        Ok(None)
+    } else {
+        Ok(Some(handle.send(request).await?))
+    }
 }
 
 impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
@@ -117,9 +129,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
                 "sending produce request"
             );
 
-            let Some(response) = self
-                .inner_handle
-                .send(request)
+            let Some(response) = send_isomorphic(&self.inner_handle, request)
                 .or_cancel(&ctx.cancellation_token)
                 .await
             else {
@@ -133,14 +143,14 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             );
 
             match response {
-                Ok(_) => {
+                Ok(None) => {
                     for (_, records) in partitions {
                         for record in records {
-                            let _ = record.tx.send(Ok(()));
+                            let _ = record.tx.send(Ok(RecordMetadata { base_offset: -1 }));
                         }
                     }
                 }
-                // Ok(response) => handle_produce_response(response, partitions),
+                Ok(Some(response)) => handle_produce_response(response, partitions),
                 Err(e) => {
                     tracing::error!("failed to send produce request: {e}");
 
@@ -300,7 +310,9 @@ fn handle_produce_response(
             }
 
             for ctx in contexts {
-                let _ = ctx.tx.send(Ok(()));
+                let _ = ctx.tx.send(Ok(RecordMetadata {
+                    base_offset: part_response.base_offset,
+                }));
             }
         }
     }

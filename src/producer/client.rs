@@ -19,20 +19,20 @@ use crate::{
     producer::{
         handle::{ProducerTaskFactory, ProducerTaskHandle},
         partitioner::{KeyHashPartitioner, Partitioner},
-        record::ProducerRecord,
+        record::{ProducerRecord, RecordMetadata},
         task::{ProducerSendMessage, ProducerSendRecord, ProducerTask},
     },
 };
 
 /// A future that resolves to [`RecordMetadata`] once the server has acknowledged the record.
 pub struct ProduceFuture {
-    rx: oneshot::Receiver<Result<(), KafkaError>>,
+    rx: oneshot::Receiver<Result<RecordMetadata, KafkaError>>,
 }
 
 impl Unpin for ProduceFuture {}
 
 impl Future for ProduceFuture {
-    type Output = Result<(), KafkaError>;
+    type Output = Result<RecordMetadata, KafkaError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.rx.poll_unpin(cx) {
