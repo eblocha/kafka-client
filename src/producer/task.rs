@@ -307,7 +307,7 @@ fn create_request(
     let mut partitions = FxHashMap::<TopicPartition, Vec<PreparedRecord>>::default();
 
     for (tp, msg) in chunk {
-        let records = partitions.entry(tp.clone()).or_default();
+        let records = partitions.entry(tp).or_default();
 
         let record = Record {
             transactional: false,
