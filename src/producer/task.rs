@@ -1,6 +1,7 @@
 use std::{io, time::Duration};
 
 use bytes::{Bytes, BytesMut};
+use futures::future::Either;
 use kafka_protocol::{
     messages::{
         produce_request::{PartitionProduceData, TopicProduceData},
@@ -14,6 +15,7 @@ use kafka_protocol::{
 use rustc_hash::FxHashMap;
 use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
+use tokio_util::task::TaskTracker;
 
 use crate::{
     cancel::OrCancelled,
@@ -88,7 +90,9 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             "started producer task"
         );
 
-        let connection_join_handle = tokio::spawn(self.inner_task.run(ctx.clone()));
+        let network_task_tracker = TaskTracker::new();
+        let connection_join_handle = network_task_tracker.spawn(self.inner_task.run(ctx.clone()));
+        network_task_tracker.close();
 
         let chunks = (&mut self.partitions).chunks_timeout(
             self.config.producer.batch_count,
@@ -106,10 +110,22 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             .map(TransactionalId);
 
         loop {
-            // TODO stop if connection task stops
+            let tracker_wait = network_task_tracker.wait();
 
-            let Some(Some(chunk)) = chunks.next().or_cancel(&ctx.cancellation_token).await else {
-                break;
+            let chunk = tokio::select! {
+                biased;
+                () = ctx.cancellation_token.cancelled() => break,
+                () = tracker_wait => {
+                    ctx.cancellation_token.cancel();
+                    return Self {
+                        partitions: self.partitions,
+                        inner_handle: self.inner_handle,
+                        inner_task: connection_join_handle.await.unwrap(),
+                        config: self.config,
+                    };
+                }
+                Some(chunk) = chunks.next() => chunk,
+                else => break,
             };
 
             let compression: Compression = self.config.producer.compression_codec.into();
