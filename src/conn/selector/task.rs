@@ -31,6 +31,7 @@ use crate::{
         selector::{
             cluster::BrokerMapEntry,
             metadata::{MetadataRefreshContext, MetadataRefreshTask},
+            WeakCluster,
         },
     },
     error::{ErrorCode, KafkaError},
@@ -69,10 +70,10 @@ struct SelectorTask<
     TaskHandle,
     Factory: BrokerTaskFactory<Conn, Task = Task, Handle = TaskHandle>,
 > {
-    /// Mapping of broker id to its host
-    hosts: BrokerMap<TaskHandle>,
     /// Shared global cluster state. Contains the latest metadata and mapping of broker id to connection
-    cluster: Arc<ArcSwap<Cluster<Task, TaskHandle>>>,
+    weak_cluster: Arc<ArcSwap<WeakCluster<Task, TaskHandle>>>,
+    /// Local cluster state to maintain the sender refcount
+    cluster: Cluster<Task, TaskHandle>,
     /// Join set for running connection tasks. Used to detect failed connections
     join_set: JoinSet<Option<Task>>,
     /// Configuration
@@ -143,8 +144,9 @@ impl<
                 biased;
                 () = self.cancellation_token.cancelled() => break,
                 () = self.flush.cancelled() => {
+                    tracing::debug!("flushing broker tasks");
                     flushing = true;
-                    break
+                    break;
                 },
                 // An err here means it panicked. There's no way to recover the original context, so let it go.
                 Some(Ok(metadata_refreshed)) = self.metadata_join_set.join_next() => Event::RefreshComplete(metadata_refreshed),
@@ -178,7 +180,7 @@ impl<
                                 broker_id = ctx.entry.node.id,
                                 host = ?ctx.entry.node.host,
                                 "successfully updated metadata {:?}",
-                                self.hosts.list_nodes()
+                                self.cluster.brokers.list_nodes()
                             );
 
                             ctx.backoff.success();
@@ -252,8 +254,7 @@ impl<
                     }
                 }
                 Event::RefreshStart(req) => {
-                    let Some(entry_for_refresh) = self.cluster.load().brokers.get_best_connection()
-                    else {
+                    let Some(entry_for_refresh) = self.cluster.brokers.get_best_connection() else {
                         tracing::error!("no connections available for metadata refresh!");
                         break;
                     };
@@ -264,9 +265,10 @@ impl<
                         "attempting to refresh metadata"
                     );
 
-                    let topics = req.as_ref().map(|r| r.topics.clone()).unwrap_or_else(|| {
-                        Some(self.cluster.load().metadata.create_topics_for_refresh())
-                    });
+                    let topics = req
+                        .as_ref()
+                        .map(|r| r.topics.clone())
+                        .unwrap_or_else(|| Some(self.cluster.metadata.create_topics_for_refresh()));
 
                     let backoff = self
                         .metadata_backoff
@@ -301,8 +303,8 @@ impl<
         Ok(())
     }
 
-    async fn await_shutdown(&mut self) {
-        self.cluster.store(Arc::new(Cluster::default()));
+    async fn await_shutdown(mut self) {
+        drop(self.cluster);
 
         let mut clean_shutdown = true;
 
@@ -350,7 +352,7 @@ impl<
             .collect();
 
         // Remove nodes that are not in the cluster
-        self.hosts.retain(|entry| {
+        self.cluster.brokers.retain(|entry| {
             let keep = new_broker_ids.contains_key(&entry.node.id);
             // Stop the broker task but keep the connection alive
             entry.ctx.cancellation_token.cancel();
@@ -368,8 +370,6 @@ impl<
 
         let (mut tasks, mut partition_streams) =
             self.collect_current_tasks(&new_broker_ids, &metadata).await;
-
-        let mut new_state = self.cluster.load().as_ref().clone();
 
         // Assign topic partitions
         for topic in &metadata.topics {
@@ -401,7 +401,7 @@ impl<
                     Some(s) => s,
                     None => {
                         let (tx, rx) = mpsc::channel(self.config.producer.batch_count);
-                        new_state.partitions.insert(tp.clone(), tx);
+                        self.cluster.partitions.insert(tp.clone(), tx);
                         PartitionQueue::new(rx)
                     }
                 };
@@ -417,7 +417,7 @@ impl<
 
         // Restart each task
         for (broker_id, task) in tasks {
-            let Some(entry) = self.hosts.get_mut(&broker_id) else {
+            let Some(entry) = self.cluster.brokers.get_mut(&broker_id) else {
                 tracing::error!(
                     broker_id = broker_id,
                     "detected a broker task with no handle"
@@ -449,15 +449,15 @@ impl<
         tracing::debug!("removing {} partitions", partition_streams.len());
         // remove partition queues which no longer exist
         for (tp, _) in partition_streams.drain() {
-            new_state.partitions.remove(&tp);
+            self.cluster.partitions.remove(&tp);
         }
 
-        new_state
+        self.cluster
             .metadata
             .update_with(metadata.clone(), Instant::now());
-        new_state.brokers = self.hosts.clone();
 
-        self.cluster.store(Arc::new(new_state));
+        self.weak_cluster
+            .store(Arc::new(WeakCluster::clone_from(&self.cluster)));
     }
 
     async fn collect_current_tasks(
@@ -600,7 +600,7 @@ impl<
             flush,
         };
 
-        self.hosts.insert(BrokerMapEntry {
+        self.cluster.brokers.insert(BrokerMapEntry {
             node,
             handle,
             ctx: ctx.clone(),
@@ -612,7 +612,7 @@ impl<
     async fn restart_if_needed(&mut self, mut dead_task: Task) {
         let task_node = dead_task.get_node();
 
-        if let Some(mut entry) = self.hosts.remove(&task_node.id) {
+        if let Some(mut entry) = self.cluster.brokers.remove(&task_node.id) {
             tracing::debug!(
                 broker_id = task_node.id,
                 host = ?entry.node.host,
@@ -636,7 +636,7 @@ impl<
             dead_task.set_node(entry.node.clone());
 
             self.join_set.spawn(dead_task.run(entry.ctx.clone()));
-            self.hosts.insert(entry);
+            self.cluster.brokers.insert(entry);
         }
     }
 }
@@ -654,7 +654,7 @@ impl<
 /// config does not contain the broker id, the request will be dropped and the sender will receive an error indicating
 /// the connection is closed.
 pub(crate) struct SelectorTaskHandle<Task: BrokerTask, TaskHandle> {
-    pub cluster: Arc<ArcSwap<Cluster<Task, TaskHandle>>>,
+    pub cluster: Arc<ArcSwap<WeakCluster<Task, TaskHandle>>>,
     tx_topic_metadata: mpsc::Sender<RefreshMetadataRequest>,
     cancellation_token: CancellationToken,
     flush: CancellationToken,
@@ -699,10 +699,12 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
 
         let (tx_bootstrap, rx_bootstrap) = oneshot::channel();
 
+        let cluster = Cluster::default();
+
         // start the selector task to manage broker connections
         let mut selector_task = SelectorTask {
-            hosts: BrokerMap::default(),
-            cluster: Default::default(),
+            cluster,
+            weak_cluster: Default::default(),
             rx: rx_topic_metadata,
             join_set: JoinSet::new(),
             config: config.clone(),
@@ -727,9 +729,9 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
             selector_task.join_set.spawn(task.run(ctx));
         }
 
-        let cluster = selector_task.cluster.clone();
+        let cluster = selector_task.weak_cluster.clone();
 
-        cluster.store(Arc::new(Cluster::new(selector_task.hosts.clone())));
+        cluster.store(Arc::new(WeakCluster::clone_from(&selector_task.cluster)));
 
         let join_handle = task_tracker.spawn(selector_task.run());
         task_tracker.close();

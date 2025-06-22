@@ -436,6 +436,55 @@ impl<Task: BrokerTask, TaskHandle> Cluster<Task, TaskHandle> {
     }
 }
 
+#[derive(Debug)]
+pub struct WeakCluster<Task: BrokerTask, TaskHandle> {
+    /// Mapping of all currently-known broker nodes.
+    pub brokers: BrokerMap<TaskHandle>,
+    /// The cluster's metadata.
+    pub metadata: ClusterMetadata,
+    partitions: FxHashMap<TopicPartition, mpsc::WeakSender<Task::PartitionMessage>>,
+}
+
+impl<Task: BrokerTask, TaskHandle: Clone> WeakCluster<Task, TaskHandle> {
+    pub fn clone_from(cluster: &Cluster<Task, TaskHandle>) -> Self {
+        let partitions = cluster
+            .partitions
+            .iter()
+            .map(|(tp, tx)| (tp.clone(), tx.downgrade()))
+            .collect();
+
+        Self {
+            brokers: cluster.brokers.clone(),
+            partitions,
+            metadata: cluster.metadata.clone(),
+        }
+    }
+
+    pub fn get_sender(&self, tp: &TopicPartition) -> Option<mpsc::Sender<Task::PartitionMessage>> {
+        self.partitions.get(tp).and_then(|tx| tx.upgrade())
+    }
+}
+
+impl<Task: BrokerTask, TaskHandle: Clone> Clone for WeakCluster<Task, TaskHandle> {
+    fn clone(&self) -> Self {
+        Self {
+            brokers: self.brokers.clone(),
+            partitions: self.partitions.clone(),
+            metadata: self.metadata.clone(),
+        }
+    }
+}
+
+impl<Task: BrokerTask, TaskHandle> Default for WeakCluster<Task, TaskHandle> {
+    fn default() -> Self {
+        Self {
+            brokers: Default::default(),
+            partitions: Default::default(),
+            metadata: Default::default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::time::Instant;

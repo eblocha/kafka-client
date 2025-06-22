@@ -15,6 +15,7 @@ use crate::{
     conn::{
         connect::{Connect, Tcp},
         selector::SelectorTaskHandle,
+        KafkaChannelError,
     },
     error::{ErrorCode, KafkaError},
     producer::{
@@ -97,7 +98,7 @@ impl<Conn: Connect + Send + 'static, P: Partitioner> Producer<Conn, P> {
 
         let tp = TopicPartition::new(record.topic.clone(), partition);
 
-        let Some(tx_partition) = cluster.partitions.get(&tp) else {
+        let Some(tx_partition) = cluster.get_sender(&tp) else {
             return Err(ErrorCode::UnknownTopicOrPartition.into());
         };
 
