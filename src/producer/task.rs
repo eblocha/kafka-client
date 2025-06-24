@@ -1,8 +1,7 @@
 use std::{io, time::Duration};
 
 use bytes::{Bytes, BytesMut};
-use futures::StreamExt;
-use futures_batch::ChunksTimeoutStreamExt;
+use futures::StreamExt as FuturesStreamExt;
 use kafka_protocol::{
     messages::{
         produce_request::{PartitionProduceData, TopicProduceData},
@@ -14,7 +13,10 @@ use kafka_protocol::{
     },
 };
 use rustc_hash::FxHashMap;
-use tokio::{sync::oneshot, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
@@ -22,13 +24,16 @@ use crate::{
     common::{Node, TopicPartition},
     config::KafkaConfig,
     conn::{
-        broker::task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle, PartitionQueueMap},
+        broker::task::{
+            BrokerTask, BrokerTaskContext, BrokerTaskHandle, PartitionQueue, PartitionQueueMap,
+        },
         connect::Connect,
         RecordBatchEncoder,
     },
     error::{ErrorCode, KafkaError},
     network::{handle::NetworkTaskHandle, task::NetworkTask},
     producer::{prepared_record::PreparedRecord, record::RecordMetadata},
+    util::StreamExt,
 };
 
 pub(super) struct ProducerSendRecord {
@@ -42,6 +47,21 @@ pub(super) struct ProducerSendRecord {
 pub(super) struct ProducerSendMessage {
     pub record: ProducerSendRecord,
     pub tx: oneshot::Sender<Result<RecordMetadata, KafkaError>>,
+}
+
+impl From<PreparedRecord> for ProducerSendMessage {
+    fn from(value: PreparedRecord) -> Self {
+        ProducerSendMessage {
+            record: ProducerSendRecord {
+                timestamp: value.record.timestamp,
+                key: value.record.key,
+                value: value.record.value,
+                headers: value.record.headers,
+                leader_epoch: value.record.partition_leader_epoch,
+            },
+            tx: value.tx,
+        }
+    }
 }
 
 pub(super) struct ProducerTask<Conn> {
@@ -138,7 +158,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             return self.run_empty(ctx).await;
         }
 
-        let (inner_task, partitions, mut this) = self.split();
+        let (inner_task, mut partitions, mut this) = self.split();
         let node = inner_task.get_node().clone();
 
         tracing::debug!(
@@ -152,14 +172,18 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             network_task_tracker.spawn(inner_task.run(BrokerTaskContext {
                 cancellation_token: ctx.cancellation_token.clone(),
                 // We don't want the flush to propagate to the network task since we still need it to send messages
+                // TODO this is coupled to the network task, since it assumes cancel and flush do the same thing.
+                // ideally we should call flush before returning instead of cancel if this task is flushed
                 flush: CancellationToken::new(),
             }));
         network_task_tracker.close();
 
-        let mut chunks = partitions.chunks_timeout(
+        let mut chunks = (&mut partitions).chunks_timeout(
             this.config.producer.batch_count,
             this.config.producer.linger,
         );
+
+        tokio::pin!(chunks);
 
         let transactional_id = this
             .config
@@ -169,10 +193,12 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             .map(StrBytes::from_string)
             .map(TransactionalId);
 
+        let mut chunk = Vec::with_capacity(this.config.producer.batch_count);
+
         loop {
             let tracker_wait = network_task_tracker.wait();
 
-            let chunk = tokio::select! {
+            tokio::select! {
                 biased;
                 () = ctx.cancellation_token.cancelled() => break,
                 () = tracker_wait => break,
@@ -188,27 +214,14 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             let transactional_id = transactional_id.clone();
             let acks = this.config.producer.required_acks;
             let timeout = this.config.producer.request_timeout;
+            chunks.as_mut().take(&mut chunk);
+            let drain = chunk.drain(..);
 
-            let spawn_result = tokio::task::spawn_blocking(move || {
-                create_request(chunk, compression, transactional_id, acks, timeout)
-            })
-            .await;
-
-            let (request, partitions) = match spawn_result {
-                Ok(result) => result,
-                Err(e) => {
-                    if e.is_panic() {
-                        tracing::error!(
-                            broker_id = node.id,
-                            host = ?node.host,
-                            "panic while processing produce records {e}"
-                        );
-                    }
-                    return this
-                        .stop(chunks.into_inner(), connection_join_handle, ctx, &node)
-                        .await;
-                }
-            };
+            // There's a perf tradeoff here between the block_in_place overhead and the vec allocation overhead.
+            // Not sure which is better.
+            let (request, partition_map) = tokio::task::block_in_place(|| {
+                create_request(drain, compression, transactional_id, acks, timeout)
+            });
 
             tracing::trace!(
                 broker_id = node.id,
@@ -220,6 +233,17 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
                 .or_cancel(&ctx.cancellation_token)
                 .await
             else {
+                // Refill the chunk with the partition map data so it gets re-sent.
+                // This can result in duplicate messages sent, but expedites shutdown.
+                // The idempotent producer prevents duplicates broker-side.
+                for (tp, records) in partition_map {
+                    queue_retry_partition(
+                        tp,
+                        records,
+                        &mut partitions,
+                        this.config.producer.batch_count,
+                    );
+                }
                 break;
             };
 
@@ -231,13 +255,13 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
 
             match response {
                 Ok(None) => {
-                    for (_, records) in partitions {
+                    for (_, records) in partition_map {
                         for record in records {
                             let _ = record.tx.send(Ok(RecordMetadata { base_offset: -1 }));
                         }
                     }
                 }
-                Ok(Some(response)) => handle_produce_response(response, partitions),
+                Ok(Some(response)) => handle_produce_response(response, partition_map),
                 Err(e) => {
                     tracing::error!(
                         broker_id = node.id,
@@ -245,7 +269,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
                         "failed to send produce request: {e}"
                     );
 
-                    for (_, records) in partitions {
+                    for (_, records) in partition_map {
                         for record in records {
                             let _ = record.tx.send(Err(e.representative_clone()));
                         }
@@ -254,7 +278,10 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             }
         }
 
-        this.stop(chunks.into_inner(), connection_join_handle, ctx, &node)
+        // Fill partition retry buffers with the chunk on shutdown
+        queue_retry_chunk(chunk, &mut partitions, this.config.producer.batch_count);
+
+        this.stop(partitions, connection_join_handle, ctx, &node)
             .await
     }
 
@@ -292,8 +319,55 @@ async fn send_isomorphic<Handle: BrokerTaskHandle>(
     }
 }
 
-fn create_request(
+fn queue_retry_chunk(
     chunk: Vec<(TopicPartition, ProducerSendMessage)>,
+    partitions: &mut PartitionQueueMap<ProducerSendMessage>,
+    batch_count: usize,
+) {
+    for (tp, record) in chunk {
+        // StreamMap doesn't implement any get_ methods, so remove and re-insert it
+        if let Some(mut records) = partitions.remove(&tp) {
+            records.retry(record);
+            partitions.insert(tp, records);
+            continue;
+        };
+        // The partition was removed because all the senders dropped.
+        // This means the producer is flushing. In this case we collect the undelivered messages to hand them back to
+        // the application.
+        let (_, rx) = mpsc::channel(batch_count);
+        let mut queue = PartitionQueue::new(rx);
+        queue.retry(record);
+        partitions.insert(tp, queue);
+    }
+}
+
+fn queue_retry_partition(
+    tp: TopicPartition,
+    records: Vec<PreparedRecord>,
+    partitions: &mut PartitionQueueMap<ProducerSendMessage>,
+    batch_count: usize,
+) {
+    // StreamMap doesn't implement any get_ methods, so remove and re-insert it
+    if let Some(mut partition) = partitions.remove(&tp) {
+        for record in records {
+            partition.retry(record.into());
+        }
+        partitions.insert(tp, partition);
+        return;
+    };
+    // The partition was removed because all the senders dropped.
+    // This means the producer is flushing. In this case we collect the undelivered messages to hand them back to
+    // the application.
+    let (_, rx) = mpsc::channel(batch_count);
+    let mut partition = PartitionQueue::new(rx);
+    for record in records {
+        partition.retry(record.into());
+    }
+    partitions.insert(tp, partition);
+}
+
+fn create_request(
+    chunk: impl IntoIterator<Item = (TopicPartition, ProducerSendMessage)>,
     compression: Compression,
     transactional_id: Option<TransactionalId>,
     acks: i16,

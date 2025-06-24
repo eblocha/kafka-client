@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
@@ -17,16 +18,20 @@ use crate::{
 };
 
 pub struct PartitionQueue<M> {
-    pub retry_buffer: Vec<M>,
+    retry_buffer: VecDeque<M>,
     rx: mpsc::Receiver<M>,
 }
 
 impl<M> PartitionQueue<M> {
     pub fn new(rx: mpsc::Receiver<M>) -> Self {
         Self {
-            retry_buffer: Vec::new(),
+            retry_buffer: VecDeque::new(),
             rx,
         }
+    }
+
+    pub fn retry(&mut self, message: M) {
+        self.retry_buffer.push_front(message);
     }
 }
 
@@ -36,7 +41,13 @@ impl<M> Stream for PartitionQueue<M> {
     type Item = M;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.get_mut().rx.poll_recv(cx)
+        let this = self.get_mut();
+
+        if let Some(msg) = this.retry_buffer.pop_back() {
+            return Poll::Ready(Some(msg));
+        }
+
+        this.rx.poll_recv(cx)
     }
 }
 

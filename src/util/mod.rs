@@ -1,8 +1,13 @@
-use std::sync::Arc;
+pub mod chunks_timeout;
+
+use std::{sync::Arc, time::Duration};
 
 use extend::ext;
+use futures::Stream;
 use kafka_protocol::{messages::TopicName, protocol::StrBytes};
 use uuid::Uuid;
+
+use crate::util::chunks_timeout::ChunksTimeout;
 
 #[ext]
 pub impl Uuid {
@@ -29,3 +34,14 @@ pub impl StrBytes {
         Arc::from(self.as_str())
     }
 }
+
+pub trait StreamExt: Stream {
+    fn chunks_timeout(self, capacity: usize, duration: Duration) -> ChunksTimeout<Self>
+    where
+        Self: Sized,
+    {
+        ChunksTimeout::new(self, capacity, duration)
+    }
+}
+
+impl<St: ?Sized> StreamExt for St where St: Stream {}
