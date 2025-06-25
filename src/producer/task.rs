@@ -1,4 +1,4 @@
-use std::{io, time::Duration};
+use std::{io, pin::Pin, time::Duration};
 
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt as FuturesStreamExt;
@@ -122,8 +122,13 @@ impl PartialProducerTask {
         join_handle: JoinHandle<Option<NetworkTask<Conn>>>,
         ctx: BrokerTaskContext,
         node: &Node,
+        flushing: bool,
     ) -> Option<ProducerTask<Conn>> {
-        ctx.cancellation_token.cancel();
+        if flushing {
+            ctx.flush.cancel();
+        } else {
+            ctx.cancellation_token.cancel();
+        }
 
         let inner_task_result = join_handle.await;
 
@@ -167,15 +172,15 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             "started producer task"
         );
 
+        let network_ctx = BrokerTaskContext {
+            cancellation_token: ctx.cancellation_token.clone(),
+            // We don't want the flush to propagate to the network task since we still need it to send messages while flushing
+            flush: CancellationToken::new(),
+        };
+        let flush_network = CancellationToken::new();
         let network_task_tracker = TaskTracker::new();
         let connection_join_handle =
-            network_task_tracker.spawn(inner_task.run(BrokerTaskContext {
-                cancellation_token: ctx.cancellation_token.clone(),
-                // We don't want the flush to propagate to the network task since we still need it to send messages
-                // TODO this is coupled to the network task, since it assumes cancel and flush do the same thing.
-                // ideally we should call flush before returning instead of cancel if this task is flushed
-                flush: CancellationToken::new(),
-            }));
+            network_task_tracker.spawn(inner_task.run(network_ctx.clone()));
         network_task_tracker.close();
 
         let mut chunks = (&mut partitions).chunks_timeout(
@@ -194,13 +199,22 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             .map(TransactionalId);
 
         let mut chunk = Vec::with_capacity(this.config.producer.batch_count);
+        let mut flushing = false;
 
         loop {
             let tracker_wait = network_task_tracker.wait();
 
             tokio::select! {
                 biased;
-                () = ctx.cancellation_token.cancelled() => break,
+                () = ctx.cancellation_token.cancelled() => {
+                    flushing = false;
+                    break;
+                },
+                () = ctx.flush.cancelled(), if !ctx.flush.is_cancelled() => {
+                    close_all(*chunks.as_mut().get_pin_mut().get_mut());
+                    flushing = true;
+                    continue;
+                }
                 () = tracker_wait => break,
                 res = chunks.next() => {
                     match res {
@@ -210,11 +224,14 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
                 },
             };
 
+            chunks.as_mut().take_into(&mut chunk);
+
+            debug_assert!(!chunk.is_empty());
+
             let compression: Compression = this.config.producer.compression_codec.into();
             let transactional_id = transactional_id.clone();
             let acks = this.config.producer.required_acks;
             let timeout = this.config.producer.request_timeout;
-            chunks.as_mut().take(&mut chunk);
             let drain = chunk.drain(..);
 
             // There's a perf tradeoff here between the block_in_place overhead and the vec allocation overhead.
@@ -281,8 +298,14 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
         // Fill partition retry buffers with the chunk on shutdown
         queue_retry_chunk(chunk, &mut partitions, this.config.producer.batch_count);
 
-        this.stop(partitions, connection_join_handle, ctx, &node)
-            .await
+        this.stop(
+            partitions,
+            connection_join_handle,
+            network_ctx,
+            &node,
+            flushing,
+        )
+        .await
     }
 
     async fn shutdown(self) -> Self {
@@ -364,6 +387,12 @@ fn queue_retry_partition(
         partition.retry(record.into());
     }
     partitions.insert(tp, partition);
+}
+
+fn close_all(mut partitions: &mut PartitionQueueMap<ProducerSendMessage>) {
+    for (_, partition) in partitions.iter_mut() {
+        partition.close();
+    }
 }
 
 fn create_request(

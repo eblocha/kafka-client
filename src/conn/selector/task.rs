@@ -413,6 +413,15 @@ impl<
             }
         }
 
+        // Create tasks for new brokers that aren't assigned partitions
+        for (broker_id, broker) in new_broker_ids {
+            if tasks.contains_key(&broker_id) {
+                continue;
+            }
+
+            tasks.insert(broker_id, self.create_new_task(Node::from(broker)).0);
+        }
+
         // Restart each task
         for (broker_id, task) in tasks {
             let Some(entry) = self.cluster.brokers.get_mut(&broker_id) else {
@@ -678,6 +687,11 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
         self.await_shutdown().await;
     }
 
+    pub async fn flush(self) {
+        self.flush.cancel();
+        self.await_shutdown().await;
+    }
+
     async fn try_new_with_connect<
         Conn: Connect + Clone + Send + 'static,
         Factory: BrokerTaskFactory<Conn, Task = Task, Handle = TaskHandle>,
@@ -780,11 +794,6 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
         }
 
         Ok(())
-    }
-
-    pub async fn flush(self) {
-        self.flush.cancel();
-        self.await_shutdown().await;
     }
 }
 

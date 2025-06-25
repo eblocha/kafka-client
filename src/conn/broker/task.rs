@@ -33,6 +33,10 @@ impl<M> PartitionQueue<M> {
     pub fn retry(&mut self, message: M) {
         self.retry_buffer.push_front(message);
     }
+
+    pub fn close(&mut self) {
+        self.rx.close();
+    }
 }
 
 impl<M> Unpin for PartitionQueue<M> {}

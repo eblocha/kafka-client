@@ -46,10 +46,12 @@ impl<St: Stream> ChunksTimeout<St> {
         self.stream.get_mut()
     }
 
-    pub fn take(mut self: Pin<&mut Self>, other: &mut Vec<St::Item>) {
-        let mut me = self.project();
-        other.append(me.items);
-        std::mem::swap(other, me.items);
+    pub fn get_pin_mut(mut self: Pin<&mut Self>) -> Pin<&mut St> {
+        self.project().stream.get_pin_mut()
+    }
+
+    pub fn take_into(mut self: Pin<&mut Self>, other: &mut Vec<St::Item>) {
+        other.append(self.project().items);
     }
 }
 
