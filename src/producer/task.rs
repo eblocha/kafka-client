@@ -1,4 +1,4 @@
-use std::{io, pin::Pin, time::Duration};
+use std::{io, time::Duration};
 
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt as FuturesStreamExt;
@@ -89,7 +89,7 @@ impl<Conn> ProducerTask<Conn> {
         )
     }
 
-    async fn run_empty(mut self, ctx: BrokerTaskContext) -> Option<Self>
+    async fn run_empty(self, ctx: BrokerTaskContext) -> Option<Self>
     where
         Conn: Connect + Send + 'static,
     {
@@ -158,12 +158,12 @@ impl PartialProducerTask {
 impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
     type PartitionMessage = ProducerSendMessage;
 
-    async fn run(mut self, ctx: BrokerTaskContext) -> Option<Self> {
+    async fn run(self, ctx: BrokerTaskContext) -> Option<Self> {
         if self.partitions.is_empty() {
             return self.run_empty(ctx).await;
         }
 
-        let (inner_task, mut partitions, mut this) = self.split();
+        let (inner_task, mut partitions, this) = self.split();
         let node = inner_task.get_node().clone();
 
         tracing::debug!(
@@ -177,13 +177,12 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             // We don't want the flush to propagate to the network task since we still need it to send messages while flushing
             flush: CancellationToken::new(),
         };
-        let flush_network = CancellationToken::new();
         let network_task_tracker = TaskTracker::new();
         let connection_join_handle =
             network_task_tracker.spawn(inner_task.run(network_ctx.clone()));
         network_task_tracker.close();
 
-        let mut chunks = (&mut partitions).chunks_timeout(
+        let chunks = (&mut partitions).chunks_timeout(
             this.config.producer.batch_count,
             this.config.producer.linger,
         );
@@ -389,7 +388,7 @@ fn queue_retry_partition(
     partitions.insert(tp, partition);
 }
 
-fn close_all(mut partitions: &mut PartitionQueueMap<ProducerSendMessage>) {
+fn close_all(partitions: &mut PartitionQueueMap<ProducerSendMessage>) {
     for (_, partition) in partitions.iter_mut() {
         partition.close();
     }

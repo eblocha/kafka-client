@@ -45,7 +45,6 @@ impl Future for ProduceFuture {
 pub struct Producer<Conn: Connect + Send + 'static, P> {
     selector: SelectorTaskHandle<ProducerTask<Conn>, ProducerTaskHandle>,
     partitioner: P,
-    config: KafkaConfig,
 }
 
 impl Producer<Tcp, KeyHashPartitioner> {
@@ -58,16 +57,13 @@ impl Producer<Tcp, KeyHashPartitioner> {
         let selector = SelectorTaskHandle::try_new_tcp(
             bootstrap,
             config.clone(),
-            ProducerTaskFactory {
-                config: config.clone(),
-            },
+            ProducerTaskFactory { config },
         )
         .await?;
 
         Ok(Self {
             selector,
             partitioner: KeyHashPartitioner,
-            config,
         })
     }
 }

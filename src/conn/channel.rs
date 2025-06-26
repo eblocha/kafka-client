@@ -381,6 +381,13 @@ mod test {
 
     const REQ_VERSION: i16 = MetadataRequest::VERSIONS.max;
 
+    fn create_kafka_config() -> KafkaConfig {
+        KafkaConfig {
+            client_id: None,
+            ..KafkaConfig::default()
+        }
+    }
+
     fn create_request_response(
         correlation_id: i32,
     ) -> ((MetadataRequest, BytesMut), (MetadataResponse, BytesMut)) {
@@ -439,7 +446,7 @@ mod test {
             .read(&res_bytes)
             .build();
 
-        let conn = KafkaChannel::connect(io, &Default::default());
+        let conn = KafkaChannel::connect(io, &create_kafka_config());
 
         let response =
             tokio::time::timeout(Duration::from_millis(500), conn.send(request, REQ_VERSION))
@@ -466,7 +473,7 @@ mod test {
             .read(&res_bytes_1)
             .build();
 
-        let conn = KafkaChannel::connect(io, &Default::default());
+        let conn = KafkaChannel::connect(io, &create_kafka_config());
 
         let (response_1, response_2) = tokio::join!(
             conn.send(request_1, REQ_VERSION),
@@ -485,7 +492,7 @@ mod test {
 
         let io = tokio_test::io::Builder::new().write(&req_bytes).build();
 
-        let conn = Arc::new(KafkaChannel::connect(io, &Default::default()));
+        let conn = Arc::new(KafkaChannel::connect(io, &create_kafka_config()));
 
         let conn_copy = conn.clone();
 
@@ -510,7 +517,7 @@ mod test {
 
         let io = tokio_test::io::Builder::new().build();
 
-        let conn = Arc::new(KafkaChannel::connect(io, &Default::default()));
+        let conn = Arc::new(KafkaChannel::connect(io, &create_kafka_config()));
 
         conn.shutdown().await;
 
@@ -530,7 +537,7 @@ mod test {
 
         let io = tokio_test::io::Builder::new().write(&req_bytes).build();
 
-        let conn = Arc::new(KafkaChannel::connect(io, &Default::default()));
+        let conn = Arc::new(KafkaChannel::connect(io, &create_kafka_config()));
 
         let response = conn.send_and_forget(request, REQ_VERSION).await;
 

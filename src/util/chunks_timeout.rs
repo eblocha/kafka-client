@@ -34,23 +34,11 @@ impl<St: Stream> ChunksTimeout<St> {
         }
     }
 
-    pub fn into_inner(self) -> St {
-        self.stream.into_inner()
-    }
-
-    pub fn get_ref(&self) -> &St {
-        self.stream.get_ref()
-    }
-
-    pub fn get_mut(&mut self) -> &mut St {
-        self.stream.get_mut()
-    }
-
-    pub fn get_pin_mut(mut self: Pin<&mut Self>) -> Pin<&mut St> {
+    pub fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut St> {
         self.project().stream.get_pin_mut()
     }
 
-    pub fn take_into(mut self: Pin<&mut Self>, other: &mut Vec<St::Item>) {
+    pub fn take_into(self: Pin<&mut Self>, other: &mut Vec<St::Item>) {
         other.append(self.project().items);
     }
 }
