@@ -4,6 +4,8 @@ use std::{future::Future, io};
 
 use futures::{future::Either, SinkExt, StreamExt};
 use kafka_protocol::protocol::StrBytes;
+#[cfg(test)]
+use kafka_protocol::protocol::{Encodable, HeaderVersion};
 use rustc_hash::FxHashMap;
 use thiserror::Error;
 use tokio::{
@@ -78,6 +80,27 @@ impl ResponseSender {
 pub struct KafkaChannelMessage {
     pub versioned: VersionedRequest,
     pub tx: ResponseSender,
+}
+
+impl KafkaChannelMessage {
+    #[cfg(test)]
+    pub fn respond<R: Encodable + HeaderVersion>(self, response: R) {
+        use crate::conn::testing::encode_response;
+
+        let api_key = self.versioned.request.as_api_key();
+        let api_version = self.versioned.api_version;
+        self.tx
+            .send_if_awaiter(encode_response(response, api_key, api_version));
+    }
+
+    #[cfg(test)]
+    pub fn respond_with_version<R: Encodable + HeaderVersion>(self, response: R, api_version: i16) {
+        use crate::conn::testing::encode_response;
+
+        let api_key = self.versioned.request.as_api_key();
+        self.tx
+            .send_if_awaiter(encode_response(response, api_key, api_version));
+    }
 }
 
 #[must_use]

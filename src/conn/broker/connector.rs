@@ -305,3 +305,277 @@ async fn negotiate(
         Err(e)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use std::{future, io, sync::Arc, time::Duration};
+
+    use kafka_protocol::{
+        messages::{ApiVersionsRequest, ApiVersionsResponse},
+        protocol::Message,
+    };
+    use tokio::{sync::mpsc, task::JoinHandle};
+    use tokio_test::assert_err;
+    use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+    use crate::{
+        cancel::OrCancelled,
+        common::{BrokerHost, Node},
+        config::KafkaConfig,
+        conn::{
+            broker::{connector::NodeConnector, init_error::ConnectionInitError},
+            channel::{KafkaChannel, KafkaChannelMessage},
+        },
+        connect::Connect,
+        error::ErrorCode,
+        proto::request::KafkaRequest,
+    };
+
+    struct TestHarness {
+        tx: mpsc::Sender<KafkaChannelMessage>,
+        rx: mpsc::Receiver<KafkaChannelMessage>,
+        task_tracker: TaskTracker,
+        cancellation_token: CancellationToken,
+    }
+
+    impl TestHarness {
+        fn new() -> Self {
+            let (tx, rx) = mpsc::channel(1);
+            let task_tracker = TaskTracker::new();
+            let cancellation_token = CancellationToken::new();
+
+            Self {
+                tx,
+                rx,
+                task_tracker,
+                cancellation_token,
+            }
+        }
+
+        /// Spawn a task that immediately responds to a connection request with an empty successful versions response.
+        fn spawn_ok(mut self) -> JoinHandle<Self> {
+            let tracker = self.task_tracker.clone();
+
+            tracker.spawn(async move {
+                loop {
+                    let Some(Some(req)) = self.rx.recv().or_cancel(&self.cancellation_token).await
+                    else {
+                        break;
+                    };
+
+                    let response = ApiVersionsResponse::default();
+
+                    req.respond(response)
+                }
+
+                self
+            })
+        }
+
+        /// Spawn a task that never responds to any request.
+        fn spawn_never(self) -> JoinHandle<Self> {
+            let tracker = self.task_tracker.clone();
+
+            tracker.spawn(async move {
+                self.cancellation_token.cancelled().await;
+                self
+            })
+        }
+    }
+
+    struct NeverConnects;
+
+    impl Connect for NeverConnects {
+        async fn connect(
+            &self,
+            _host: &BrokerHost,
+            _config: &KafkaConfig,
+        ) -> Result<KafkaChannel, io::Error> {
+            future::pending().await
+        }
+    }
+
+    fn create_channel() -> (TestHarness, KafkaChannel) {
+        let harness = TestHarness::new();
+
+        let channel = KafkaChannel::from_parts(
+            harness.tx.clone(),
+            harness.task_tracker.clone(),
+            harness.cancellation_token.clone(),
+        );
+
+        (harness, channel)
+    }
+
+    fn create_connector(config: KafkaConfig) -> (TestHarness, NodeConnector<KafkaChannel>) {
+        let (harness, channel) = create_channel();
+
+        let connector = NodeConnector::new(
+            Node {
+                id: 0,
+                host: BrokerHost("test".into(), 9092),
+                rack: None,
+            },
+            config,
+            channel,
+        );
+
+        (harness, connector)
+    }
+
+    fn create_never_connects(config: KafkaConfig) -> (TestHarness, NodeConnector<NeverConnects>) {
+        let harness = TestHarness::new();
+        let connector = NodeConnector::new(
+            Node {
+                id: 0,
+                host: BrokerHost("test".into(), 9092),
+                rack: None,
+            },
+            config,
+            NeverConnects,
+        );
+
+        (harness, connector)
+    }
+
+    #[test]
+    fn starts_not_connected() {
+        let (_, handle) = create_connector(KafkaConfig::default());
+        assert!(handle.connection.load().is_none())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sends_api_versions_request() {
+        let (mut harness, mut handle) = create_connector(KafkaConfig::default());
+
+        tokio::spawn(async move { handle.connect().await });
+        let req = harness.rx.recv().await.unwrap();
+
+        assert_eq!(req.versioned.api_version, ApiVersionsRequest::VERSIONS.max);
+        assert!(matches!(
+            req.versioned.request,
+            KafkaRequest::ApiVersions(_)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sends_fallback_versions_request() {
+        let (mut harness, mut handle) = create_connector(KafkaConfig::default());
+
+        tokio::spawn(async move { handle.connect().await });
+        let req = harness.rx.recv().await.unwrap();
+
+        // Respond with an unsupported version error
+        let response =
+            ApiVersionsResponse::default().with_error_code(ErrorCode::UnsupportedVersion as i16);
+
+        req.respond_with_version(response, 0);
+
+        let req_2 = harness.rx.recv().await.unwrap();
+
+        assert_eq!(
+            req_2.versioned.api_version,
+            ApiVersionsRequest::VERSIONS.min
+        );
+        assert!(matches!(
+            req_2.versioned.request,
+            KafkaRequest::ApiVersions(_)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn propagates_failure() {
+        let (mut harness, mut handle) = create_connector(KafkaConfig::default());
+
+        let join = tokio::spawn(async move { handle.connect().await });
+        let req = harness.rx.recv().await.unwrap();
+
+        req.tx.send_err(io::Error::from(io::ErrorKind::BrokenPipe));
+
+        let result = join.await.unwrap();
+
+        assert_err!(result.as_ref());
+
+        let ConnectionInitError::Io(err) = result.as_ref().unwrap_err() else {
+            panic!("did not respond with an io error: {result:?}");
+        };
+
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reuses_connection() {
+        let (harness, mut handle) = create_connector(KafkaConfig::default());
+
+        harness.spawn_ok();
+
+        let conn_1 = handle.connect().await.unwrap();
+        let conn_2 = handle.connect().await.unwrap();
+
+        assert!(Arc::ptr_eq(&conn_1, &conn_2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnects_after_closed() {
+        let (harness_1, mut handle) = create_connector(KafkaConfig::default());
+
+        harness_1.spawn_ok();
+
+        let conn_1 = handle.connect().await.unwrap();
+        conn_1.connection.shutdown().await;
+
+        let (harness_2, channel_2) = create_channel();
+
+        harness_2.spawn_ok();
+
+        handle.connect = channel_2;
+
+        let conn_2 = handle.connect().await.unwrap();
+
+        assert!(conn_1.is_closed());
+        assert!(!conn_2.is_closed());
+        assert!(!Arc::ptr_eq(&conn_1, &conn_2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fails_on_socket_timeout() {
+        let mut config = KafkaConfig::default();
+        config.socket.connection_setup_timeout = Duration::from_secs(30);
+
+        let (_, mut handle) = create_never_connects(config.clone());
+
+        let join = tokio::spawn(async move { handle.connect().await });
+        tokio::time::advance(config.socket.connection_setup_timeout).await;
+
+        let result = join.await.unwrap();
+
+        let ConnectionInitError::Io(err) = result.as_ref().unwrap_err() else {
+            panic!("did not respond with an io error: {result:?}");
+        };
+
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fails_on_versions_timeout() {
+        let mut config = KafkaConfig::default();
+        config.api_version_request_timeout = Duration::from_secs(30);
+
+        let (harness, mut handle) = create_connector(config.clone());
+
+        harness.spawn_never();
+
+        let join = tokio::spawn(async move { handle.connect().await });
+        tokio::time::advance(config.api_version_request_timeout).await;
+
+        let result = join.await.unwrap();
+
+        let ConnectionInitError::Io(err) = result.as_ref().unwrap_err() else {
+            panic!("did not respond with an io error: {result:?}");
+        };
+
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    // - waits for backoff period after failure
+}
