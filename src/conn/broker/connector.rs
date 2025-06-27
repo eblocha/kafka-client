@@ -308,104 +308,25 @@ async fn negotiate(
 
 #[cfg(test)]
 mod test {
-    use std::{future, io, sync::Arc, time::Duration};
+    use std::{io, sync::Arc, time::Duration};
 
     use kafka_protocol::{
         messages::{ApiVersionsRequest, ApiVersionsResponse},
         protocol::Message,
     };
-    use tokio::{sync::mpsc, task::JoinHandle};
     use tokio_test::assert_err;
-    use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
     use crate::{
-        cancel::OrCancelled,
         common::{BrokerHost, Node},
         config::KafkaConfig,
         conn::{
             broker::{connector::NodeConnector, init_error::ConnectionInitError},
-            channel::{KafkaChannel, KafkaChannelMessage},
+            channel::KafkaChannel,
+            testing::{create_channel, NeverConnects, TestHarness},
         },
-        connect::Connect,
         error::ErrorCode,
         proto::request::KafkaRequest,
     };
-
-    struct TestHarness {
-        tx: mpsc::Sender<KafkaChannelMessage>,
-        rx: mpsc::Receiver<KafkaChannelMessage>,
-        task_tracker: TaskTracker,
-        cancellation_token: CancellationToken,
-    }
-
-    impl TestHarness {
-        fn new() -> Self {
-            let (tx, rx) = mpsc::channel(1);
-            let task_tracker = TaskTracker::new();
-            let cancellation_token = CancellationToken::new();
-
-            Self {
-                tx,
-                rx,
-                task_tracker,
-                cancellation_token,
-            }
-        }
-
-        /// Spawn a task that immediately responds to a connection request with an empty successful versions response.
-        fn spawn_ok(mut self) -> JoinHandle<Self> {
-            let tracker = self.task_tracker.clone();
-
-            tracker.spawn(async move {
-                loop {
-                    let Some(Some(req)) = self.rx.recv().or_cancel(&self.cancellation_token).await
-                    else {
-                        break;
-                    };
-
-                    let response = ApiVersionsResponse::default();
-
-                    req.respond(response)
-                }
-
-                self
-            })
-        }
-
-        /// Spawn a task that never responds to any request.
-        fn spawn_never(self) -> JoinHandle<Self> {
-            let tracker = self.task_tracker.clone();
-
-            tracker.spawn(async move {
-                self.cancellation_token.cancelled().await;
-                self
-            })
-        }
-    }
-
-    struct NeverConnects;
-
-    impl Connect for NeverConnects {
-        async fn connect(
-            &self,
-            _host: &BrokerHost,
-            _config: &KafkaConfig,
-        ) -> Result<KafkaChannel, io::Error> {
-            future::pending().await
-        }
-    }
-
-    fn create_channel() -> (TestHarness, KafkaChannel) {
-        let harness = TestHarness::new();
-
-        let channel = KafkaChannel::from_parts(
-            harness.tx.clone(),
-            harness.task_tracker.clone(),
-            harness.cancellation_token.clone(),
-        );
-
-        (harness, channel)
-    }
 
     fn create_connector(config: KafkaConfig) -> (TestHarness, NodeConnector<KafkaChannel>) {
         let (harness, channel) = create_channel();

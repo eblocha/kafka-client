@@ -1,4 +1,3 @@
-#![allow(unused)]
 pub mod admin;
 mod backoff;
 mod cancel;

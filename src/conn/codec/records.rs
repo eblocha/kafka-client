@@ -4,23 +4,23 @@
 
 use bytes::BytesMut;
 use kafka_protocol::{
-    protocol::buf::{ByteBuf, ByteBufMut},
+    protocol::buf::ByteBufMut,
     records::{Compression, Record, RecordEncodeOptions},
 };
 
-#[derive(Debug, Clone)]
-/// Batch decoder for Kafka records.
-pub struct RecordBatchDecoder;
+// #[derive(Debug, Clone)]
+// /// Batch decoder for Kafka records.
+// pub struct RecordBatchDecoder;
 
-impl RecordBatchDecoder {
-    /// Decode the provided buffer into a vec of records.
-    pub fn decode<B: ByteBuf>(buf: &mut B) -> anyhow::Result<Vec<Record>> {
-        kafka_protocol::records::RecordBatchDecoder::decode_with_custom_compression(
-            buf,
-            None::<fn(&mut bytes::Bytes, Compression) -> anyhow::Result<B>>,
-        )
-    }
-}
+// impl RecordBatchDecoder {
+//     /// Decode the provided buffer into a vec of records.
+//     pub fn decode<B: ByteBuf>(buf: &mut B) -> anyhow::Result<Vec<Record>> {
+//         kafka_protocol::records::RecordBatchDecoder::decode_with_custom_compression(
+//             buf,
+//             None::<fn(&mut bytes::Bytes, Compression) -> anyhow::Result<B>>,
+//         )
+//     }
+// }
 
 #[derive(Debug, Clone)]
 /// Batch encoder for Kafka records.
