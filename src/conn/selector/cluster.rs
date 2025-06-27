@@ -300,11 +300,7 @@ impl ClusterMetadata {
 
     #[inline]
     pub fn get_topic_metadata_by_name(&self, name: &TopicName) -> Option<&TopicResult> {
-        let Some(key) = self.get_topic_key_by_name(name) else {
-            return None;
-        };
-
-        self.get_topic_metadata(key)
+        self.get_topic_metadata(self.get_topic_key_by_name(name)?)
     }
 
     /// Create a [`Vec<MetadataRequestTopic>`] that will refresh metadata for all topics known to the client.

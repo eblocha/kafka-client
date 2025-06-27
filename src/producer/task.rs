@@ -210,7 +210,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
                     break;
                 },
                 () = ctx.flush.cancelled(), if !ctx.flush.is_cancelled() => {
-                    close_all(*chunks.as_mut().get_pin_mut().get_mut());
+                    close_all(chunks.as_mut().get_pin_mut().get_mut());
                     flushing = true;
                     continue;
                 }
