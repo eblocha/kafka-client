@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -261,10 +262,10 @@ impl<
                         "attempting to refresh metadata"
                     );
 
-                    let topics = req
-                        .as_ref()
-                        .map(|r| r.topics.clone())
-                        .unwrap_or_else(|| Some(self.cluster.metadata.create_topics_for_refresh()));
+                    let topics = req.as_ref().map_or_else(
+                        || Some(self.cluster.metadata.create_topics_for_refresh()),
+                        |r| r.topics.clone(),
+                    );
 
                     let backoff = self
                         .metadata_backoff
@@ -302,7 +303,7 @@ impl<
     async fn await_shutdown(mut self) {
         drop(self.cluster);
 
-        self.shared_cluster.store(Default::default());
+        self.shared_cluster.store(Arc::default());
 
         let mut clean_shutdown = true;
 
@@ -477,7 +478,7 @@ impl<
         let mut partition_streams: FxHashMap<
             TopicPartition,
             PartitionQueue<Task::PartitionMessage>,
-        > = Default::default();
+        > = HashMap::default();
         let mut tasks: FxHashMap<i32, Task> = Default::default();
 
         let requested_topics = metadata
@@ -715,11 +716,11 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
         // start the selector task to manage broker connections
         let mut selector_task = SelectorTask {
             cluster,
-            shared_cluster: Default::default(),
+            shared_cluster: Arc::default(),
             rx: rx_topic_metadata,
             join_set: JoinSet::new(),
             config: config.clone(),
-            metadata_backoff: Default::default(),
+            metadata_backoff: HashMap::default(),
             metadata_join_set: JoinSet::new(),
             cancellation_token: cancellation_token.clone(),
             bootstrap_signal: Some(tx_bootstrap),
@@ -761,9 +762,9 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
             cluster,
             tx_topic_metadata,
             cancellation_token,
+            flush,
             task_tracker,
             config,
-            flush,
         })
     }
 

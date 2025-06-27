@@ -38,11 +38,11 @@ pub struct SocketConfig {
     ///
     /// Default 30s
     pub connection_setup_timeout: Duration,
-    /// Enable SO_KEEPALIVE on broker sockets.
+    /// Enable `SO_KEEPALIVE` on broker sockets.
     ///
     /// Default false
     pub keepalive: bool,
-    /// Enable TCP_NODELAY on broker sockets.
+    /// Enable `TCP_NODELAY` on broker sockets.
     ///
     /// Default true
     pub nodelay: bool,
@@ -145,7 +145,7 @@ pub struct ProducerConfig {
     /// Number of acknowledgements the leader must receive from ISR brokers before responding to a produce request.
     ///
     /// A value of `-1` means all ISR nodes must ack. A value of 0 means no acks are required.
-    /// Note that 0 will cause the base_offset to be `-1` in the produce response.
+    /// Note that 0 will cause the `base_offset` to be `-1` in the produce response.
     ///
     /// Default -1
     pub required_acks: i16,
@@ -193,7 +193,7 @@ impl Default for ProducerConfig {
 pub struct KafkaConfig {
     /// Client id to include with every request.
     ///
-    /// Default is the value of the CARGO_PKG_NAME environment variable at compile time.
+    /// Default is the value of the `CARGO_PKG_NAME` environment variable at compile time.
     pub client_id: Option<String>,
 
     /// Configuration for broker sockets.

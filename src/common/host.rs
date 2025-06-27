@@ -48,6 +48,8 @@ impl FromStr for BrokerHost {
 
 /// Try to parse a slice of string-like items into a [`Vec`] of [`BrokerHost`].
 ///
+/// # Errors
+///
 /// Fails if any hosts are invalid.
 pub fn try_parse_hosts<S: AsRef<str>>(brokers: &[S]) -> Result<Vec<BrokerHost>, url::ParseError> {
     brokers

@@ -6,7 +6,7 @@ use futures::{future::Either, SinkExt, StreamExt};
 use kafka_protocol::protocol::StrBytes;
 #[cfg(test)]
 use kafka_protocol::protocol::{Encodable, HeaderVersion};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -123,7 +123,7 @@ impl<IO> KafkaChannelTask<IO> {
         .split();
 
         let mut in_flight =
-            FxHashMap::<CorrelationId, (RequestRecord, AwaitResponseSender)>::with_capacity_and_hasher(self.config.socket.send_buffer_size, Default::default());
+            FxHashMap::<CorrelationId, (RequestRecord, AwaitResponseSender)>::with_capacity_and_hasher(self.config.socket.send_buffer_size, FxBuildHasher::default());
 
         let mut request_buffer = Vec::with_capacity(self.config.socket.send_buffer_size);
         let mut sender_batch = Vec::with_capacity(self.config.socket.send_buffer_size);

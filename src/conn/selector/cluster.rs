@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, time::Instant};
+use std::{cmp::Ordering, collections::HashMap, time::Instant};
 
 use derive_more::derive::From;
 use kafka_protocol::{
@@ -35,7 +35,7 @@ pub struct BrokerMap<TaskHandle>(#[from] Vec<BrokerMapEntry<TaskHandle>>);
 
 impl<TaskHandle> Default for BrokerMap<TaskHandle> {
     fn default() -> Self {
-        Self(Default::default())
+        Self(Vec::new())
     }
 }
 
@@ -409,9 +409,9 @@ impl<Task: BrokerTask, TaskHandle: Clone> Clone for Cluster<Task, TaskHandle> {
 impl<Task: BrokerTask, TaskHandle> Default for Cluster<Task, TaskHandle> {
     fn default() -> Self {
         Self {
-            brokers: Default::default(),
-            partitions: Default::default(),
-            metadata: Default::default(),
+            brokers: BrokerMap::default(),
+            partitions: HashMap::default(),
+            metadata: ClusterMetadata::default(),
         }
     }
 }
