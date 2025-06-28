@@ -23,7 +23,6 @@ It uses [kafka-protocol](https://github.com/tychedelia/kafka-protocol-rs) for th
   - Implement automatic retry in a way that can guarantee message order
   - Implement idempotent producer
   - Implement transactions
-  - The Java client buffers per-partition. Do we want the same?
 
 - Consumer
 
