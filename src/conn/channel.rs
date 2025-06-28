@@ -123,7 +123,7 @@ impl<IO> KafkaChannelTask<IO> {
         .split();
 
         let mut in_flight =
-            FxHashMap::<CorrelationId, (RequestRecord, AwaitResponseSender)>::with_capacity_and_hasher(self.config.socket.send_buffer_size, FxBuildHasher::default());
+            FxHashMap::<CorrelationId, (RequestRecord, AwaitResponseSender)>::with_capacity_and_hasher(self.config.socket.send_buffer_size, FxBuildHasher);
 
         let mut request_buffer = Vec::with_capacity(self.config.socket.send_buffer_size);
         let mut sender_batch = Vec::with_capacity(self.config.socket.send_buffer_size);
