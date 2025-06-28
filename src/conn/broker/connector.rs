@@ -498,5 +498,26 @@ mod test {
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
     }
 
-    // - waits for backoff period after failure
+    #[tokio::test(start_paused = true)]
+    async fn waits_for_backoff() {
+        let mut config = KafkaConfig::default();
+        // Guarantee a specific backoff value
+        config.socket.reconnect_backoff = Duration::from_secs(10);
+        config.socket.reconnect_backoff_max = Duration::from_secs(10);
+
+        // Fail to connect
+        let (_, mut handle) = create_never_connects(config.clone());
+        let _ = handle.connect().await;
+
+        // Race the next connection with a timeout. Timeout should win.
+        let join = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(3), handle.connect()).await
+        });
+
+        tokio::time::advance(Duration::from_secs(11)).await;
+
+        let result = join.await.unwrap();
+
+        assert_err!(result);
+    }
 }
