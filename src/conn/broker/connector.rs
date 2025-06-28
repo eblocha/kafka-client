@@ -160,24 +160,14 @@ impl<Conn: Connect> NodeConnector<Conn> {
 
             self.backoff.failure(backoff, ());
         } else {
-            self.backoff.success();
-        }
-
-        if conn_result.is_ok() {
             tracing::debug!(
                 broker_id = self.node.id,
                 host = ?self.node.host,
                 retries = self.backoff.count(),
                 "established connection"
             );
+
             self.backoff.success();
-        } else {
-            let (min, max) = (
-                self.config.socket.reconnect_backoff,
-                self.config.socket.reconnect_backoff_max,
-            );
-            let backoff = exponential_backoff(min, max, self.backoff.count());
-            self.backoff.schedule_next(backoff, ());
         }
 
         conn_result

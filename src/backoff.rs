@@ -36,11 +36,6 @@ impl<T> BackoffSession<T> {
         self.count = 0;
     }
 
-    /// Take the pending backoff attempt if one was requested
-    pub fn take(&mut self) -> Option<BackoffAttempt<T>> {
-        self.attempt.take()
-    }
-
     /// Wait for the next backoff attempt to be ready.
     ///
     /// If there is no backoff attempt scheduled, this returns immediately with [`None`].
@@ -82,5 +77,102 @@ impl<T> BackoffSession<T> {
         if reset_count {
             self.count = 0;
         }
+    }
+
+    /// Take the pending backoff attempt if one was requested
+    fn take(&mut self) -> Option<BackoffAttempt<T>> {
+        self.attempt.take()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::time::Duration;
+
+    use tokio_test::{assert_err, assert_ok};
+
+    use crate::backoff::BackoffSession;
+
+    #[test]
+    fn failure_increments_count() {
+        let mut backoff = BackoffSession::default();
+        backoff.failure(Duration::from_secs(1), ());
+
+        assert_eq!(backoff.count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failure_waits_next_attempt() {
+        let mut backoff = BackoffSession::default();
+
+        backoff.failure(Duration::from_secs(1), ());
+
+        let res = tokio::time::timeout(Duration::from_millis(900), backoff.wait_next()).await;
+
+        assert_err!(res);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_starts_from_failure_instant() {
+        let mut backoff = BackoffSession::default();
+        backoff.schedule_next(Duration::from_secs(1), ());
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        let res = tokio::time::timeout(Duration::from_millis(10), backoff.wait_next()).await;
+
+        assert_ok!(res);
+    }
+
+    #[test]
+    fn success_resets_count() {
+        let mut backoff = BackoffSession::default();
+        backoff.failure(Duration::from_secs(1), ());
+        backoff.failure(Duration::from_secs(1), ());
+
+        backoff.success();
+
+        assert_eq!(backoff.count(), 0);
+    }
+
+    #[test]
+    fn schedule_next_does_not_increment_count() {
+        let mut backoff = BackoffSession::default();
+        backoff.schedule_next(Duration::from_secs(1), ());
+
+        assert_eq!(backoff.count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn schedule_immediate_does_not_wait() {
+        let mut backoff = BackoffSession::default();
+
+        backoff.schedule_immediate((), false);
+
+        let res = tokio::time::timeout(Duration::from_millis(10), backoff.wait_next()).await;
+
+        assert_ok!(res);
+    }
+
+    #[test]
+    fn schedule_immediate_resets_count() {
+        let mut backoff = BackoffSession::default();
+        backoff.failure(Duration::from_secs(1), ());
+        backoff.failure(Duration::from_secs(1), ());
+
+        backoff.schedule_immediate((), true);
+
+        assert_eq!(backoff.count(), 0);
+    }
+
+    #[test]
+    fn schedule_immediate_does_not_reset_count() {
+        let mut backoff = BackoffSession::default();
+        backoff.failure(Duration::from_secs(1), ());
+        backoff.failure(Duration::from_secs(1), ());
+
+        backoff.schedule_immediate((), false);
+
+        assert_eq!(backoff.count(), 2);
     }
 }
