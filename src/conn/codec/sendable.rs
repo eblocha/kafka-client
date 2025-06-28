@@ -57,6 +57,20 @@ impl<T: Request + Into<KafkaRequest>> Sendable for T {
             "recognized response header"
         );
 
-        Self::Response::decode(&mut frame, record.api_version).map_err(into_invalid_data)
+        let mut frame_slice = frame.as_ref();
+
+        let result =
+            Self::Response::decode(&mut frame_slice, record.api_version).map_err(into_invalid_data);
+
+        if result.is_err() && record.api_key == ApiKey::ApiVersions {
+            tracing::trace!(
+                correlation_id = h.correlation_id,
+                "failed to decode ApiVersionsResponse, falling back to version 0"
+            );
+            // Try to parse as version 0 if it's an api versions request since the server may not support the version in the request
+            Self::Response::decode(&mut frame, 0).map_err(into_invalid_data)
+        } else {
+            result
+        }
     }
 }
