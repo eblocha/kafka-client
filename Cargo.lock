@@ -168,9 +168,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
-version = "1.7.1"
+version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8318a53db07bb3f8dca91a600466bdb3f2eaadeedfdbcf02e1accbad9271ba50"
+checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
 
 [[package]]
 name = "cc"
@@ -613,9 +613,9 @@ dependencies = [
 
 [[package]]
 name = "kafka-protocol"
-version = "0.14.0"
+version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cf55ee60ccc7ec31d65c9567c186144d98e870b513fc7159854f281caa69656"
+checksum = "6509e79955e012e08bce83c5f8ef2a40c69ed1c807ec7c4f7670f70a5feb1e5b"
 dependencies = [
  "anyhow",
  "bytes",

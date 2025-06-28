@@ -83,6 +83,7 @@ macro_rules! requests {
 requests!(
     AddOffsetsToTxn,
     AddPartitionsToTxn,
+    AddRaftVoter,
     AllocateProducerIds,
     AlterClientQuotas,
     AlterConfigs,
@@ -146,6 +147,7 @@ requests!(
     OffsetForLeaderEpoch,
     Produce,
     PushTelemetry,
+    RemoveRaftVoter,
     RenewDelegationToken,
     SaslAuthenticate,
     SaslHandshake,
@@ -155,6 +157,7 @@ requests!(
     UnregisterBroker,
     UpdateFeatures,
     UpdateMetadata,
+    UpdateRaftVoter,
     Vote,
     WriteTxnMarkers,
 );

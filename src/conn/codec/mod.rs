@@ -7,7 +7,6 @@ use tokio_util::codec;
 pub(crate) const LENGTH_FIELD_LENGTH: usize = size_of::<i32>();
 
 mod correlated;
-pub mod records;
 mod request;
 pub mod sendable;
 

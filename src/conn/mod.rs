@@ -7,7 +7,4 @@ pub mod selector;
 pub mod testing;
 
 pub use channel::KafkaChannelError;
-pub use codec::{
-    records::RecordBatchEncoder,
-    sendable::{DecodableResponse, Sendable},
-};
+pub use codec::sendable::{DecodableResponse, Sendable};

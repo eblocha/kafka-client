@@ -9,7 +9,8 @@ use kafka_protocol::{
     },
     protocol::StrBytes,
     records::{
-        Compression, Record, RecordEncodeOptions, TimestampType, NO_PRODUCER_EPOCH, NO_PRODUCER_ID,
+        Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
+        NO_PRODUCER_EPOCH, NO_PRODUCER_ID,
     },
 };
 use rustc_hash::FxHashMap;
@@ -28,7 +29,6 @@ use crate::{
             BrokerTask, BrokerTaskContext, BrokerTaskHandle, PartitionQueue, PartitionQueueMap,
         },
         connect::Connect,
-        RecordBatchEncoder,
     },
     error::{ErrorCode, KafkaError},
     network::{handle::NetworkTaskHandle, task::NetworkTask},
