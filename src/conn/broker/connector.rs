@@ -465,10 +465,7 @@ mod test {
 
         let (_, mut handle) = create_never_connects(config.clone());
 
-        let join = tokio::spawn(async move { handle.connect().await });
-        tokio::time::advance(config.socket.connection_setup_timeout).await;
-
-        let result = join.await.unwrap();
+        let result = handle.connect().await;
 
         let ConnectionInitError::Io(err) = result.as_ref().unwrap_err() else {
             panic!("did not respond with an io error: {result:?}");
@@ -486,10 +483,7 @@ mod test {
 
         harness.spawn_never();
 
-        let join = tokio::spawn(async move { handle.connect().await });
-        tokio::time::advance(config.api_version_request_timeout).await;
-
-        let result = join.await.unwrap();
+        let result = handle.connect().await;
 
         let ConnectionInitError::Io(err) = result.as_ref().unwrap_err() else {
             panic!("did not respond with an io error: {result:?}");
@@ -504,19 +498,21 @@ mod test {
         // Guarantee a specific backoff value
         config.socket.reconnect_backoff = Duration::from_secs(10);
         config.socket.reconnect_backoff_max = Duration::from_secs(10);
+        config.socket.connection_setup_timeout = Duration::from_millis(100);
+        config.api_version_request_timeout = Duration::from_millis(100);
 
         // Fail to connect
-        let (_, mut handle) = create_never_connects(config.clone());
+        let (_, mut handle) = create_connector(config.clone());
         let _ = handle.connect().await;
 
+        let (harness, channel) = create_channel();
+
+        handle.connect = channel;
+
+        harness.spawn_ok();
+
         // Race the next connection with a timeout. Timeout should win.
-        let join = tokio::spawn(async move {
-            tokio::time::timeout(Duration::from_secs(3), handle.connect()).await
-        });
-
-        tokio::time::advance(Duration::from_secs(11)).await;
-
-        let result = join.await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(3), handle.connect()).await;
 
         assert_err!(result);
     }
