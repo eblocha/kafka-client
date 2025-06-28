@@ -182,7 +182,7 @@ impl Default for ProducerConfig {
             request_timeout: Duration::from_secs(30),
             message_timeout: Duration::from_secs(5 * 60),
             compression_codec: CompressionCodec::default(),
-            batch_count: 200,
+            batch_count: 2000,
             linger: Duration::from_millis(5),
             transactional_id: None,
         }
