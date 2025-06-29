@@ -346,7 +346,7 @@ fn queue_retry_chunk(
     partitions: &mut PartitionQueueMap<ProducerSendMessage>,
     batch_count: usize,
 ) {
-    for (tp, record) in chunk {
+    for (tp, record) in chunk.into_iter().rev() {
         // StreamMap doesn't implement any get_ methods, so remove and re-insert it
         if let Some(mut records) = partitions.remove(&tp) {
             records.retry(record);
@@ -371,7 +371,7 @@ fn queue_retry_partition(
 ) {
     // StreamMap doesn't implement any get_ methods, so remove and re-insert it
     if let Some(mut partition) = partitions.remove(&tp) {
-        for record in records {
+        for record in records.into_iter().rev() {
             partition.retry(record.into());
         }
         partitions.insert(tp, partition);

@@ -47,7 +47,7 @@ impl<M> Stream for PartitionQueue<M> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
 
-        if let Some(msg) = this.retry_buffer.pop_back() {
+        if let Some(msg) = this.retry_buffer.pop_front() {
             return Poll::Ready(Some(msg));
         }
 
