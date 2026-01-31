@@ -116,6 +116,7 @@ impl<
         metadata_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         let mut bootstrap_sucessful = false;
+        let mut bootstrap_retries = 0;
         let mut retry_metadata_immediately = false;
         let mut flushing = false;
 
@@ -198,18 +199,21 @@ impl<
                         }
                         Err(e) => {
                             // Check if we've exceeded our limit for bootstrap retries
-                            if !bootstrap_sucessful
-                                && self
+                            if !bootstrap_sucessful {
+                                if self
                                     .config
                                     .bootstrap_max_retries
-                                    .is_some_and(|max| ctx.backoff.count() >= max)
-                            {
-                                tracing::error!(
-                                    broker_id = ctx.entry.node.id,
-                                    host = ?ctx.entry.node.host,
-                                    "retries exhausted while bootstrapping: {e}, retries: {}", ctx.backoff.count()
-                                );
-                                return Err(e);
+                                    .is_some_and(|max| bootstrap_retries >= max)
+                                {
+                                    tracing::error!(
+                                        broker_id = ctx.entry.node.id,
+                                        host = ?ctx.entry.node.host,
+                                        "retries exhausted while bootstrapping: {e}, retries: {}", bootstrap_retries
+                                    );
+                                    return Err(e);
+                                }
+
+                                bootstrap_retries = bootstrap_retries.wrapping_add(1);
                             }
 
                             // Send another attempt immediately if this is not from an upstream request.
