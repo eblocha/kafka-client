@@ -9,7 +9,8 @@ use crate::{
         broker::{
             connector::{NodeConnector, VersionedConnection},
             init_error::ConnectionInitError,
-            task::{BrokerTask, BrokerTaskContext, PartitionQueueMap},
+            partition_queue::PartitionQueueMap,
+            task::{BrokerTask, BrokerTaskContext},
         },
         connect::Connect,
     },

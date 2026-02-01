@@ -24,9 +24,8 @@ use crate::{
         broker::{
             connector::NodeConnector,
             init_error::ConnectionInitError,
-            task::{
-                BrokerTask, BrokerTaskContext, BrokerTaskFactory, BrokerTaskHandle, PartitionQueue,
-            },
+            partition_queue::PartitionQueue,
+            task::{BrokerTask, BrokerTaskContext, BrokerTaskFactory, BrokerTaskHandle},
         },
         connect::{Connect, Tcp},
         selector::{

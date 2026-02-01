@@ -10,7 +10,8 @@ use crate::{
     conn::{
         broker::{
             connector::{NodeConnector, VersionedConnection},
-            task::{BrokerTaskFactory, BrokerTaskHandle, PartitionQueueMap},
+            partition_queue::PartitionQueueMap,
+            task::{BrokerTaskFactory, BrokerTaskHandle},
         },
         connect::Connect,
         Sendable,

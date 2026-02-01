@@ -1,73 +1,18 @@
-use std::{
-    collections::VecDeque,
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll},
-    time::Instant,
-};
+use std::future::Future;
 
-use futures::{ready, Stream};
-use tokio::{sync::mpsc, time::Sleep};
-use tokio_stream::StreamMap;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    common::{Node, TopicPartition},
-    conn::{broker::connector::NodeConnector, selector::RefreshMetadataRequest, Sendable},
+    common::Node,
+    conn::{
+        broker::{connector::NodeConnector, partition_queue::PartitionQueueMap},
+        selector::RefreshMetadataRequest,
+        Sendable,
+    },
     error::KafkaError,
     proto::ver::{FromVersionRange, GetApiKey},
 };
-
-pub struct PartitionQueue<M> {
-    retry_buffer: VecDeque<(Option<Pin<Box<Sleep>>>, M)>,
-    rx: mpsc::Receiver<M>,
-}
-
-impl<M> PartitionQueue<M> {
-    pub fn new(rx: mpsc::Receiver<M>) -> Self {
-        Self {
-            retry_buffer: VecDeque::new(),
-            rx,
-        }
-    }
-
-    /// Queue a message for retry
-    ///
-    /// If `due` is [`None`], the message will not have a retry delay.
-    pub fn retry(&mut self, message: M, due: Option<Instant>) {
-        self.retry_buffer.push_front((
-            due.map(|deadline| Box::pin(tokio::time::sleep_until(deadline.into()))),
-            message,
-        ));
-    }
-
-    pub fn close(&mut self) {
-        self.rx.close();
-    }
-}
-
-impl<M> Unpin for PartitionQueue<M> {}
-
-impl<M> Stream for PartitionQueue<M> {
-    type Item = M;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-
-        if let Some((Some(sleep), _msg)) = this.retry_buffer.get_mut(0) {
-            // If the next message has a deadline, make sure we have passed it before continuing.
-            ready!(sleep.as_mut().poll(cx));
-        }
-
-        if let Some((_, msg)) = this.retry_buffer.pop_front() {
-            return Poll::Ready(Some(msg));
-        }
-
-        this.rx.poll_recv(cx)
-    }
-}
-
-pub type PartitionQueueMap<M> = StreamMap<TopicPartition, PartitionQueue<M>>;
 
 #[derive(Debug, Clone)]
 pub struct BrokerTaskContext {

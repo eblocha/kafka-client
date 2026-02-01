@@ -26,8 +26,9 @@ use crate::{
     common::{Node, TopicPartition},
     config::KafkaConfig,
     conn::{
-        broker::task::{
-            BrokerTask, BrokerTaskContext, BrokerTaskHandle, PartitionQueue, PartitionQueueMap,
+        broker::{
+            partition_queue::{PartitionQueue, PartitionQueueMap},
+            task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle},
         },
         connect::Connect,
         selector::RefreshMetadataRequest,
