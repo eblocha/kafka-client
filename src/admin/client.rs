@@ -223,12 +223,8 @@ impl Admin<Tcp> {
             .collect())
     }
 
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(self) {
         self.selector.shutdown().await;
-    }
-
-    pub async fn await_shutdown(&self) {
-        self.selector.await_shutdown().await;
     }
 
     fn get_best_handle(&self) -> Result<NetworkTaskHandle, KafkaError> {

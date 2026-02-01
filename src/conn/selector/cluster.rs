@@ -26,6 +26,12 @@ use crate::{
     error::ErrorCode,
 };
 
+/// Synchronizes broker tasks with cluster state.
+///
+/// This will ensure each broker id in the cluster has a corresponding task running which can communicate
+/// with the broker.
+///
+/// It will also enure each partition queue is assigned to the correct broker task.
 pub struct ClusterTaskManager<
     Conn,
     Task: BrokerTask,
@@ -35,7 +41,7 @@ pub struct ClusterTaskManager<
     /// Configuration
     config: KafkaConfig,
     /// Shared global cluster state. Contains the latest metadata and mapping of broker id to connection
-    pub(super) shared_cluster: Arc<ArcSwap<Cluster<Task, TaskHandle>>>,
+    shared_cluster: Arc<ArcSwap<Cluster<Task, TaskHandle>>>,
     /// Local cluster state to maintain the sender refcount
     cluster: Cluster<Task, TaskHandle>,
     /// Join set for running connection tasks. Used to detect failed connections
@@ -55,12 +61,15 @@ impl<
         Factory: BrokerTaskFactory<Conn, Task = Task, Handle = TaskHandle>,
     > ClusterTaskManager<Conn, Task, TaskHandle, Factory>
 {
-    pub async fn await_shutdown(mut self) {
+    /// Shut down all tasks
+    ///
+    /// Returns `true` if all tasks exited cleanly
+    pub async fn await_shutdown(mut self) -> bool {
         self.shared_cluster.store(Arc::default());
 
         drop(self.cluster);
 
-        let mut clean_shutdown = true;
+        let mut clean = true;
 
         while let Some(result) = self.join_set.join_next().await {
             match result {
@@ -68,18 +77,14 @@ impl<
                     task.shutdown().await;
                 }
                 Err(join_err) if join_err.is_panic() => {
-                    clean_shutdown = false;
+                    clean = false;
                     tracing::error!("a broker connection task stopped with an error: {join_err}");
                 }
                 _ => {}
             };
         }
 
-        if clean_shutdown {
-            tracing::info!("shut down gracefully");
-        } else {
-            tracing::warn!("shut down with errors");
-        }
+        clean
     }
 
     pub fn create_topics_for_refresh(&self) -> Vec<MetadataRequestTopic> {
@@ -88,20 +93,22 @@ impl<
 }
 
 impl<
-        Conn: Connect + Send + Clone + 'static,
+        Conn: Connect + Clone,
         Task: BrokerTask,
         TaskHandle: BrokerTaskHandle,
         Factory: BrokerTaskFactory<Conn, Task = Task, Handle = TaskHandle>,
     > ClusterTaskManager<Conn, Task, TaskHandle, Factory>
 {
-    /// Create a new cluster manager from bootstrap servers
+    /// Create a new cluster manager from bootstrap servers.
+    ///
+    /// This will return both the manager itself and the initial cluster state.
     pub fn bootstrap(
         servers: &[BrokerHost],
         config: KafkaConfig,
         connect: Conn,
         task_factory: Factory,
         context: BrokerTaskContext,
-    ) -> Self {
+    ) -> (Self, Arc<ArcSwap<Cluster<Task, TaskHandle>>>) {
         let mut this = Self {
             config,
             cluster: Cluster::default(),
@@ -124,9 +131,11 @@ impl<
             this.join_set.spawn(task.run(ctx));
         }
 
-        this.shared_cluster.store(Arc::new(this.cluster.clone()));
+        let shared_cluster = this.shared_cluster.clone();
 
-        this
+        shared_cluster.store(Arc::new(this.cluster.clone()));
+
+        (this, shared_cluster)
     }
 
     pub fn get_best_connection(&self) -> Option<BrokerMapEntry<TaskHandle>> {

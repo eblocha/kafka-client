@@ -5,7 +5,7 @@ use kafka_protocol::messages::{metadata_request::MetadataRequestTopic, TopicName
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::{
     sync::{mpsc, oneshot},
-    task::JoinSet,
+    task::{JoinHandle, JoinSet},
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -288,9 +288,7 @@ impl<
             self.cancellation_token.cancel();
         }
 
-        self.await_shutdown().await;
-
-        Ok(())
+        Ok(self.await_shutdown().await)
     }
 
     async fn await_shutdown(mut self) {
@@ -307,7 +305,7 @@ impl<
             }
         }
 
-        self.cluster_manager.await_shutdown().await;
+        clean_shutdown = self.cluster_manager.await_shutdown().await && clean_shutdown;
 
         if clean_shutdown {
             tracing::info!("shut down gracefully");
@@ -334,7 +332,7 @@ pub(crate) struct SelectorTaskHandle<Task: BrokerTask, TaskHandle> {
     tx_topic_metadata: mpsc::Sender<RefreshMetadataRequest>,
     cancellation_token: CancellationToken,
     flush: CancellationToken,
-    task_tracker: TaskTracker,
+    join_handle: JoinHandle<Result<(), KafkaError>>,
     config: KafkaConfig,
 }
 
@@ -348,11 +346,11 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
         Self::try_new_with_connect(bootstrap, config, Tcp, task_factory).await
     }
 
-    pub async fn await_shutdown(&self) {
-        self.task_tracker.wait().await;
+    pub async fn await_shutdown(self) {
+        let _ = self.join_handle.await;
     }
 
-    pub async fn shutdown(&self) {
+    pub async fn shutdown(self) {
         self.cancellation_token.cancel();
         self.await_shutdown().await;
     }
@@ -386,15 +384,17 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
             tx: tx_topic_metadata.clone(),
         };
 
+        let (cluster_manager, cluster) = ClusterTaskManager::bootstrap(
+            bootstrap,
+            config.clone(),
+            connect,
+            task_factory,
+            context,
+        );
+
         // start the selector task to manage broker connections
         let selector_task = SelectorTask {
-            cluster_manager: ClusterTaskManager::bootstrap(
-                bootstrap,
-                config.clone(),
-                connect,
-                task_factory,
-                context,
-            ),
+            cluster_manager,
             rx: rx_topic_metadata,
             config: config.clone(),
             metadata_backoff: HashMap::default(),
@@ -404,16 +404,14 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
             flush: flush.clone(),
         };
 
-        let cluster = selector_task.cluster_manager.shared_cluster.clone();
-
-        let join_handle = task_tracker.spawn(selector_task.run());
+        let mut join_handle = task_tracker.spawn(selector_task.run());
         task_tracker.close();
 
         tokio::select! {
             // wait for bootstrap. Task will drop this channel when finished with bootstrap.
             _ = rx_bootstrap => Ok(()),
             // or failure to bootstrap
-            result = join_handle => result.map_err(|join_err| {
+            result = (&mut join_handle) => result.map_err(|join_err| {
                 tracing::error!("bootstrapping stopped unexpectedly: {join_err}");
                 KafkaError::Init(ConnectionInitError::Closed)
             })?,
@@ -424,7 +422,7 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
             tx_topic_metadata,
             cancellation_token,
             flush,
-            task_tracker,
+            join_handle,
             config,
         })
     }
