@@ -299,7 +299,7 @@ impl<
                 dead_task = dead_task.shutdown().await;
             }
 
-            dead_task.set_node(entry.node.clone());
+            *dead_task.get_node_mut() = entry.node.clone();
 
             self.join_set.spawn(dead_task.run(entry.ctx.clone()));
             self.cluster.brokers.insert(entry);
@@ -442,7 +442,7 @@ impl<
                 partition_streams.insert(part, stream);
             }
 
-            task.set_node(Node::from(*broker));
+            *task.get_node_mut() = Node::from(*broker);
             tasks.insert(id, task);
         }
 

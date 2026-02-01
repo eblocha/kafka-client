@@ -365,8 +365,8 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
         self.inner_task.get_node()
     }
 
-    fn set_node(&mut self, node: Node) {
-        self.inner_task.set_node(node);
+    fn get_node_mut(&mut self) -> &mut Node {
+        self.inner_task.get_node_mut()
     }
 }
 

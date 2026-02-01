@@ -48,8 +48,7 @@ pub trait BrokerTask: Send + Sized + 'static {
     fn get_partitions_mut(&mut self) -> &mut PartitionQueueMap<Self::PartitionMessage>;
 
     fn get_node(&self) -> &Node;
-
-    fn set_node(&mut self, node: Node);
+    fn get_node_mut(&mut self) -> &mut Node;
 }
 
 pub trait BrokerTaskHandle: Clone + Send + Sync + 'static {

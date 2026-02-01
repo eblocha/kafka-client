@@ -74,7 +74,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for NetworkTask<Conn> {
         &self.connector.node
     }
 
-    fn set_node(&mut self, node: Node) {
-        self.connector.node = node;
+    fn get_node_mut(&mut self) -> &mut Node {
+        &mut self.connector.node
     }
 }
