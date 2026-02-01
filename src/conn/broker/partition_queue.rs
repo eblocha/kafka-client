@@ -65,7 +65,7 @@ pub type PartitionQueueMap<M> = StreamMap<TopicPartition, PartitionQueue<M>>;
 #[cfg(test)]
 mod test {
 
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use futures::StreamExt;
     use tokio::sync::mpsc;
@@ -145,20 +145,25 @@ mod test {
         let item1 = queue.next().await.unwrap();
         let item2 = queue.next().await.unwrap();
 
-        let now_tokio = tokio::time::Instant::now();
-        let now = Instant::now();
+        let now = tokio::time::Instant::now();
 
-        queue.retry(item2, now.checked_add(Duration::from_secs(2)));
-        queue.retry(item1, now.checked_add(Duration::from_secs(1)));
+        queue.retry(
+            item2,
+            now.checked_add(Duration::from_secs(2)).map(Into::into),
+        );
+        queue.retry(
+            item1,
+            now.checked_add(Duration::from_secs(1)).map(Into::into),
+        );
 
         let retried = queue.next().await.unwrap();
 
-        assert_eq!(now_tokio.elapsed().as_secs(), 1);
+        assert_eq!(now.elapsed(), Duration::from_secs(1));
         assert_eq!(retried, 0);
 
         let retried = queue.next().await.unwrap();
 
-        assert_eq!(now_tokio.elapsed().as_secs(), 2);
+        assert_eq!(now.elapsed(), Duration::from_secs(2));
         assert_eq!(retried, 1);
     }
 
@@ -174,20 +179,25 @@ mod test {
         let item1 = queue.next().await.unwrap();
         let item2 = queue.next().await.unwrap();
 
-        let now_tokio = tokio::time::Instant::now();
-        let now = Instant::now();
+        let now = tokio::time::Instant::now();
 
-        queue.retry(item2, now.checked_add(Duration::from_secs(1)));
-        queue.retry(item1, now.checked_add(Duration::from_secs(2)));
+        queue.retry(
+            item2,
+            now.checked_add(Duration::from_secs(1)).map(Into::into),
+        );
+        queue.retry(
+            item1,
+            now.checked_add(Duration::from_secs(2)).map(Into::into),
+        );
 
         let retried = queue.next().await.unwrap();
 
-        assert_eq!(now_tokio.elapsed().as_secs(), 2);
+        assert_eq!(now.elapsed().as_secs(), 2);
         assert_eq!(retried, 0);
 
         let retried = queue.next().await.unwrap();
 
-        assert_eq!(now_tokio.elapsed().as_secs(), 2);
+        assert_eq!(now.elapsed().as_secs(), 2);
         assert_eq!(retried, 1);
     }
 }
