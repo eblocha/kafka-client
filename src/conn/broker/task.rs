@@ -21,6 +21,16 @@ pub struct BrokerTaskContext {
     pub tx: mpsc::Sender<RefreshMetadataRequest>,
 }
 
+impl BrokerTaskContext {
+    pub fn child_context(&self) -> Self {
+        Self {
+            cancellation_token: self.cancellation_token.child_token(),
+            flush: self.flush.child_token(),
+            tx: self.tx.clone(),
+        }
+    }
+}
+
 pub trait BrokerTask: Send + Sized + 'static {
     type PartitionMessage: Send;
 
@@ -58,8 +68,6 @@ pub trait BrokerTaskHandle: Clone + Send + Sync + 'static {
     fn connect_failure_streak(&self) -> usize;
 
     fn capacity(&self) -> Option<usize>;
-
-    fn is_closed(&self) -> bool;
 }
 
 pub trait BrokerTaskFactory<Conn>: Send + 'static {

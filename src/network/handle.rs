@@ -119,10 +119,6 @@ impl BrokerTaskHandle for NetworkTaskHandle {
     fn capacity(&self) -> Option<usize> {
         self.connection.load().as_ref().map(|conn| conn.capacity())
     }
-
-    fn is_closed(&self) -> bool {
-        self.tx.is_closed()
-    }
 }
 
 pub struct NetworkTaskFactory;

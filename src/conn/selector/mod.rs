@@ -1,3 +1,4 @@
+mod cluster;
 mod cluster_state;
 mod metadata;
 mod task;

@@ -49,10 +49,6 @@ impl BrokerTaskHandle for ProducerTaskHandle {
     fn capacity(&self) -> Option<usize> {
         self.inner_handle.capacity()
     }
-
-    fn is_closed(&self) -> bool {
-        self.inner_handle.is_closed()
-    }
 }
 
 pub(super) struct ProducerTaskFactory {
