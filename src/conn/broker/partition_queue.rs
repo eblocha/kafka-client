@@ -119,18 +119,18 @@ mod test {
         let mut queue = PartitionQueue::new(rx);
 
         tx.try_send(0).unwrap();
-        tx.try_send(1).unwrap();
 
         let item = queue.next().await.unwrap();
-        queue.retry(item, None);
 
         drop(tx);
 
+        queue.retry(item, None);
+
         let retried = queue.next().await.unwrap();
-        let next = queue.next().await.unwrap();
+        let next = queue.next().await;
 
         assert_eq!(retried, 0);
-        assert_eq!(next, 1);
+        assert_eq!(next, None);
     }
 
     #[tokio::test(start_paused = true)]
