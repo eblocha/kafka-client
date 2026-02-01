@@ -200,4 +200,30 @@ mod test {
         assert_eq!(now.elapsed().as_secs(), 2);
         assert_eq!(retried, 1);
     }
+
+    #[tokio::test]
+    async fn test_retry_cancel_safety() {
+        let (_tx, rx) = mpsc::channel::<usize>(1);
+        let mut queue = PartitionQueue::new(rx);
+
+        let now = tokio::time::Instant::now();
+
+        // Add to retry queue
+        queue.retry(0, now.checked_add(Duration::from_secs(2)).map(Into::into));
+
+        let sleep = tokio::time::sleep_until(now);
+
+        // Use biased to poll the queue first
+        tokio::select! {
+            biased;
+            _ = queue.next() => {
+                panic!("retry completed before timeout!");
+            },
+            _ = sleep => {}
+        }
+
+        tokio::time::pause();
+
+        assert_eq!(queue.next().await, Some(0));
+    }
 }
