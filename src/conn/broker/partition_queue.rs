@@ -1,5 +1,4 @@
 use std::{
-    collections::VecDeque,
     future::Future,
     pin::Pin,
     task::{Context, Poll},
@@ -13,14 +12,14 @@ use tokio_stream::StreamMap;
 use crate::common::TopicPartition;
 
 pub struct PartitionQueue<M> {
-    retry_buffer: VecDeque<(Option<Pin<Box<Sleep>>>, M)>,
+    retry_buffer: Vec<(Option<Pin<Box<Sleep>>>, M)>,
     rx: mpsc::Receiver<M>,
 }
 
 impl<M> PartitionQueue<M> {
     pub fn new(rx: mpsc::Receiver<M>) -> Self {
         Self {
-            retry_buffer: VecDeque::new(),
+            retry_buffer: Vec::new(),
             rx,
         }
     }
@@ -29,7 +28,7 @@ impl<M> PartitionQueue<M> {
     ///
     /// If `due` is [`None`], the message will not have a retry delay.
     pub fn retry(&mut self, message: M, due: Option<Instant>) {
-        self.retry_buffer.push_front((
+        self.retry_buffer.push((
             due.map(|deadline| Box::pin(tokio::time::sleep_until(deadline.into()))),
             message,
         ));
@@ -48,12 +47,12 @@ impl<M> Stream for PartitionQueue<M> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
 
-        if let Some((Some(sleep), _msg)) = this.retry_buffer.get_mut(0) {
+        if let Some((Some(sleep), _msg)) = this.retry_buffer.last_mut() {
             // If the next message has a deadline, make sure we have passed it before continuing.
             ready!(sleep.as_mut().poll(cx));
         }
 
-        if let Some((_, msg)) = this.retry_buffer.pop_front() {
+        if let Some((_, msg)) = this.retry_buffer.pop() {
             return Poll::Ready(Some(msg));
         }
 
