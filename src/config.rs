@@ -190,6 +190,32 @@ impl Default for ProducerConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct RetryConfig {
+    /// Maximum number of attempts to retry before bubbling up the error to the application. Use [`None`] to never give up.
+    ///
+    /// Default None
+    pub max_attempts: Option<u32>,
+    /// The amount of time to wait before attempting to retry a failed request to a given topic partition.
+    ///
+    /// Default 100ms
+    pub backoff: Duration,
+    /// The maximum amount of time in milliseconds to wait when retrying a request to the broker that has repeatedly failed.
+    ///
+    /// Default 1s
+    pub backoff_max: Duration,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: None,
+            backoff: Duration::from_millis(100),
+            backoff_max: Duration::from_secs(1),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct KafkaConfig {
     /// Client id to include with every request.
     ///
@@ -225,6 +251,9 @@ pub struct KafkaConfig {
 
     /// Producer configuration.
     pub producer: ProducerConfig,
+
+    /// General retry configuration
+    pub retry: RetryConfig,
 }
 
 impl Default for KafkaConfig {
@@ -238,6 +267,7 @@ impl Default for KafkaConfig {
             metadata: MetadataConfig::default(),
             allow_auto_create_topics: false,
             producer: ProducerConfig::default(),
+            retry: RetryConfig::default(),
         }
     }
 }

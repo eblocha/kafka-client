@@ -3,22 +3,23 @@ use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
+    time::Instant,
 };
 
-use futures::Stream;
-use tokio::sync::mpsc;
+use futures::{ready, Stream};
+use tokio::{sync::mpsc, time::Sleep};
 use tokio_stream::StreamMap;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     common::{Node, TopicPartition},
-    conn::{broker::connector::NodeConnector, Sendable},
+    conn::{broker::connector::NodeConnector, selector::RefreshMetadataRequest, Sendable},
     error::KafkaError,
     proto::ver::{FromVersionRange, GetApiKey},
 };
 
 pub struct PartitionQueue<M> {
-    retry_buffer: VecDeque<M>,
+    retry_buffer: VecDeque<(Option<Pin<Box<Sleep>>>, M)>,
     rx: mpsc::Receiver<M>,
 }
 
@@ -30,8 +31,14 @@ impl<M> PartitionQueue<M> {
         }
     }
 
-    pub fn retry(&mut self, message: M) {
-        self.retry_buffer.push_front(message);
+    /// Queue a message for retry
+    ///
+    /// If `due` is [`None`], the message will not have a retry delay.
+    pub fn retry(&mut self, message: M, due: Option<Instant>) {
+        self.retry_buffer.push_front((
+            due.map(|deadline| Box::pin(tokio::time::sleep_until(deadline.into()))),
+            message,
+        ));
     }
 
     pub fn close(&mut self) {
@@ -47,7 +54,12 @@ impl<M> Stream for PartitionQueue<M> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
 
-        if let Some(msg) = this.retry_buffer.pop_front() {
+        if let Some((Some(sleep), _msg)) = this.retry_buffer.get_mut(0) {
+            // If the next message has a deadline, make sure we have passed it before continuing.
+            ready!(sleep.as_mut().poll(cx));
+        }
+
+        if let Some((_, msg)) = this.retry_buffer.pop_front() {
             return Poll::Ready(Some(msg));
         }
 
@@ -61,6 +73,7 @@ pub type PartitionQueueMap<M> = StreamMap<TopicPartition, PartitionQueue<M>>;
 pub struct BrokerTaskContext {
     pub cancellation_token: CancellationToken,
     pub flush: CancellationToken,
+    pub tx: mpsc::Sender<RefreshMetadataRequest>,
 }
 
 pub trait BrokerTask: Send + Sized + 'static {

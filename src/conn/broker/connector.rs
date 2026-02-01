@@ -466,8 +466,10 @@ mod test {
 
     #[tokio::test(start_paused = true)]
     async fn fails_on_versions_timeout() {
-        let mut config = KafkaConfig::default();
-        config.api_version_request_timeout = Duration::from_secs(30);
+        let config = KafkaConfig {
+            api_version_request_timeout: Duration::from_secs(30),
+            ..Default::default()
+        };
 
         let (harness, mut handle) = create_connector(config.clone());
 

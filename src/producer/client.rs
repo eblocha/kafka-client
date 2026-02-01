@@ -19,6 +19,7 @@ use crate::{
     producer::{
         handle::{ProducerTaskFactory, ProducerTaskHandle},
         partitioner::{KeyHashPartitioner, Partitioner},
+        prepared_record::DeliveryMetadata,
         record::{ProducerRecord, RecordMetadata},
         task::{ProducerSendMessage, ProducerSendRecord, ProducerTask},
     },
@@ -116,6 +117,7 @@ impl<Conn: Connect + Send + 'static, P: Partitioner> Producer<Conn, P> {
                     leader_epoch: partition_metadata.leader_epoch,
                 },
                 tx,
+                delivery: DeliveryMetadata::default(),
             })
             .await?;
 

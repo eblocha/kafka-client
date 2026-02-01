@@ -77,6 +77,8 @@ struct SelectorTask<
     config: KafkaConfig,
     /// Receiver for task commands
     rx: mpsc::Receiver<RefreshMetadataRequest>,
+    /// Sender for task commands
+    tx: mpsc::Sender<RefreshMetadataRequest>,
     /// Container to store metadata backoff state per-broker
     metadata_backoff: FxHashMap<BrokerHost, BackoffSession<()>>,
     /// Join set for the metadata refresh task. This should only have one task spawned at any time.
@@ -609,6 +611,7 @@ impl<
         let ctx = BrokerTaskContext {
             cancellation_token,
             flush,
+            tx: self.tx.clone(),
         };
 
         self.cluster.brokers.insert(BrokerMapEntry {
@@ -722,6 +725,7 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
             cluster,
             shared_cluster: Arc::default(),
             rx: rx_topic_metadata,
+            tx: tx_topic_metadata.clone(),
             join_set: JoinSet::new(),
             config: config.clone(),
             metadata_backoff: HashMap::default(),

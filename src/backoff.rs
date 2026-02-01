@@ -12,6 +12,14 @@ pub fn exponential_backoff(min: Duration, max: Duration, attempt: u32) -> Durati
     duration.mul_f64(rand::thread_rng().gen_range((1.0 - JITTER)..(1.0 + JITTER)))
 }
 
+pub fn exponential_backoff_due(
+    min: Duration,
+    max: Duration,
+    attempt: u32,
+) -> Option<std::time::Instant> {
+    std::time::Instant::now().checked_add(exponential_backoff(min, max, attempt))
+}
+
 #[derive(Debug)]
 pub struct BackoffAttempt<T> {
     pub delay_until: Option<Instant>,

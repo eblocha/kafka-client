@@ -4,6 +4,7 @@ use bytes::{Bytes, BytesMut};
 use futures::StreamExt as FuturesStreamExt;
 use kafka_protocol::{
     messages::{
+        metadata_request::MetadataRequestTopic,
         produce_request::{PartitionProduceData, TopicProduceData},
         ProduceRequest, ProduceResponse, TopicName, TransactionalId,
     },
@@ -29,10 +30,15 @@ use crate::{
             BrokerTask, BrokerTaskContext, BrokerTaskHandle, PartitionQueue, PartitionQueueMap,
         },
         connect::Connect,
+        selector::RefreshMetadataRequest,
     },
     error::{ErrorCode, KafkaError},
     network::{handle::NetworkTaskHandle, task::NetworkTask},
-    producer::{prepared_record::PreparedRecord, record::RecordMetadata},
+    producer::{
+        errors::classify_error,
+        prepared_record::{DeliveryMetadata, PreparedRecord},
+        record::RecordMetadata,
+    },
     util::StreamExt,
 };
 
@@ -47,6 +53,7 @@ pub(super) struct ProducerSendRecord {
 pub(super) struct ProducerSendMessage {
     pub record: ProducerSendRecord,
     pub tx: oneshot::Sender<Result<RecordMetadata, KafkaError>>,
+    pub delivery: DeliveryMetadata,
 }
 
 impl From<PreparedRecord> for ProducerSendMessage {
@@ -60,6 +67,7 @@ impl From<PreparedRecord> for ProducerSendMessage {
                 leader_epoch: value.record.partition_leader_epoch,
             },
             tx: value.tx,
+            delivery: value.delivery,
         }
     }
 }
@@ -176,6 +184,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
             cancellation_token: ctx.cancellation_token.clone(),
             // We don't want the flush to propagate to the network task since we still need it to send messages while flushing
             flush: CancellationToken::new(),
+            tx: ctx.tx.clone(),
         };
         let network_task_tracker = TaskTracker::new();
         let connection_join_handle =
@@ -253,11 +262,12 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
                 // This can result in duplicate messages sent, but expedites shutdown.
                 // The idempotent producer prevents duplicates broker-side.
                 for (tp, records) in partition_map {
-                    queue_retry_partition(
+                    retry_partition(
                         tp,
-                        records,
+                        records.into_iter().rev(),
                         &mut partitions,
-                        this.config.producer.batch_count,
+                        &this.config,
+                        None,
                     );
                 }
                 break;
@@ -277,7 +287,18 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
                         }
                     }
                 }
-                Ok(Some(response)) => handle_produce_response(response, partition_map),
+                Ok(Some(response)) => {
+                    let to_refresh = handle_produce_response(
+                        response,
+                        partition_map,
+                        chunks.as_mut().get_pin_mut().get_mut(),
+                        &this.config,
+                    );
+
+                    if !to_refresh.is_empty() {
+                        refresh_metadata(to_refresh, &ctx.tx, &ctx.cancellation_token).await;
+                    }
+                }
                 Err(e) => {
                     tracing::error!(
                         broker_id = node.id,
@@ -285,17 +306,36 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
                         "failed to send produce request: {e}"
                     );
 
-                    for (_, records) in partition_map {
-                        for record in records {
-                            let _ = record.tx.send(Err(e.representative_clone()));
+                    let classification = classify_error(&e);
+
+                    if classification.retry {
+                        for (tp, records) in partition_map {
+                            retry_partition(
+                                tp,
+                                records.into_iter().rev(),
+                                chunks.as_mut().get_pin_mut().get_mut(),
+                                &this.config,
+                                Some(&e),
+                            );
                         }
+                    } else {
+                        for (_, records) in partition_map {
+                            for record in records {
+                                let _ = record.tx.send(Err(e.representative_clone()));
+                            }
+                        }
+                    }
+
+                    if classification.refresh {
+                        // TODO: refresh all topics in request
+                        refresh_metadata(Vec::new(), &ctx.tx, &ctx.cancellation_token).await;
                     }
                 }
             }
         }
 
         // Fill partition retry buffers with the chunk on shutdown
-        queue_retry_chunk(chunk, &mut partitions, this.config.producer.batch_count);
+        recover_chunk(chunk, &mut partitions, &this.config);
 
         this.stop(
             partitions,
@@ -341,51 +381,74 @@ async fn send_isomorphic<Handle: BrokerTaskHandle>(
     }
 }
 
-fn queue_retry_chunk(
+fn remove_partition_queue(
+    tp: &TopicPartition,
+    partitions: &mut PartitionQueueMap<ProducerSendMessage>,
+    config: &KafkaConfig,
+) -> PartitionQueue<ProducerSendMessage> {
+    partitions.remove(tp).unwrap_or_else(|| {
+        // The partition was removed because all the senders dropped and there were no more messages to consume.
+        // This means the producer is flushing. In this case we collect the undelivered messages to hand them back to
+        // the application.
+        let (_, rx) = mpsc::channel(config.producer.batch_count);
+        PartitionQueue::new(rx)
+    })
+}
+
+fn recover_chunk(
     chunk: Vec<(TopicPartition, ProducerSendMessage)>,
     partitions: &mut PartitionQueueMap<ProducerSendMessage>,
-    batch_count: usize,
+    config: &KafkaConfig,
 ) {
     for (tp, record) in chunk.into_iter().rev() {
         // StreamMap doesn't implement any get_ methods, so remove and re-insert it
-        if let Some(mut records) = partitions.remove(&tp) {
-            records.retry(record);
-            partitions.insert(tp, records);
-            continue;
-        };
-        // The partition was removed because all the senders dropped.
-        // This means the producer is flushing. In this case we collect the undelivered messages to hand them back to
-        // the application.
-        let (_, rx) = mpsc::channel(batch_count);
-        let mut queue = PartitionQueue::new(rx);
-        queue.retry(record);
-        partitions.insert(tp, queue);
+        let mut partition = remove_partition_queue(&tp, partitions, config);
+
+        partition.retry(record, None);
+        partitions.insert(tp, partition);
     }
 }
 
-fn queue_retry_partition(
+fn retry_partition(
     tp: TopicPartition,
-    records: Vec<PreparedRecord>,
+    records: impl IntoIterator<Item = PreparedRecord>,
     partitions: &mut PartitionQueueMap<ProducerSendMessage>,
-    batch_count: usize,
+    config: &KafkaConfig,
+    error: Option<&KafkaError>,
 ) {
     // StreamMap doesn't implement any get_ methods, so remove and re-insert it
-    if let Some(mut partition) = partitions.remove(&tp) {
-        for record in records.into_iter().rev() {
-            partition.retry(record.into());
-        }
-        partitions.insert(tp, partition);
-        return;
-    };
-    // The partition was removed because all the senders dropped.
-    // This means the producer is flushing. In this case we collect the undelivered messages to hand them back to
-    // the application.
-    let (_, rx) = mpsc::channel(batch_count);
-    let mut partition = PartitionQueue::new(rx);
-    for record in records {
-        partition.retry(record.into());
+    let mut partition = remove_partition_queue(&tp, partitions, config);
+
+    for record in records.into_iter() {
+        retry_record(record, &mut partition, error, config);
     }
+
     partitions.insert(tp, partition);
+}
+
+fn retry_record(
+    mut record: PreparedRecord,
+    partition: &mut PartitionQueue<ProducerSendMessage>,
+    error: Option<&KafkaError>,
+    config: &KafkaConfig,
+) {
+    if let Some(error) = error {
+        if config
+            .retry
+            .max_attempts
+            .is_none_or(|max_attempts| max_attempts >= record.delivery.attempts)
+        {
+            let retry_due = record.increment_attempt(&config.retry);
+            partition.retry(record.into(), retry_due);
+        } else {
+            // fail the message
+            let _ = record.tx.send(Err(error.representative_clone()));
+        }
+
+        return;
+    }
+
+    partition.retry(record.into(), None);
 }
 
 fn close_all(partitions: &mut PartitionQueueMap<ProducerSendMessage>) {
@@ -426,7 +489,11 @@ fn create_request(
             headers: msg.record.headers,
         };
 
-        records.push(PreparedRecord { record, tx: msg.tx });
+        records.push(PreparedRecord {
+            record,
+            tx: msg.tx,
+            delivery: msg.delivery,
+        });
     }
 
     let mut topic_data = FxHashMap::<TopicName, TopicProduceData>::default();
@@ -465,6 +532,7 @@ fn create_request(
             );
         }
     }
+
     for (name, mut data) in topic_data {
         data.name = name;
         req.topic_data.push(data);
@@ -480,33 +548,81 @@ fn create_request(
 fn handle_produce_response(
     response: ProduceResponse,
     mut context_map: FxHashMap<TopicPartition, Vec<PreparedRecord>>,
-) {
+    partitions: &mut PartitionQueueMap<ProducerSendMessage>,
+    config: &KafkaConfig,
+) -> Vec<TopicName> {
+    let mut topic_names_for_refresh = Vec::new();
+
     for response in response.responses {
         for part_response in response.partition_responses {
             let tp = TopicPartition::new(response.name.clone(), part_response.index);
 
-            let Some(contexts) = context_map.remove(&tp) else {
+            let Some(records) = context_map.remove(&tp) else {
                 tracing::warn!(
                     "got a produce response for a partition we did not send data to: {tp}"
                 );
                 continue;
             };
 
-            if part_response.error_code != ErrorCode::None as i16 {
-                for ctx in contexts {
+            if part_response.error_code == ErrorCode::None as i16 {
+                // fast path: no error
+                for ctx in records {
+                    let _ = ctx.tx.send(Ok(RecordMetadata {
+                        base_offset: part_response.base_offset,
+                    }));
+                }
+                continue;
+            }
+
+            let error = KafkaError::ErrorCode(ErrorCode::from(part_response.error_code));
+
+            let classification = classify_error(&error);
+
+            if classification.retry {
+                retry_partition(
+                    tp,
+                    records.into_iter().rev(),
+                    partitions,
+                    config,
+                    Some(&error),
+                );
+            } else {
+                for ctx in records {
                     let _ = ctx
                         .tx
                         .send(Err(KafkaError::ErrorCode(part_response.error_code.into())));
                 }
-
-                continue;
             }
 
-            for ctx in contexts {
-                let _ = ctx.tx.send(Ok(RecordMetadata {
-                    base_offset: part_response.base_offset,
-                }));
+            if classification.refresh {
+                topic_names_for_refresh.push(response.name.clone());
             }
         }
     }
+
+    topic_names_for_refresh
+}
+
+async fn refresh_metadata(
+    topics: Vec<TopicName>,
+    sender: &mpsc::Sender<RefreshMetadataRequest>,
+    cancellation_token: &CancellationToken,
+) {
+    let (tx, rx) = oneshot::channel();
+
+    let req = RefreshMetadataRequest {
+        topics: Some(
+            topics
+                .into_iter()
+                .map(|name| MetadataRequestTopic::default().with_name(Some(name)))
+                .collect(),
+        ),
+        tx,
+    };
+
+    // The producer task will be shut down after the refresh is completed, but before a response is returned.
+    // If we did not observe the cancellation token here, the selector task would deadlock because it is waiting for
+    // this function to exit before responding on the oneshot receiver.
+    let _ = sender.send(req).or_cancel(cancellation_token).await;
+    let _ = rx.or_cancel(cancellation_token).await;
 }
