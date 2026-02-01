@@ -7,7 +7,7 @@ use crate::{
     proto::ver::with_max_version,
 };
 
-use super::{cluster::BrokerMapEntry, RefreshMetadataRequest};
+use super::{cluster_state::BrokerMapEntry, RefreshMetadataRequest};
 
 fn create_metadata_request(
     version: i16,

@@ -29,14 +29,14 @@ use crate::{
         },
         connect::{Connect, Tcp},
         selector::{
-            cluster::BrokerMapEntry,
+            cluster_state::BrokerMapEntry,
             metadata::{MetadataRefreshContext, MetadataRefreshTask},
         },
     },
     error::{ErrorCode, KafkaError},
 };
 
-use super::{cluster::Cluster, metadata::MetadataRefreshResult};
+use super::{cluster_state::Cluster, metadata::MetadataRefreshResult};
 
 /// A request to fetch metadata for a specific set of topics, or all topics
 pub struct RefreshMetadataRequest {
