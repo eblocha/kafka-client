@@ -5,9 +5,9 @@ use std::{
     time::Duration,
 };
 
-use futures::{ready, stream::Fuse, Stream, StreamExt};
+use futures::{Stream, StreamExt, ready, stream::Fuse};
 use pin_project_lite::pin_project;
-use tokio::time::{sleep, Sleep};
+use tokio::time::{Sleep, sleep};
 
 pin_project! {
     #[must_use = "streams do nothing unless polled"]

@@ -5,8 +5,8 @@ use rustc_hash::FxHashSet;
 
 use crate::{
     common::{
-        acl::{acl_from_bitfield, AclOperation},
         Node,
+        acl::{AclOperation, acl_from_bitfield},
     },
     proto::error_codes::ErrorCode,
     util::StrBytesExt,

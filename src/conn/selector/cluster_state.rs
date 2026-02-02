@@ -3,9 +3,9 @@ use std::{cmp::Ordering, collections::HashMap, time::Instant};
 use derive_more::derive::From;
 use kafka_protocol::{
     messages::{
+        MetadataResponse, TopicName,
         metadata_request::MetadataRequestTopic,
         metadata_response::{MetadataResponsePartition, MetadataResponseTopic},
-        MetadataResponse, TopicName,
     },
     protocol::StrBytes,
 };
@@ -414,10 +414,10 @@ mod test {
 
     use kafka_protocol::{
         messages::{
+            MetadataResponse, TopicName,
             metadata_response::{
                 MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic,
             },
-            MetadataResponse, TopicName,
         },
         protocol::StrBytes,
     };
@@ -508,9 +508,11 @@ mod test {
         );
 
         // Nonexistent topics should give None
-        assert!(metadata
-            .get_topic_metadata_by_name(&TopicName::from_string("topic-c".into()))
-            .is_none());
+        assert!(
+            metadata
+                .get_topic_metadata_by_name(&TopicName::from_string("topic-c".into()))
+                .is_none()
+        );
 
         // Verify good topic exists
         let topic_metadata = metadata
@@ -567,15 +569,17 @@ mod test {
 
         metadata.update_with(
             MetadataResponse::default().with_topics(vec![
-                MetadataResponseTopic::default().with_name(Some(topic_name.clone()))
+                MetadataResponseTopic::default().with_name(Some(topic_name.clone())),
             ]),
             Instant::now(),
         );
 
         metadata.update_with(
-            MetadataResponse::default().with_topics(vec![MetadataResponseTopic::default()
-                .with_name(Some(topic_name.clone()))
-                .with_topic_id(topic_id)]),
+            MetadataResponse::default().with_topics(vec![
+                MetadataResponseTopic::default()
+                    .with_name(Some(topic_name.clone()))
+                    .with_topic_id(topic_id),
+            ]),
             Instant::now(),
         );
 
@@ -624,18 +628,22 @@ mod test {
 
         // We get a response to our bootstrap query, and get a topic with an id
         metadata.update_with(
-            MetadataResponse::default().with_topics(vec![MetadataResponseTopic::default()
-                .with_name(Some(topic_name.clone()))
-                .with_topic_id(topic_id)]),
+            MetadataResponse::default().with_topics(vec![
+                MetadataResponseTopic::default()
+                    .with_name(Some(topic_name.clone()))
+                    .with_topic_id(topic_id),
+            ]),
             Instant::now(),
         );
 
         // We try to refresh the topic, but it was deleted.
         metadata.update_with(
-            MetadataResponse::default().with_topics(vec![MetadataResponseTopic::default()
-                .with_error_code(ErrorCode::UnknownTopicOrPartition as i16)
-                .with_name(None)
-                .with_topic_id(topic_id)]),
+            MetadataResponse::default().with_topics(vec![
+                MetadataResponseTopic::default()
+                    .with_error_code(ErrorCode::UnknownTopicOrPartition as i16)
+                    .with_name(None)
+                    .with_topic_id(topic_id),
+            ]),
             Instant::now(),
         );
 

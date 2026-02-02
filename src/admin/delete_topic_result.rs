@@ -1,4 +1,4 @@
-use kafka_protocol::messages::{delete_topics_response::DeletableTopicResult, TopicName};
+use kafka_protocol::messages::{TopicName, delete_topics_response::DeletableTopicResult};
 use uuid::Uuid;
 
 use crate::{proto::error_codes::ErrorCode, util::UuidExt};

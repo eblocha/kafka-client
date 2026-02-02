@@ -5,7 +5,7 @@ use std::{
     time::Instant,
 };
 
-use futures::{ready, Stream};
+use futures::{Stream, ready};
 use tokio::{sync::mpsc, time::Sleep};
 use tokio_stream::StreamMap;
 

@@ -4,14 +4,14 @@ use bytes::{Bytes, BytesMut};
 use futures::StreamExt as FuturesStreamExt;
 use kafka_protocol::{
     messages::{
+        ProduceRequest, ProduceResponse, TopicName, TransactionalId,
         metadata_request::MetadataRequestTopic,
         produce_request::{PartitionProduceData, TopicProduceData},
-        ProduceRequest, ProduceResponse, TopicName, TransactionalId,
     },
     protocol::StrBytes,
     records::{
-        Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
-        NO_PRODUCER_EPOCH, NO_PRODUCER_ID,
+        Compression, NO_PRODUCER_EPOCH, NO_PRODUCER_ID, Record, RecordBatchEncoder,
+        RecordEncodeOptions, TimestampType,
     },
 };
 use rustc_hash::FxHashMap;

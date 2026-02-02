@@ -2,7 +2,7 @@
 
 use std::{future::Future, io};
 
-use futures::{future::Either, SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, future::Either};
 use kafka_protocol::protocol::StrBytes;
 #[cfg(test)]
 use kafka_protocol::protocol::{Encodable, HeaderVersion};
@@ -17,8 +17,8 @@ use tokio_util::{codec::Framed, sync::CancellationToken, task::TaskTracker};
 use crate::{config::KafkaConfig, conn::codec::sendable::RequestRecord};
 
 use super::codec::{
-    sendable::{DecodableResponse, Sendable},
     CorrelationId, EncodableRequest, KafkaCodec, VersionedRequest,
+    sendable::{DecodableResponse, Sendable},
 };
 
 #[derive(Debug, Error)]
@@ -220,17 +220,20 @@ impl<IO> KafkaChannelTask<IO> {
                             correlation_id = frame.id.0,
                             "read a frame from the io stream"
                         );
-                        if let Some((record, sender)) = in_flight.remove(&frame.id) {
-                            // ok to ignore since it just means the request was abandoned
-                            let _ = sender.send(Ok(DecodableResponse {
-                                record,
-                                frame: frame.frame,
-                            }));
-                        } else {
-                            tracing::warn!(
-                                correlation_id = frame.id.0,
-                                "read a frame that does not map to any pending request"
-                            );
+                        match in_flight.remove(&frame.id) {
+                            Some((record, sender)) => {
+                                // ok to ignore since it just means the request was abandoned
+                                let _ = sender.send(Ok(DecodableResponse {
+                                    record,
+                                    frame: frame.frame,
+                                }));
+                            }
+                            _ => {
+                                tracing::warn!(
+                                    correlation_id = frame.id.0,
+                                    "read a frame that does not map to any pending request"
+                                );
+                            }
                         }
                     }
                     Some(Err(e)) => {
@@ -393,8 +396,8 @@ mod test {
     use bytes::{BufMut, BytesMut};
     use kafka_protocol::{
         messages::{
-            metadata_response::MetadataResponseBroker, ApiKey, BrokerId, MetadataRequest,
-            MetadataResponse, RequestHeader, ResponseHeader,
+            ApiKey, BrokerId, MetadataRequest, MetadataResponse, RequestHeader, ResponseHeader,
+            metadata_response::MetadataResponseBroker,
         },
         protocol::{Encodable, Message},
     };

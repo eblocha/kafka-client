@@ -2,8 +2,8 @@ use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use arc_swap::ArcSwap;
 use kafka_protocol::messages::{
-    metadata_request::MetadataRequestTopic, metadata_response::MetadataResponseBroker,
-    MetadataResponse,
+    MetadataResponse, metadata_request::MetadataRequestTopic,
+    metadata_response::MetadataResponseBroker,
 };
 use rustc_hash::FxHashMap;
 use tokio::{
@@ -55,11 +55,11 @@ pub struct ClusterTaskManager<
 }
 
 impl<
-        Conn,
-        Task: BrokerTask,
-        TaskHandle,
-        Factory: BrokerTaskFactory<Conn, Task = Task, Handle = TaskHandle>,
-    > ClusterTaskManager<Conn, Task, TaskHandle, Factory>
+    Conn,
+    Task: BrokerTask,
+    TaskHandle,
+    Factory: BrokerTaskFactory<Conn, Task = Task, Handle = TaskHandle>,
+> ClusterTaskManager<Conn, Task, TaskHandle, Factory>
 {
     /// Shut down all tasks
     ///
@@ -93,11 +93,11 @@ impl<
 }
 
 impl<
-        Conn: Connect + Clone,
-        Task: BrokerTask,
-        TaskHandle: BrokerTaskHandle,
-        Factory: BrokerTaskFactory<Conn, Task = Task, Handle = TaskHandle>,
-    > ClusterTaskManager<Conn, Task, TaskHandle, Factory>
+    Conn: Connect + Clone,
+    Task: BrokerTask,
+    TaskHandle: BrokerTaskHandle,
+    Factory: BrokerTaskFactory<Conn, Task = Task, Handle = TaskHandle>,
+> ClusterTaskManager<Conn, Task, TaskHandle, Factory>
 {
     /// Create a new cluster manager from bootstrap servers.
     ///
@@ -454,10 +454,10 @@ impl<
 mod test {
     use kafka_protocol::{
         messages::{
+            MetadataResponse, TopicName,
             metadata_response::{
                 MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic,
             },
-            MetadataResponse, TopicName,
         },
         protocol::StrBytes,
     };

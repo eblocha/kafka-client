@@ -1,4 +1,4 @@
-use kafka_protocol::messages::{create_topics_response::CreatableTopicResult, TopicName};
+use kafka_protocol::messages::{TopicName, create_topics_response::CreatableTopicResult};
 use uuid::Uuid;
 
 use crate::{proto::error_codes::ErrorCode, util::UuidExt};

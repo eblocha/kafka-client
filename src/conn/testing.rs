@@ -13,9 +13,9 @@ use crate::{
     common::BrokerHost,
     config::KafkaConfig,
     conn::{
+        DecodableResponse,
         channel::{KafkaChannel, KafkaChannelMessage},
         codec::sendable::RequestRecord,
-        DecodableResponse,
     },
     connect::Connect,
 };

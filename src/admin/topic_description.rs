@@ -1,12 +1,12 @@
 use kafka_protocol::messages::{
-    metadata_response::{MetadataResponseBroker, MetadataResponseTopic},
     TopicName,
+    metadata_response::{MetadataResponseBroker, MetadataResponseTopic},
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use uuid::Uuid;
 
 use crate::{
-    common::acl::{acl_from_bitfield, AclOperation},
+    common::acl::{AclOperation, acl_from_bitfield},
     proto::error_codes::ErrorCode,
     util::UuidExt,
 };

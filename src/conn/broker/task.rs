@@ -7,9 +7,9 @@ use crate::{
     common::Node,
     config::KafkaConfig,
     conn::{
+        Sendable,
         broker::{connector::NodeConnector, partition_queue::PartitionQueueMap},
         selector::RefreshMetadataRequest,
-        Sendable,
     },
     error::KafkaError,
     proto::ver::{FromVersionRange, GetApiKey},

@@ -1,20 +1,20 @@
 use kafka_protocol::messages::{
+    BrokerId, CreateTopicsRequest, DeleteTopicsRequest, DescribeClusterRequest, MetadataRequest,
+    TopicName,
     create_topics_request::{CreatableReplicaAssignment, CreatableTopic},
     delete_topics_request::DeleteTopicState,
     metadata_request::MetadataRequestTopic,
-    BrokerId, CreateTopicsRequest, DeleteTopicsRequest, DescribeClusterRequest, MetadataRequest,
-    TopicName,
 };
 
 use crate::{
     admin::{
-        delete_topic_result::{DeleteTopicsResult, DeletedTopic},
         ClusterDescription, CreateTopicsResult, DescribeTopicsResult, NewTopic, TopicDescription,
         TopicListing, TopicMetadataAndConfig,
+        delete_topic_result::{DeleteTopicsResult, DeletedTopic},
     },
     common::{BrokerHost, TopicCollection},
     config::KafkaConfig,
-    conn::{broker::task::BrokerTaskHandle, selector::SelectorTaskHandle, KafkaChannelError},
+    conn::{KafkaChannelError, broker::task::BrokerTaskHandle, selector::SelectorTaskHandle},
     connect::{Connect, Tcp},
     error::KafkaError,
     network::{

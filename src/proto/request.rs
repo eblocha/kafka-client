@@ -6,7 +6,7 @@ use paste::paste;
 
 use crate::{
     conn::{DecodableResponse, Sendable},
-    proto::ver::{max_intersecting_version, FromVersionRange, GetApiKey, Versionable},
+    proto::ver::{FromVersionRange, GetApiKey, Versionable, max_intersecting_version},
 };
 
 macro_rules! requests {

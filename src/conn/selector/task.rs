@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
-use kafka_protocol::messages::{metadata_request::MetadataRequestTopic, TopicName};
+use kafka_protocol::messages::{TopicName, metadata_request::MetadataRequestTopic};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::{
     sync::{mpsc, oneshot},
@@ -10,7 +10,7 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
-    backoff::{exponential_backoff, BackoffSession},
+    backoff::{BackoffSession, exponential_backoff},
     common::BrokerHost,
     config::KafkaConfig,
     conn::{
@@ -87,11 +87,11 @@ enum Event<Task, TaskHandle> {
 }
 
 impl<
-        Conn: Connect + Send + Clone + 'static,
-        Task: BrokerTask,
-        TaskHandle: BrokerTaskHandle,
-        Factory: BrokerTaskFactory<Conn, Task = Task, Handle = TaskHandle>,
-    > SelectorTask<Conn, Task, TaskHandle, Factory>
+    Conn: Connect + Send + Clone + 'static,
+    Task: BrokerTask,
+    TaskHandle: BrokerTaskHandle,
+    Factory: BrokerTaskFactory<Conn, Task = Task, Handle = TaskHandle>,
+> SelectorTask<Conn, Task, TaskHandle, Factory>
 {
     async fn run(mut self) -> Result<(), KafkaError> {
         let mut metadata_interval = tokio::time::interval(self.config.metadata.refresh_interval);
@@ -417,7 +417,7 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
     async fn refresh_metadata_for_topic(&self, topic: &TopicName) -> Result<(), KafkaError> {
         let (tx, rx) = oneshot::channel();
         let topics = Some(vec![
-            MetadataRequestTopic::default().with_name(Some(topic.clone()))
+            MetadataRequestTopic::default().with_name(Some(topic.clone())),
         ]);
 
         self.context

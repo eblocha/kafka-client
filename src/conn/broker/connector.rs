@@ -10,11 +10,11 @@ use rustc_hash::FxHashMap;
 use tokio::time::error::Elapsed;
 
 use crate::{
-    backoff::{exponential_backoff, BackoffSession},
+    backoff::{BackoffSession, exponential_backoff},
     common::{BrokerHost, Node},
     config::KafkaConfig,
     conn::{
-        broker::init_error::ConnectionInitError, channel::KafkaChannel, connect::Connect, Sendable,
+        Sendable, broker::init_error::ConnectionInitError, channel::KafkaChannel, connect::Connect,
     },
     error::{ErrorCode, KafkaError},
     proto::ver::{FromVersionRange, GetApiKey},
@@ -312,7 +312,7 @@ mod test {
         conn::{
             broker::{connector::NodeConnector, init_error::ConnectionInitError},
             channel::KafkaChannel,
-            testing::{create_channel, NeverConnects, TestHarness},
+            testing::{NeverConnects, TestHarness, create_channel},
         },
         error::ErrorCode,
         proto::request::KafkaRequest,

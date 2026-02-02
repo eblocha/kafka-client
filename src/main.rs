@@ -5,7 +5,7 @@ mod shutdown;
 use std::io;
 
 use clap::{Parser, Subcommand};
-use cmd::{admin::AdminCommands, Run};
+use cmd::{Run, admin::AdminCommands};
 use kafka_client::{common::BrokerHost, config::KafkaConfig};
 use tracing::Level;
 use tracing_subscriber::EnvFilter;

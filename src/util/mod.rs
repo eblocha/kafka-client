@@ -13,11 +13,7 @@ use crate::util::chunks_timeout::ChunksTimeout;
 pub impl Uuid {
     /// Convert a uuid to [`None`] if the value is nil
     fn as_optional(&self) -> Option<Uuid> {
-        if self.is_nil() {
-            None
-        } else {
-            Some(*self)
-        }
+        if self.is_nil() { None } else { Some(*self) }
     }
 }
 

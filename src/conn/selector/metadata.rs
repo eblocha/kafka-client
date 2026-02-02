@@ -1,5 +1,5 @@
 use kafka_protocol::messages::{
-    metadata_request::MetadataRequestTopic, MetadataRequest, MetadataResponse,
+    MetadataRequest, MetadataResponse, metadata_request::MetadataRequestTopic,
 };
 
 use crate::{
@@ -7,7 +7,7 @@ use crate::{
     proto::ver::with_max_version,
 };
 
-use super::{cluster_state::BrokerMapEntry, RefreshMetadataRequest};
+use super::{RefreshMetadataRequest, cluster_state::BrokerMapEntry};
 
 fn create_metadata_request(
     version: i16,

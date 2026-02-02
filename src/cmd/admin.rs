@@ -1,10 +1,10 @@
 use std::iter::zip;
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use clap::Subcommand;
 
 use kafka_client::{
-    admin::{client::Admin, AutoAssignmentNewTopic, NewTopic},
+    admin::{AutoAssignmentNewTopic, NewTopic, client::Admin},
     common::{BrokerHost, TopicCollection},
     config::KafkaConfig,
     connect::Tcp,

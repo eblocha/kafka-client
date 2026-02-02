@@ -1,6 +1,6 @@
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use arc_swap::ArcSwapOption;
@@ -8,13 +8,13 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     conn::{
+        Sendable,
         broker::{
             connector::{NodeConnector, VersionedConnection},
             partition_queue::PartitionQueueMap,
             task::{BrokerTaskFactory, BrokerTaskHandle},
         },
         connect::Connect,
-        Sendable,
     },
     error::KafkaError,
     network::task::{NetworkTask, NetworkTaskMessage},
