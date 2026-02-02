@@ -329,9 +329,7 @@ impl<
 /// the connection is closed.
 pub(crate) struct SelectorTaskHandle<Task: BrokerTask, TaskHandle> {
     pub cluster: Arc<ArcSwap<Cluster<Task, TaskHandle>>>,
-    tx_topic_metadata: mpsc::Sender<RefreshMetadataRequest>,
-    cancellation_token: CancellationToken,
-    flush: CancellationToken,
+    context: BrokerTaskContext,
     join_handle: JoinHandle<Result<(), KafkaError>>,
     config: KafkaConfig,
 }
@@ -351,12 +349,12 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
     }
 
     pub async fn shutdown(self) {
-        self.cancellation_token.cancel();
+        self.context.cancellation_token.cancel();
         self.await_shutdown().await;
     }
 
     pub async fn flush(self) {
-        self.flush.cancel();
+        self.context.flush.cancel();
         self.await_shutdown().await;
     }
 
@@ -369,27 +367,18 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
         connect: Conn,
         task_factory: Factory,
     ) -> Result<Self, KafkaError> {
-        let cancellation_token = CancellationToken::new();
-        let flush = CancellationToken::new();
         let task_tracker = TaskTracker::new();
-
-        let (tx_topic_metadata, rx_topic_metadata) =
-            mpsc::channel(config.metadata.refresh_batch_count);
 
         let (tx_bootstrap, rx_bootstrap) = oneshot::channel();
 
-        let context = BrokerTaskContext {
-            cancellation_token: cancellation_token.clone(),
-            flush: flush.clone(),
-            tx: tx_topic_metadata.clone(),
-        };
+        let (context, rx_topic_metadata) = BrokerTaskContext::init(&config);
 
         let (cluster_manager, cluster) = ClusterTaskManager::bootstrap(
             bootstrap,
             config.clone(),
             connect,
             task_factory,
-            context,
+            context.child_context(),
         );
 
         // start the selector task to manage broker connections
@@ -399,9 +388,9 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
             config: config.clone(),
             metadata_backoff: HashMap::default(),
             metadata_join_set: JoinSet::new(),
-            cancellation_token: cancellation_token.clone(),
+            cancellation_token: context.cancellation_token.clone(),
             bootstrap_signal: Some(tx_bootstrap),
-            flush: flush.clone(),
+            flush: context.flush.clone(),
         };
 
         let mut join_handle = task_tracker.spawn(selector_task.run());
@@ -419,9 +408,7 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
 
         Ok(Self {
             cluster,
-            tx_topic_metadata,
-            cancellation_token,
-            flush,
+            context,
             join_handle,
             config,
         })
@@ -433,7 +420,8 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
             MetadataRequestTopic::default().with_name(Some(topic.clone()))
         ]);
 
-        self.tx_topic_metadata
+        self.context
+            .tx
             .send(RefreshMetadataRequest { topics, tx })
             .await?;
 

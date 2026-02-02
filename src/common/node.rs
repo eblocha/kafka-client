@@ -8,7 +8,7 @@ use crate::util::StrBytesExt;
 
 use super::BrokerHost;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Node {
     pub id: i32,
     pub host: BrokerHost,

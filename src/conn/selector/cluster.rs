@@ -449,3 +449,512 @@ impl<
         (tasks, partition_streams)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use kafka_protocol::{
+        messages::{
+            metadata_response::{
+                MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic,
+            },
+            MetadataResponse, TopicName,
+        },
+        protocol::StrBytes,
+    };
+    use uuid::Uuid;
+
+    use crate::{
+        common::{BrokerHost, Node, TopicPartition},
+        config::KafkaConfig,
+        conn::{
+            broker::task::{BrokerTask, BrokerTaskContext, BrokerTaskFactory},
+            selector::cluster::ClusterTaskManager,
+            testing::NeverConnects,
+        },
+        network::handle::NetworkTaskFactory,
+    };
+
+    /// Stop and collect the tasks inside a cluster task manager for inspection
+    async fn collect_tasks<
+        Conn,
+        Task: BrokerTask,
+        TaskHandle,
+        Factory: BrokerTaskFactory<Conn, Task = Task, Handle = TaskHandle>,
+    >(
+        cluster_manager: &mut ClusterTaskManager<Conn, Task, TaskHandle, Factory>,
+    ) -> Vec<Task> {
+        cluster_manager.context.cancellation_token.cancel();
+
+        let mut tasks = Vec::new();
+
+        while let Some(task) = cluster_manager.join_set.join_next().await {
+            tasks.push(task.unwrap().unwrap());
+        }
+
+        tasks
+    }
+
+    fn assert_partition_arrangement<Task: BrokerTask>(
+        tasks: Vec<Task>,
+        expect_assignments: Vec<Vec<i32>>,
+        topic_name: TopicName,
+        removed_partitions: Vec<i32>,
+    ) {
+        let all_partitions = expect_assignments
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+
+        for mut task in tasks {
+            let node = task.get_node().clone();
+
+            let partitions = &expect_assignments[node.id as usize];
+
+            for partition in &all_partitions {
+                let queue = task
+                    .get_partitions_mut()
+                    .remove(&TopicPartition::new(topic_name.clone(), *partition));
+
+                if partitions.contains(&partition) {
+                    assert!(
+                        queue.is_some(),
+                        "Node {} was not assigned partition {partition}",
+                        node.id
+                    );
+                } else {
+                    assert!(
+                        queue.is_none(),
+                        "Node {} was assigned partition {partition}",
+                        node.id
+                    );
+                }
+            }
+
+            for partition in &removed_partitions {
+                let queue = task
+                    .get_partitions_mut()
+                    .remove(&TopicPartition::new(topic_name.clone(), *partition));
+
+                assert!(
+                    queue.is_none(),
+                    "Node {} was assigned partition {partition}",
+                    node.id
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_initializes_cluster() {
+        // Arrange ============================================================
+
+        let config = KafkaConfig::default();
+
+        let (context, _rx) = BrokerTaskContext::init(&config);
+
+        let host = BrokerHost("localhost".into(), 9092);
+
+        // Act ================================================================
+
+        let (_cluster_manager, cluster) = ClusterTaskManager::bootstrap(
+            &[host.clone()],
+            config,
+            NeverConnects,
+            NetworkTaskFactory,
+            context,
+        );
+
+        // Assert =============================================================
+
+        let cluster_copy = cluster.load_full();
+
+        assert_eq!(
+            cluster_copy.brokers.list_nodes(),
+            vec![&Node {
+                id: 0,
+                host,
+                rack: None
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_reassigns_tasks() {
+        // Arrange ============================================================
+        let config = KafkaConfig::default();
+
+        let (context, _rx) = BrokerTaskContext::init(&config);
+
+        let (mut cluster_manager, _cluster) = ClusterTaskManager::bootstrap(
+            &[
+                // Should get removed
+                BrokerHost("localhost".into(), 9094),
+                // Should become broker id 0
+                BrokerHost("localhost".into(), 9093),
+            ],
+            config,
+            NeverConnects,
+            NetworkTaskFactory,
+            context.child_context(),
+        );
+
+        // Act ================================================================
+
+        // New broker not in bootstrap servers
+        let broker1 = MetadataResponseBroker::default()
+            .with_host(StrBytes::from_static_str("localhost"))
+            .with_node_id(1.into())
+            .with_port(9092);
+
+        let broker2 = MetadataResponseBroker::default()
+            .with_host(StrBytes::from_static_str("localhost"))
+            .with_node_id(0.into())
+            .with_port(9093);
+
+        let metadata = MetadataResponse::default()
+            .with_brokers(vec![broker1, broker2])
+            .with_controller_id(1.into());
+
+        cluster_manager.update_metadata(metadata).await;
+
+        // Assert =============================================================
+
+        let tasks = collect_tasks(&mut cluster_manager).await;
+
+        assert_eq!(tasks.len(), 2);
+
+        for task in &tasks {
+            let node = task.get_node();
+
+            if node.id == 0 {
+                assert_eq!(node.host, BrokerHost("localhost".into(), 9093));
+            } else {
+                assert_eq!(node.host, BrokerHost("localhost".into(), 9092));
+            }
+        }
+
+        let topic_name: TopicName = StrBytes::from_static_str("never").into();
+
+        // Neither should have any partition assignments
+        assert_partition_arrangement(tasks, vec![vec![], vec![]], topic_name, vec![]);
+    }
+
+    #[tokio::test]
+    async fn test_partition_assignment() {
+        // Arrange ============================================================
+
+        let config = KafkaConfig::default();
+
+        let (context, _rx) = BrokerTaskContext::init(&config);
+
+        let (mut cluster_manager, _cluster) = ClusterTaskManager::bootstrap(
+            &[
+                BrokerHost("localhost".into(), 9092),
+                BrokerHost("localhost".into(), 9093),
+            ],
+            config,
+            NeverConnects,
+            NetworkTaskFactory,
+            context.child_context(),
+        );
+
+        // Act ================================================================
+
+        let broker1 = MetadataResponseBroker::default()
+            .with_host(StrBytes::from_static_str("localhost"))
+            .with_node_id(0.into())
+            .with_port(9092);
+
+        let broker2 = MetadataResponseBroker::default()
+            .with_host(StrBytes::from_static_str("localhost"))
+            .with_node_id(1.into())
+            .with_port(9093);
+
+        // Leader: broker2
+        let partition1 = MetadataResponsePartition::default()
+            .with_leader_id(1.into())
+            .with_partition_index(0);
+
+        // Leader: broker1
+        let partition2 = MetadataResponsePartition::default()
+            .with_leader_id(0.into())
+            .with_partition_index(1);
+
+        let topic_name: TopicName = StrBytes::from_static_str("topic").into();
+
+        let topic = MetadataResponseTopic::default()
+            .with_name(Some(topic_name.clone()))
+            .with_topic_id(Uuid::max())
+            .with_partitions(vec![partition1, partition2]);
+
+        let metadata = MetadataResponse::default()
+            .with_brokers(vec![broker1, broker2])
+            .with_controller_id(0.into())
+            .with_topics(vec![topic]);
+
+        cluster_manager.update_metadata(metadata).await;
+
+        // Assert =============================================================
+
+        let tasks = collect_tasks(&mut cluster_manager).await;
+
+        assert_eq!(tasks.len(), 2);
+
+        assert_partition_arrangement(tasks, vec![vec![1], vec![0]], topic_name, vec![]);
+    }
+
+    #[tokio::test]
+    async fn test_partition_moving_leader() {
+        // Arrange ============================================================
+        let config = KafkaConfig::default();
+
+        let (context, _rx) = BrokerTaskContext::init(&config);
+
+        let (mut cluster_manager, _cluster) = ClusterTaskManager::bootstrap(
+            &[],
+            config,
+            NeverConnects,
+            NetworkTaskFactory,
+            context.child_context(),
+        );
+
+        let broker1 = MetadataResponseBroker::default()
+            .with_host(StrBytes::from_static_str("localhost"))
+            .with_node_id(0.into())
+            .with_port(9092);
+
+        let broker2 = MetadataResponseBroker::default()
+            .with_host(StrBytes::from_static_str("localhost"))
+            .with_node_id(1.into())
+            .with_port(9093);
+
+        // Leader: broker2
+        let partition1 = MetadataResponsePartition::default()
+            .with_leader_id(1.into())
+            .with_partition_index(0);
+
+        // Leader: broker1
+        let partition2 = MetadataResponsePartition::default()
+            .with_leader_id(0.into())
+            .with_partition_index(1);
+
+        let topic_name: TopicName = StrBytes::from_static_str("topic").into();
+
+        let topic = MetadataResponseTopic::default()
+            .with_name(Some(topic_name.clone()))
+            .with_topic_id(Uuid::max())
+            .with_partitions(vec![partition1, partition2]);
+
+        let metadata = MetadataResponse::default()
+            .with_brokers(vec![broker1.clone(), broker2.clone()])
+            .with_controller_id(0.into())
+            .with_topics(vec![topic]);
+
+        // update with initial metadata
+        cluster_manager.update_metadata(metadata).await;
+
+        // Act ================================================================
+
+        // swap partitions 0 and 1
+        // Leader: broker1
+        let partition1 = MetadataResponsePartition::default()
+            .with_leader_id(0.into())
+            .with_partition_index(0);
+
+        // Leader: broker2
+        let partition2 = MetadataResponsePartition::default()
+            .with_leader_id(1.into())
+            .with_partition_index(1);
+
+        let topic_name: TopicName = StrBytes::from_static_str("topic").into();
+
+        let topic = MetadataResponseTopic::default()
+            .with_name(Some(topic_name.clone()))
+            .with_topic_id(Uuid::max())
+            .with_partitions(vec![partition1, partition2]);
+
+        let metadata = MetadataResponse::default()
+            .with_brokers(vec![broker1, broker2])
+            .with_controller_id(0.into())
+            .with_topics(vec![topic]);
+
+        // update with new metadata
+        cluster_manager.update_metadata(metadata).await;
+
+        // Assert =============================================================
+
+        let tasks = collect_tasks(&mut cluster_manager).await;
+
+        assert_eq!(tasks.len(), 2);
+
+        assert_partition_arrangement(tasks, vec![vec![0], vec![1]], topic_name, vec![]);
+    }
+
+    #[tokio::test]
+    async fn test_partition_moving_leader_leaving_empty_node() {
+        // Arrange ============================================================
+        let config = KafkaConfig::default();
+
+        let (context, _rx) = BrokerTaskContext::init(&config);
+
+        let (mut cluster_manager, _cluster) = ClusterTaskManager::bootstrap(
+            &[],
+            config,
+            NeverConnects,
+            NetworkTaskFactory,
+            context.child_context(),
+        );
+
+        let broker1 = MetadataResponseBroker::default()
+            .with_host(StrBytes::from_static_str("localhost"))
+            .with_node_id(0.into())
+            .with_port(9092);
+
+        let broker2 = MetadataResponseBroker::default()
+            .with_host(StrBytes::from_static_str("localhost"))
+            .with_node_id(1.into())
+            .with_port(9093);
+
+        // Leader: broker1
+        let partition1 = MetadataResponsePartition::default()
+            .with_leader_id(0.into())
+            .with_partition_index(0);
+
+        // Leader: broker2
+        let partition2 = MetadataResponsePartition::default()
+            .with_leader_id(1.into())
+            .with_partition_index(1);
+
+        let topic_name: TopicName = StrBytes::from_static_str("topic").into();
+
+        let topic = MetadataResponseTopic::default()
+            .with_name(Some(topic_name.clone()))
+            .with_topic_id(Uuid::max())
+            .with_partitions(vec![partition1, partition2]);
+
+        let metadata = MetadataResponse::default()
+            .with_brokers(vec![broker1.clone(), broker2.clone()])
+            .with_controller_id(0.into())
+            .with_topics(vec![topic]);
+
+        // update with initial metadata
+        cluster_manager.update_metadata(metadata).await;
+
+        // Act ================================================================
+
+        // Leader: broker1
+        let partition1 = MetadataResponsePartition::default()
+            .with_leader_id(0.into())
+            .with_partition_index(1);
+
+        // Leader: broker1
+        let partition2 = MetadataResponsePartition::default()
+            .with_leader_id(0.into())
+            .with_partition_index(0);
+
+        let topic_name: TopicName = StrBytes::from_static_str("topic").into();
+
+        let topic = MetadataResponseTopic::default()
+            .with_name(Some(topic_name.clone()))
+            .with_topic_id(Uuid::max())
+            .with_partitions(vec![partition1, partition2]);
+
+        let metadata = MetadataResponse::default()
+            .with_brokers(vec![broker1, broker2])
+            .with_controller_id(0.into())
+            .with_topics(vec![topic]);
+
+        // update with new metadata
+        cluster_manager.update_metadata(metadata).await;
+
+        // Assert =============================================================
+
+        let tasks = collect_tasks(&mut cluster_manager).await;
+
+        assert_eq!(tasks.len(), 2);
+
+        assert_partition_arrangement(tasks, vec![vec![0, 1], vec![]], topic_name, vec![]);
+    }
+
+    #[tokio::test]
+    async fn test_removed_partition() {
+        // Arrange ============================================================
+        let config = KafkaConfig::default();
+
+        let (context, _rx) = BrokerTaskContext::init(&config);
+
+        let (mut cluster_manager, _cluster) = ClusterTaskManager::bootstrap(
+            &[],
+            config,
+            NeverConnects,
+            NetworkTaskFactory,
+            context.child_context(),
+        );
+
+        let broker1 = MetadataResponseBroker::default()
+            .with_host(StrBytes::from_static_str("localhost"))
+            .with_node_id(0.into())
+            .with_port(9092);
+
+        let broker2 = MetadataResponseBroker::default()
+            .with_host(StrBytes::from_static_str("localhost"))
+            .with_node_id(1.into())
+            .with_port(9093);
+
+        // Leader: broker1
+        let partition1 = MetadataResponsePartition::default()
+            .with_leader_id(0.into())
+            .with_partition_index(0);
+
+        // Leader: broker2
+        let partition2 = MetadataResponsePartition::default()
+            .with_leader_id(1.into())
+            .with_partition_index(1);
+
+        let topic_name: TopicName = StrBytes::from_static_str("topic").into();
+
+        let topic = MetadataResponseTopic::default()
+            .with_name(Some(topic_name.clone()))
+            .with_topic_id(Uuid::max())
+            .with_partitions(vec![partition1, partition2]);
+
+        let metadata = MetadataResponse::default()
+            .with_brokers(vec![broker1.clone(), broker2.clone()])
+            .with_controller_id(0.into())
+            .with_topics(vec![topic]);
+
+        // update with initial metadata
+        cluster_manager.update_metadata(metadata).await;
+
+        // Act ================================================================
+
+        // Leader: broker1
+        let partition1 = MetadataResponsePartition::default()
+            .with_leader_id(0.into())
+            .with_partition_index(0);
+
+        let topic_name: TopicName = StrBytes::from_static_str("topic").into();
+
+        let topic = MetadataResponseTopic::default()
+            .with_name(Some(topic_name.clone()))
+            .with_topic_id(Uuid::max())
+            .with_partitions(vec![partition1]);
+
+        let metadata = MetadataResponse::default()
+            .with_brokers(vec![broker1, broker2])
+            .with_controller_id(0.into())
+            .with_topics(vec![topic]);
+
+        // update with new metadata
+        cluster_manager.update_metadata(metadata).await;
+
+        // Assert =============================================================
+
+        let tasks = collect_tasks(&mut cluster_manager).await;
+
+        assert_eq!(tasks.len(), 2);
+
+        assert_partition_arrangement(tasks, vec![vec![0], vec![]], topic_name, vec![1]);
+    }
+}

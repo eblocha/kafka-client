@@ -95,6 +95,7 @@ impl TestHarness {
     }
 }
 
+#[derive(Clone)]
 pub struct NeverConnects;
 
 impl Connect for NeverConnects {

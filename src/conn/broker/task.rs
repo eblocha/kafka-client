@@ -5,6 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     common::Node,
+    config::KafkaConfig,
     conn::{
         broker::{connector::NodeConnector, partition_queue::PartitionQueueMap},
         selector::RefreshMetadataRequest,
@@ -22,6 +23,20 @@ pub struct BrokerTaskContext {
 }
 
 impl BrokerTaskContext {
+    /// Initialize a new context
+    pub fn init(config: &KafkaConfig) -> (Self, mpsc::Receiver<RefreshMetadataRequest>) {
+        let (tx, rx) = mpsc::channel(config.metadata.refresh_batch_count);
+
+        (
+            Self {
+                cancellation_token: CancellationToken::new(),
+                flush: CancellationToken::new(),
+                tx,
+            },
+            rx,
+        )
+    }
+
     pub fn child_context(&self) -> Self {
         Self {
             cancellation_token: self.cancellation_token.child_token(),
