@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, fmt::Debug, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use kafka_protocol::messages::{TopicName, metadata_request::MetadataRequestTopic};
@@ -297,11 +297,11 @@ impl<
         self.metadata_join_set.abort_all();
 
         while let Some(result) = self.metadata_join_set.join_next().await {
-            if let Err(join_err) = result {
-                if join_err.is_panic() {
-                    clean_shutdown = false;
-                    tracing::error!("metadata refresh task stopped with an error: {join_err}");
-                }
+            if let Err(join_err) = result
+                && join_err.is_panic()
+            {
+                clean_shutdown = false;
+                tracing::error!("metadata refresh task stopped with an error: {join_err}");
             }
         }
 
@@ -332,6 +332,17 @@ pub(crate) struct SelectorTaskHandle<Task: BrokerTask, TaskHandle> {
     context: BrokerTaskContext,
     join_handle: JoinHandle<Result<(), KafkaError>>,
     config: KafkaConfig,
+}
+
+impl<Task: BrokerTask, TaskHandle> Debug for SelectorTaskHandle<Task, TaskHandle> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelectorTaskHandle")
+            .field("cluster", &"Arc<_>")
+            .field("context", &self.context)
+            .field("join_handle", &self.join_handle)
+            .field("config", &self.config)
+            .finish()
+    }
 }
 
 impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, TaskHandle> {
@@ -367,51 +378,10 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
         connect: Conn,
         task_factory: Factory,
     ) -> Result<Self, KafkaError> {
-        let task_tracker = TaskTracker::new();
+        let (this, rx_bootstrap) =
+            SelectorTaskHandle::start(bootstrap, config, connect, task_factory);
 
-        let (tx_bootstrap, rx_bootstrap) = oneshot::channel();
-
-        let (context, rx_topic_metadata) = BrokerTaskContext::init(&config);
-
-        let (cluster_manager, cluster) = ClusterTaskManager::bootstrap(
-            bootstrap,
-            config.clone(),
-            connect,
-            task_factory,
-            context.child_context(),
-        );
-
-        // start the selector task to manage broker connections
-        let selector_task = SelectorTask {
-            cluster_manager,
-            rx: rx_topic_metadata,
-            config: config.clone(),
-            metadata_backoff: HashMap::default(),
-            metadata_join_set: JoinSet::new(),
-            cancellation_token: context.cancellation_token.clone(),
-            bootstrap_signal: Some(tx_bootstrap),
-            flush: context.flush.clone(),
-        };
-
-        let mut join_handle = task_tracker.spawn(selector_task.run());
-        task_tracker.close();
-
-        tokio::select! {
-            // wait for bootstrap. Task will drop this channel when finished with bootstrap.
-            _ = rx_bootstrap => Ok(()),
-            // or failure to bootstrap
-            result = (&mut join_handle) => result.map_err(|join_err| {
-                tracing::error!("bootstrapping stopped unexpectedly: {join_err}");
-                KafkaError::Init(ConnectionInitError::Closed)
-            })?,
-        }?;
-
-        Ok(Self {
-            cluster,
-            context,
-            join_handle,
-            config,
-        })
+        this.await_bootstrap(rx_bootstrap).await
     }
 
     async fn refresh_metadata_for_topic(&self, topic: &TopicName) -> Result<(), KafkaError> {
@@ -443,9 +413,248 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
 
         Ok(())
     }
+
+    /// Start the task, but do not wait for bootstrap to succeed
+    fn start<
+        Conn: Connect + Clone + Send + 'static,
+        Factory: BrokerTaskFactory<Conn, Task = Task, Handle = TaskHandle>,
+    >(
+        bootstrap: &[BrokerHost],
+        config: KafkaConfig,
+        connect: Conn,
+        task_factory: Factory,
+    ) -> (Self, oneshot::Receiver<()>) {
+        let task_tracker = TaskTracker::new();
+
+        let (tx_bootstrap, rx_bootstrap) = oneshot::channel();
+
+        let (context, rx_topic_metadata) = BrokerTaskContext::init(&config);
+
+        let (cluster_manager, cluster) = ClusterTaskManager::bootstrap(
+            bootstrap,
+            config.clone(),
+            connect,
+            task_factory,
+            context.child_context(),
+        );
+
+        // start the selector task to manage broker connections
+        let selector_task = SelectorTask {
+            cluster_manager,
+            rx: rx_topic_metadata,
+            config: config.clone(),
+            metadata_backoff: HashMap::default(),
+            metadata_join_set: JoinSet::new(),
+            cancellation_token: context.cancellation_token.clone(),
+            bootstrap_signal: Some(tx_bootstrap),
+            flush: context.flush.clone(),
+        };
+
+        let join_handle = task_tracker.spawn(selector_task.run());
+        task_tracker.close();
+
+        (
+            Self {
+                cluster,
+                context,
+                join_handle,
+                config,
+            },
+            rx_bootstrap,
+        )
+    }
+
+    async fn await_bootstrap(
+        mut self,
+        rx_bootstrap: oneshot::Receiver<()>,
+    ) -> Result<Self, KafkaError> {
+        tokio::select! {
+            // wait for bootstrap. Task will drop this channel when finished with bootstrap.
+            _ = rx_bootstrap => Ok(()),
+            // or failure to bootstrap
+            result = (&mut self.join_handle) => result.map_err(|join_err| {
+                tracing::error!("bootstrapping stopped unexpectedly: {join_err}");
+                KafkaError::Init(ConnectionInitError::Closed)
+            })?,
+        }?;
+
+        Ok(self)
+    }
 }
 
 #[cfg(test)]
 mod test {
-    // TODO tests
+    use std::{io, time::Duration};
+
+    use kafka_protocol::{
+        messages::{
+            ApiKey, ApiVersionsResponse, MetadataRequest, MetadataResponse,
+            api_versions_response::ApiVersion, metadata_response::MetadataResponseBroker,
+        },
+        protocol::{Message, StrBytes},
+    };
+    use tokio::sync::{mpsc, oneshot};
+    use tokio_test::{assert_err, assert_ok};
+    use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+    use crate::{
+        common::BrokerHost,
+        config::KafkaConfig,
+        conn::{
+            broker::{init_error::ConnectionInitError, task::BrokerTaskHandle},
+            channel::{KafkaChannel, KafkaChannelMessage},
+            selector::SelectorTaskHandle,
+            testing::await_timeout,
+        },
+        error::KafkaError,
+        network::{
+            handle::{NetworkTaskFactory, NetworkTaskHandle},
+            task::NetworkTask,
+        },
+    };
+
+    fn setup_single_node(
+        config: KafkaConfig,
+    ) -> (
+        SelectorTaskHandle<NetworkTask<KafkaChannel>, NetworkTaskHandle>,
+        oneshot::Receiver<()>,
+        mpsc::Receiver<KafkaChannelMessage>,
+        CancellationToken,
+    ) {
+        let (tx, rx_channel) = mpsc::channel(1);
+        let channel_task_tracker = TaskTracker::new();
+        let channel_cancellation_token = CancellationToken::new();
+        let channel =
+            KafkaChannel::from_parts(tx, channel_task_tracker, channel_cancellation_token.clone());
+
+        let (selector_handle, rx_bootstrap) = SelectorTaskHandle::start(
+            &[BrokerHost("localhost".into(), 9092)],
+            config,
+            channel.clone(),
+            NetworkTaskFactory,
+        );
+
+        (
+            selector_handle,
+            rx_bootstrap,
+            rx_channel,
+            channel_cancellation_token,
+        )
+    }
+
+    async fn respond_versions_request(rx: &mut mpsc::Receiver<KafkaChannelMessage>) {
+        let req = rx.recv().await.unwrap();
+
+        assert_eq!(req.versioned.request.as_api_key(), ApiKey::ApiVersions);
+
+        let metadata_req_version = ApiVersion::default()
+            .with_api_key(ApiKey::Metadata as i16)
+            .with_max_version(MetadataRequest::VERSIONS.max)
+            .with_min_version(MetadataRequest::VERSIONS.min);
+
+        req.respond(ApiVersionsResponse::default().with_api_keys(vec![metadata_req_version]));
+    }
+
+    async fn respond_with_metadata(rx: &mut mpsc::Receiver<KafkaChannelMessage>) {
+        let req = rx.recv().await.unwrap();
+
+        let broker = MetadataResponseBroker::default()
+            .with_host(StrBytes::from_static_str("localhost"))
+            .with_node_id(0.into())
+            .with_port(9092);
+
+        assert_eq!(req.versioned.request.as_api_key(), ApiKey::Metadata);
+
+        req.respond(MetadataResponse::default().with_brokers(vec![broker]));
+    }
+
+    #[tokio::test]
+    async fn test_boostrap_success() {
+        let (selector_handle, rx_bootstrap, mut rx_channel, _) =
+            setup_single_node(KafkaConfig::default());
+
+        await_timeout!(respond_versions_request(&mut rx_channel));
+        await_timeout!(respond_with_metadata(&mut rx_channel));
+
+        let result = await_timeout!(selector_handle.await_bootstrap(rx_bootstrap));
+
+        assert_ok!(result);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_refresh_interval() {
+        let mut config = KafkaConfig::default();
+        // Set to refresh faster than timeout
+        config.metadata.refresh_interval = Duration::from_millis(100);
+
+        let (selector_handle, rx_bootstrap, mut rx_channel, _) = setup_single_node(config);
+
+        await_timeout!(respond_versions_request(&mut rx_channel));
+        await_timeout!(respond_with_metadata(&mut rx_channel));
+
+        let _ = await_timeout!(selector_handle.await_bootstrap(rx_bootstrap)).unwrap();
+
+        let now = tokio::time::Instant::now();
+
+        await_timeout!(
+            respond_with_metadata(&mut rx_channel),
+            Duration::from_secs(1)
+        );
+
+        assert_eq!(now.elapsed(), Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_max_retries() {
+        let mut config = KafkaConfig::default();
+        config.bootstrap_max_retries = Some(1);
+
+        let (selector_handle, rx_bootstrap, mut rx_channel, _) = setup_single_node(config);
+
+        let req = await_timeout!(rx_channel.recv()).unwrap();
+        req.tx.send_err(io::ErrorKind::ConnectionRefused.into());
+
+        // Should get one retry, then fail
+        let req = await_timeout!(rx_channel.recv()).unwrap();
+        req.tx.send_err(io::ErrorKind::ConnectionRefused.into());
+
+        let result = await_timeout!(selector_handle.await_bootstrap(rx_bootstrap));
+
+        assert_err!(&result);
+
+        let err = result.unwrap_err();
+
+        assert!(matches!(err, KafkaError::Init(ConnectionInitError::Io(_))))
+    }
+
+    #[tokio::test]
+    async fn test_restart_node() {
+        let (selector_handle, rx_bootstrap, mut rx_channel, _) =
+            setup_single_node(KafkaConfig::default());
+
+        await_timeout!(respond_versions_request(&mut rx_channel));
+        await_timeout!(respond_with_metadata(&mut rx_channel));
+
+        let selector_task_handle =
+            await_timeout!(selector_handle.await_bootstrap(rx_bootstrap)).unwrap();
+
+        let handle = {
+            // Stop the network task
+            let cluster = selector_task_handle.cluster.load();
+
+            let entry = cluster.brokers.get(&0).unwrap();
+            entry.ctx.cancellation_token.cancel();
+
+            entry.handle.clone()
+        };
+
+        // Send a request to wake up the task
+        tokio::spawn(async move {
+            handle.send(MetadataRequest::default()).await.unwrap();
+        });
+
+        let req = await_timeout!(rx_channel.recv()).unwrap();
+
+        assert_eq!(req.versioned.request.as_api_key(), ApiKey::Metadata);
+    }
 }

@@ -113,8 +113,9 @@ impl Default for MetadataConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy)]
 pub enum CompressionCodec {
+    #[default]
     None,
     Gzip,
     Snappy,
@@ -131,12 +132,6 @@ impl From<CompressionCodec> for Compression {
             CompressionCodec::Lz4 => Compression::Lz4,
             CompressionCodec::Zstd => Compression::Zstd,
         }
-    }
-}
-
-impl Default for CompressionCodec {
-    fn default() -> Self {
-        Self::None
     }
 }
 

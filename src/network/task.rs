@@ -55,6 +55,12 @@ impl<Conn: Connect + Send + 'static> BrokerTask for NetworkTask<Conn> {
             let _ = tx.send(conn);
         }
 
+        tracing::debug!(
+            broker_id = self.connector.node.id,
+            host = ?self.connector.node.host,
+            "shutting down network task"
+        );
+
         Some(self)
     }
 

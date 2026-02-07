@@ -119,3 +119,22 @@ pub fn create_channel() -> (TestHarness, KafkaChannel) {
 
     (harness, channel)
 }
+
+/// Await a future with a timeout.
+///
+/// If a timeout is not provided, a default of 500ms is used.
+///
+/// # Panics
+/// This will panic if the timeout is exceeded before the future completes.
+macro_rules! await_timeout {
+    ($fut:expr) => {
+        $crate::conn::testing::await_timeout!($fut, ::core::time::Duration::from_millis(500))
+    };
+    ($fut:expr,$duration:expr) => {
+        ::tokio::time::timeout($duration, $fut)
+            .await
+            .expect("timeout reached")
+    };
+}
+
+pub(crate) use await_timeout;

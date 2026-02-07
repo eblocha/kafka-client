@@ -514,7 +514,7 @@ fn create_request(
 
             for ctx in records.drain(..) {
                 let _ = ctx.tx.send(Err(KafkaError::Channel(
-                    io::Error::new(io::ErrorKind::Other, "record batch failed to encode").into(),
+                    io::Error::other("record batch failed to encode").into(),
                 )));
             }
             continue;

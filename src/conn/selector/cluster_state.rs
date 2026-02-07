@@ -105,6 +105,11 @@ impl<TaskHandle: BrokerTaskHandle> BrokerMap<TaskHandle> {
         self.0.iter_mut().find(|entry| entry.node.id == *broker_id)
     }
 
+    #[cfg(test)]
+    pub(super) fn get(&self, broker_id: &i32) -> Option<&BrokerMapEntry<TaskHandle>> {
+        self.0.iter().find(|entry| entry.node.id == *broker_id)
+    }
+
     pub(super) fn insert(&mut self, entry: BrokerMapEntry<TaskHandle>) {
         if let Some(existing) = self.get_mut(&entry.node.id) {
             *existing = entry;
