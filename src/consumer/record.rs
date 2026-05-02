@@ -1,0 +1,14 @@
+use kafka_protocol::records::Record;
+
+use crate::common::TopicPartition;
+
+/// A set of records from a topic partition
+#[derive(Debug, Clone)]
+pub struct ConsumerRecords {
+    /// The topic name and partition index
+    pub topic_partition: TopicPartition,
+    /// The batch of records from the partition
+    pub records: Vec<Record>,
+    /// The offset of the last record in `records`.
+    pub largest_offset: Option<i64>,
+}
