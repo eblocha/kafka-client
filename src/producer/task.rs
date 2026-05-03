@@ -40,7 +40,7 @@ use crate::{
         prepared_record::{DeliveryMetadata, PreparedRecord},
         record::RecordMetadata,
     },
-    util::StreamExt,
+    util::{StreamExt, TopicNameExt},
 };
 
 pub(super) struct ProducerSendRecord {
@@ -497,7 +497,7 @@ fn create_request(
         });
     }
 
-    let mut topic_data = FxHashMap::<TopicName, TopicProduceData>::default();
+    let mut topic_data = FxHashMap::<&str, TopicProduceData>::default();
 
     for (tp, records) in &mut partitions {
         let mut buf = BytesMut::new();
@@ -524,18 +524,18 @@ fn create_request(
             .with_index(tp.partition())
             .with_records(Some(buf.into()));
 
-        if let Some(produce_data) = topic_data.get_mut(tp.name()) {
+        if let Some(produce_data) = topic_data.get_mut(tp.name().as_str()) {
             produce_data.partition_data.push(partition_data);
         } else {
             topic_data.insert(
-                tp.name().clone(),
+                tp.name().as_str(),
                 TopicProduceData::default().with_partition_data(vec![partition_data]),
             );
         }
     }
 
     for (name, mut data) in topic_data {
-        data.name = name;
+        data.name = TopicName::from_string(name.to_owned());
         req.topic_data.push(data);
     }
 

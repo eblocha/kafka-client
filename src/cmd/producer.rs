@@ -89,7 +89,7 @@ impl Run for ProduceRandom {
     ) -> anyhow::Result<Self::Response> {
         let producer = Producer::try_new(bootstrap, config).await?;
 
-        let topic = TopicName(StrBytes::from_string(self.topic));
+        let topic = self.topic.clone();
 
         let now = Instant::now();
 
@@ -150,8 +150,6 @@ impl ProduceFromFile {
         topic: String,
     ) -> anyhow::Result<JoinSet<Result<RecordMetadata, KafkaError>>> {
         let mut reader = io::BufReader::new(file).lines();
-
-        let topic = TopicName(StrBytes::from_string(topic));
 
         let mut join_set = JoinSet::new();
 

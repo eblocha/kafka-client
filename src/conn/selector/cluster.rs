@@ -353,7 +353,7 @@ impl<
                         .map(|part| (part.partition_index, part))
                         .collect::<FxHashMap<_, _>>();
 
-                    (topic_name, (topic, partition_map))
+                    (topic_name.as_str(), (topic, partition_map))
                 })
             })
             .collect::<FxHashMap<_, _>>();
@@ -411,7 +411,7 @@ impl<
 
             // Revoke existing partitions
             for part in tps {
-                let Some((topic, partitions)) = requested_topics.get(part.name()) else {
+                let Some((topic, partitions)) = requested_topics.get(part.name().as_str()) else {
                     // Topic was not requested
                     continue;
                 };

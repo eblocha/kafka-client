@@ -6,6 +6,7 @@ use std::{
 };
 
 use futures::FutureExt;
+use kafka_protocol::messages::TopicName;
 use tokio::sync::oneshot;
 
 use crate::{
@@ -23,6 +24,7 @@ use crate::{
         record::{ProducerRecord, RecordMetadata},
         task::{ProducerSendMessage, ProducerSendRecord, ProducerTask},
     },
+    util::TopicNameExt,
 };
 
 /// A future that resolves to [`RecordMetadata`] once the server has acknowledged the record.
@@ -71,11 +73,12 @@ impl Producer<Tcp, KeyHashPartitioner> {
 
 impl<Conn: Connect + Send + 'static, P: Partitioner> Producer<Conn, P> {
     pub async fn produce(&self, mut record: ProducerRecord) -> Result<ProduceFuture, KafkaError> {
-        self.selector.check_topic_metadata(&record.topic).await?;
+        let topic_name = TopicName::from_string(record.topic.clone());
+        self.selector.check_topic_metadata(&topic_name).await?;
 
         let cluster = self.selector.cluster.load();
 
-        let Some(topic_data) = cluster.metadata.get_topic_metadata_by_name(&record.topic) else {
+        let Some(topic_data) = cluster.metadata.get_topic_metadata_by_name(&topic_name) else {
             return Err(ErrorCode::UnknownTopicOrPartition.into());
         };
 
@@ -91,7 +94,7 @@ impl<Conn: Connect + Send + 'static, P: Partitioner> Producer<Conn, P> {
 
         let partition_metadata = topic_data.get_partition_metadata(partition)?;
 
-        let tp = TopicPartition::new(record.topic.clone(), partition);
+        let tp = TopicPartition::new(topic_name, partition);
 
         let Some(tx_partition) = cluster.partitions.get(&tp) else {
             return Err(ErrorCode::UnknownTopicOrPartition.into());
