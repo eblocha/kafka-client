@@ -78,7 +78,7 @@ impl<Conn: Connect + Send + 'static, P: Partitioner> Producer<Conn, P> {
 
         let cluster = self.selector.cluster.load();
 
-        let Some(topic_data) = cluster.metadata.get_topic_metadata_by_name(&topic_name) else {
+        let Some(topic_data) = cluster.metadata.get_topic_metadata(&topic_name) else {
             return Err(ErrorCode::UnknownTopicOrPartition.into());
         };
 
