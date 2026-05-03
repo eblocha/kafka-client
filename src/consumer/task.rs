@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use itertools::Itertools;
 use kafka_protocol::messages::{
@@ -64,7 +64,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ConsumerTask<Conn> {
             .partitions
             .iter()
             .map(|(tp, _)| tp)
-            .sorted_by_key(|tp| tp.name())
+            .sorted()
             .collect::<Vec<_>>();
 
         loop {
@@ -145,11 +145,17 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ConsumerTask<Conn> {
                 Ok(fetch_response) => {
                     for topic in fetch_response.responses {
                         for partition_data in topic.partitions {
-                            let Some(tx) = self.partitions.get(&TopicPartition::new(
+                            let tp = TopicPartition::new(
                                 topic.topic.clone(),
                                 partition_data.partition_index,
-                            )) else {
-                                // Got a response for a partition we did not request
+                            );
+                            let Some(tx) = self.partitions.get(&tp) else {
+                                tracing::warn!(
+                                    broker_id = node.id,
+                                    host = ?node.host,
+                                    topic_partition = ?tp,
+                                    "got a fetch response for a partition we did not request"
+                                );
                                 continue;
                             };
 
