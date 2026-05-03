@@ -337,7 +337,7 @@ pub(crate) struct SelectorTaskHandle<Task: BrokerTask, TaskHandle> {
 impl<Task: BrokerTask, TaskHandle> Debug for SelectorTaskHandle<Task, TaskHandle> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SelectorTaskHandle")
-            .field("cluster", &"Arc<_>")
+            .field("cluster", &self.cluster.load().metadata)
             .field("context", &self.context)
             .field("join_handle", &self.join_handle)
             .field("config", &self.config)
@@ -469,13 +469,16 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
         rx_bootstrap: oneshot::Receiver<()>,
     ) -> Result<Self, KafkaError> {
         tokio::select! {
-            // wait for bootstrap. Task will drop this channel when finished with bootstrap.
-            _ = rx_bootstrap => Ok(()),
+            // Biased is needed to check for error state before rx_bootstrap.
+            // When a bootstrap error happens, the task is dropped, along with the Sender side of rx_bootstrap.
+            biased;
             // or failure to bootstrap
             result = (&mut self.join_handle) => result.map_err(|join_err| {
                 tracing::error!("bootstrapping stopped unexpectedly: {join_err}");
                 KafkaError::Init(ConnectionInitError::Closed)
             })?,
+            // wait for bootstrap. Task will drop this channel when finished with bootstrap.
+            _ = rx_bootstrap => Ok(()),
         }?;
 
         Ok(self)
@@ -604,8 +607,6 @@ mod test {
         assert_eq!(now.elapsed(), Duration::from_millis(100));
     }
 
-    // TODO some kind of race
-    #[ignore]
     #[tokio::test]
     async fn test_bootstrap_max_retries() {
         let mut config = KafkaConfig::default();
