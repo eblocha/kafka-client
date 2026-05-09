@@ -10,7 +10,7 @@ use kafka_client::{common::BrokerHost, config::KafkaConfig};
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
-use crate::cmd::producer::ProducerCommands;
+use crate::cmd::{consumer::EchoTopics, producer::ProducerCommands};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -37,12 +37,12 @@ enum Client {
     /// Produce messages to a topic.
     #[command(subcommand)]
     Producer(ProducerCommands),
-    // /// Start a consumer and print any record values from the topic to stdout.
-    // Consumer {
-    //     /// A comma-separated list of topic names to listen on.
-    //     #[arg(short, long, value_delimiter = ',', num_args = 1.., required = true)]
-    //     topics: Vec<String>,
-    // },
+    /// Start a consumer and print any record values from the topic to stdout.
+    Consumer {
+        /// A comma-separated list of topic names to listen on.
+        #[arg(short, long, value_delimiter = ',', num_args = 1.., required = true)]
+        topics: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -63,6 +63,11 @@ pub async fn main() -> anyhow::Result<()> {
     match cli.client {
         Client::Admin(cmd) => cmd.run(&cli.bootstrap_servers, config).await?,
         Client::Producer(cmd) => cmd.run(&cli.bootstrap_servers, config).await?,
+        Client::Consumer { topics } => {
+            EchoTopics { topics }
+                .run(&cli.bootstrap_servers, config)
+                .await?
+        }
     }
 
     Ok(())

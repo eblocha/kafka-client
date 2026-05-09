@@ -1,6 +1,6 @@
 use kafka_protocol::records::Record;
 
-use crate::common::TopicPartition;
+use crate::{common::TopicPartition, error::KafkaError};
 
 /// A set of records from a topic partition
 #[derive(Debug, Clone)]
@@ -12,3 +12,5 @@ pub struct ConsumerRecords {
     /// The offset of the last record in `records`.
     pub largest_offset: Option<i64>,
 }
+
+pub type ConsumerRecordsResult = Result<Vec<ConsumerRecords>, KafkaError>;

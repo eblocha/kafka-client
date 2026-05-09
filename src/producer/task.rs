@@ -31,7 +31,7 @@ use crate::{
             task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle},
         },
         connect::Connect,
-        selector::RefreshMetadataRequest,
+        selector::{ClusterMetadata, RefreshMetadataRequest},
     },
     error::{ErrorCode, KafkaError},
     network::{handle::NetworkTaskHandle, task::NetworkTask},
@@ -98,7 +98,7 @@ impl<Conn> ProducerTask<Conn> {
         )
     }
 
-    async fn run_empty(self, ctx: BrokerTaskContext) -> Option<Self>
+    async fn run_empty(self, ctx: BrokerTaskContext, cluster: ClusterMetadata) -> Option<Self>
     where
         Conn: Connect + Send + 'static,
     {
@@ -113,7 +113,7 @@ impl<Conn> ProducerTask<Conn> {
         Some(Self {
             partitions: self.partitions,
             inner_handle: self.inner_handle,
-            inner_task: self.inner_task.run(ctx).await?,
+            inner_task: self.inner_task.run(ctx, cluster).await?,
             config: self.config,
         })
     }
@@ -167,9 +167,9 @@ impl PartialProducerTask {
 impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
     type PartitionMessage = ProducerSendMessage;
 
-    async fn run(self, ctx: BrokerTaskContext) -> Option<Self> {
+    async fn run(self, ctx: BrokerTaskContext, cluster: ClusterMetadata) -> Option<Self> {
         if self.partitions.is_empty() {
-            return self.run_empty(ctx).await;
+            return self.run_empty(ctx, cluster).await;
         }
 
         let (inner_task, mut partitions, this) = self.split();
@@ -189,7 +189,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
         };
         let network_task_tracker = TaskTracker::new();
         let connection_join_handle =
-            network_task_tracker.spawn(inner_task.run(network_ctx.clone()));
+            network_task_tracker.spawn(inner_task.run(network_ctx.clone(), cluster));
         network_task_tracker.close();
 
         let chunks = (&mut partitions).chunks_timeout(

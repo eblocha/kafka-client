@@ -6,18 +6,19 @@ use crate::{
     config::KafkaConfig,
     conn::{KafkaChannelError, selector::SelectorTaskHandle},
     connect::{Connect, Tcp},
-    consumer::{record::ConsumerRecords, subscription::Subscription, unsubscribe::Unsubscribe},
-    error::KafkaError,
-    network::{
-        handle::{NetworkTaskFactory, NetworkTaskHandle},
-        task::NetworkTask,
+    consumer::{
+        handle::{ConsumerTaskFactory, ConsumerTaskHandle},
+        record::ConsumerRecordsResult,
+        subscription::Subscription,
+        task::ConsumerTask,
     },
+    error::KafkaError,
     util::TopicNameExt,
 };
 
 pub struct Consumer<Conn: Connect + Send + 'static> {
-    selector: SelectorTaskHandle<NetworkTask<Conn>, NetworkTaskHandle>,
-    rx: mpsc::Receiver<Result<ConsumerRecords, KafkaError>>,
+    selector: SelectorTaskHandle<ConsumerTask<Conn>, ConsumerTaskHandle>,
+    rx: mpsc::Receiver<ConsumerRecordsResult>,
 }
 
 impl Consumer<Tcp> {
@@ -27,26 +28,27 @@ impl Consumer<Tcp> {
     ) -> Result<Self, KafkaError> {
         tracing::debug!("{config:#?}");
 
-        let (_tx, rx) = mpsc::channel(1);
+        let (tx, rx) = mpsc::channel(1);
 
-        let selector =
-            SelectorTaskHandle::try_new_tcp(bootstrap, config.clone(), NetworkTaskFactory).await?;
+        let selector = SelectorTaskHandle::try_new_tcp(
+            bootstrap,
+            config.clone(),
+            ConsumerTaskFactory { config, tx },
+        )
+        .await?;
 
         Ok(Self { selector, rx })
     }
 }
 
 impl<Conn: Connect + Send + 'static> Consumer<Conn> {
-    pub async fn add_subscription(
-        &self,
-        subscription: Subscription,
-    ) -> Result<Unsubscribe, KafkaError> {
+    pub async fn subscribe(&self, subscription: Subscription) -> Result<(), KafkaError> {
         // request topics
-        match subscription {
-            Subscription::TopicPattern(_) => todo!(),
+        match &subscription {
+            Subscription::TopicPattern(_) => unimplemented!(),
             Subscription::Topic(topic_name) => {
                 self.selector
-                    .check_topic_metadata(&TopicName::from_string(topic_name))
+                    .check_topic_metadata(&TopicName::from_string(topic_name.clone()))
                     .await?;
             }
             Subscription::TopicPartition(topic_partition) => {
@@ -56,7 +58,7 @@ impl<Conn: Connect + Send + 'static> Consumer<Conn> {
             }
         }
 
-        todo!()
+        Ok(())
     }
 
     /// Receive the next message from subscribed topics
@@ -64,7 +66,7 @@ impl<Conn: Connect + Send + 'static> Consumer<Conn> {
     /// # Errors
     ///
     /// This returns an [`Err`] if the client encountered an error it could not handle automatically.
-    pub async fn recv(&mut self) -> Result<ConsumerRecords, KafkaError> {
+    pub async fn recv(&mut self) -> ConsumerRecordsResult {
         self.rx
             .recv()
             .await

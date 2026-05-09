@@ -255,8 +255,6 @@ pub struct ClusterMetadata {
 }
 
 impl ClusterMetadata {
-    // TODO will be useful for consumer
-    #[allow(unused)]
     #[inline]
     pub fn get_topic_uuid_by_name(&self, name: &TopicName) -> Option<Uuid> {
         self.topic_ids_by_name.get(name).copied()

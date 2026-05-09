@@ -128,7 +128,8 @@ impl<
 
             let (task, ctx) = this.create_new_task(node);
 
-            this.join_set.spawn(task.run(ctx));
+            this.join_set
+                .spawn(task.run(ctx, this.cluster.metadata.clone()));
         }
 
         let shared_cluster = this.shared_cluster.clone();
@@ -235,6 +236,10 @@ impl<
             tasks.insert(broker_id, self.create_new_task(Node::from(broker)).0);
         }
 
+        self.cluster
+            .metadata
+            .update_with(metadata.clone(), Instant::now());
+
         // Restart each task
         for (broker_id, task) in tasks {
             let Some(entry) = self.cluster.brokers.get_mut(&broker_id) else {
@@ -256,7 +261,8 @@ impl<
                 "starting broker task"
             );
 
-            self.join_set.spawn(task.run(entry.ctx.clone()));
+            self.join_set
+                .spawn(task.run(entry.ctx.clone(), self.cluster.metadata.clone()));
         }
 
         tracing::debug!("removing {} partitions", partition_streams.len());
@@ -265,10 +271,6 @@ impl<
         for (tp, _) in partition_streams.drain() {
             self.cluster.partitions.remove(&tp);
         }
-
-        self.cluster
-            .metadata
-            .update_with(metadata.clone(), Instant::now());
 
         self.shared_cluster.store(Arc::new(self.cluster.clone()));
 
@@ -301,7 +303,8 @@ impl<
 
             *dead_task.get_node_mut() = entry.node.clone();
 
-            self.join_set.spawn(dead_task.run(entry.ctx.clone()));
+            self.join_set
+                .spawn(dead_task.run(entry.ctx.clone(), self.cluster.metadata.clone()));
             self.cluster.brokers.insert(entry);
         }
     }

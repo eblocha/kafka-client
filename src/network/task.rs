@@ -13,6 +13,7 @@ use crate::{
             task::{BrokerTask, BrokerTaskContext},
         },
         connect::Connect,
+        selector::ClusterMetadata,
     },
 };
 
@@ -30,7 +31,7 @@ pub struct NetworkTask<Conn> {
 impl<Conn: Connect + Send + 'static> BrokerTask for NetworkTask<Conn> {
     type PartitionMessage = ();
 
-    async fn run(mut self, ctx: BrokerTaskContext) -> Option<Self> {
+    async fn run(mut self, ctx: BrokerTaskContext, _cluster: ClusterMetadata) -> Option<Self> {
         loop {
             let Some(Some(Some(NetworkTaskMessage { tx }))) = self
                 .rx

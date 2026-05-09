@@ -9,7 +9,7 @@ use crate::{
     conn::{
         Sendable,
         broker::{connector::NodeConnector, partition_queue::PartitionQueueMap},
-        selector::RefreshMetadataRequest,
+        selector::{ClusterMetadata, RefreshMetadataRequest},
     },
     error::KafkaError,
     proto::ver::{FromVersionRange, GetApiKey},
@@ -52,7 +52,11 @@ pub trait BrokerTask: Send + Sized + 'static {
     /// Run the task.
     ///
     /// This should return [`Some`] if it is eligible to be restarted, or [`None`] if the selector should not restart it.
-    fn run(self, ctx: BrokerTaskContext) -> impl Future<Output = Option<Self>> + Send;
+    fn run(
+        self,
+        ctx: BrokerTaskContext,
+        cluster: ClusterMetadata,
+    ) -> impl Future<Output = Option<Self>> + Send;
 
     /// Stop the connection
     fn shutdown(self) -> impl Future<Output = Self> + Send;

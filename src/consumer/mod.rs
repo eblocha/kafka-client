@@ -1,6 +1,5 @@
 pub mod client;
-mod message;
+pub(crate) mod handle;
 pub mod record;
 pub mod subscription;
 mod task;
-pub mod unsubscribe;

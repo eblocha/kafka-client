@@ -4,7 +4,7 @@ mod cancel;
 pub mod common;
 pub mod config;
 mod conn;
-#[doc(hidden)]
+
 pub mod consumer;
 pub mod error;
 pub mod network;
