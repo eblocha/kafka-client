@@ -267,9 +267,7 @@ impl ClusterMetadata {
 
     /// Create a [`Vec<MetadataRequestTopic>`] that will refresh metadata for all topics known to the client.
     pub(super) fn create_topics_for_refresh(&self) -> Vec<MetadataRequestTopic> {
-        self.topics
-            .iter()
-            .map(|(name, _)| {
+        self.topics.keys().map(|name| {
                 let mut req = MetadataRequestTopic::default();
                 req.name = Some(name.clone());
                 if let Some(uuid) = self.topic_ids_by_name.get(name) {

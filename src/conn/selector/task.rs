@@ -288,7 +288,8 @@ impl<
             self.cancellation_token.cancel();
         }
 
-        Ok(self.await_shutdown().await)
+        let _: () = self.await_shutdown().await;
+        Ok(())
     }
 
     async fn await_shutdown(mut self) {

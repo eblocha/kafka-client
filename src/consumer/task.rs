@@ -466,7 +466,7 @@ fn build_records_result_and_update_state(
     Ok(consumer_records)
 }
 
-fn count_records(records: &Vec<ConsumerRecords>) -> usize {
+fn count_records(records: &[ConsumerRecords]) -> usize {
     records
         .iter()
         .fold(0, |count, item| count + item.records.len())

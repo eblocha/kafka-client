@@ -201,7 +201,7 @@ impl AdminCommands {
                     .delete_topics(TopicCollection::Names(topics.clone()))
                     .await?;
 
-                for (name, result) in zip(topics, results.into_iter()) {
+                for (name, result) in zip(topics, results) {
                     some_failed = result.is_err();
                     match result {
                         Ok(deleted) => {
