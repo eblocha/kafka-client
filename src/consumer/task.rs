@@ -134,8 +134,8 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ConsumerTask<Conn> {
         let sorted_tps = state
             .iter()
             .map(|(tp, _)| tp)
-            .sorted()
             .cloned()
+            .sorted()
             .collect::<Vec<_>>();
 
         tracing::debug!(
