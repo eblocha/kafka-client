@@ -10,7 +10,6 @@ use kafka_protocol::{
     protocol::StrBytes,
 };
 use rustc_hash::FxHashMap;
-use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::{
@@ -267,7 +266,9 @@ impl ClusterMetadata {
 
     /// Create a [`Vec<MetadataRequestTopic>`] that will refresh metadata for all topics known to the client.
     pub(super) fn create_topics_for_refresh(&self) -> Vec<MetadataRequestTopic> {
-        self.topics.keys().map(|name| {
+        self.topics
+            .keys()
+            .map(|name| {
                 let mut req = MetadataRequestTopic::default();
                 req.name = Some(name.clone());
                 if let Some(uuid) = self.topic_ids_by_name.get(name) {
@@ -360,7 +361,7 @@ impl ClusterMetadata {
 pub struct Cluster<Task: BrokerTask, TaskHandle> {
     /// Mapping of all currently-known broker nodes.
     pub brokers: BrokerMap<TaskHandle>,
-    pub partitions: FxHashMap<TopicPartition, mpsc::Sender<Task::PartitionMessage>>,
+    pub partitions: FxHashMap<TopicPartition, Task::PublicPartitionState>,
     /// The cluster's metadata.
     pub metadata: ClusterMetadata,
 }

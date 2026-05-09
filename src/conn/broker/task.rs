@@ -4,11 +4,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    common::Node,
+    common::{Node, TopicPartition},
     config::KafkaConfig,
     conn::{
         Sendable,
-        broker::{connector::NodeConnector, partition_queue::PartitionQueueMap},
+        broker::connector::NodeConnector,
         selector::{ClusterMetadata, RefreshMetadataRequest},
     },
     error::KafkaError,
@@ -47,7 +47,13 @@ impl BrokerTaskContext {
 }
 
 pub trait BrokerTask: Send + Sized + 'static {
-    type PartitionMessage: Send;
+    /// The internal state of the partition for use by the task.
+    /// This state will persist if the partition is moved to a different broker.
+    type PartitionState: Send;
+
+    /// The public interface for clients to interact with a particular partition assigned to this broker.
+    /// A copy of this is kept in the selector task to be accessible to clients.
+    type PublicPartitionState: Send + Sync + Clone;
 
     /// Run the task.
     ///
@@ -61,12 +67,26 @@ pub trait BrokerTask: Send + Sized + 'static {
     /// Stop the connection
     fn shutdown(self) -> impl Future<Output = Self> + Send;
 
-    /// Get a mutable reference to the mapping of topic partition to a queue of messages for the partition.
-    ///
-    /// This mapping will be modified when a metadata refresh is received.
-    fn get_partitions_mut(&mut self) -> &mut PartitionQueueMap<Self::PartitionMessage>;
+    /// Assign an existing partition to this broker
+    fn assign(&mut self, topic_partition: TopicPartition, state: Self::PartitionState);
 
+    /// Assign a new partition to this broker.
+    ///
+    /// The task should handle construction and assignment of the inner state data.
+    fn assign_new(&mut self, topic_partition: TopicPartition) -> Self::PublicPartitionState;
+
+    /// Remove an assignment from this broker.
+    ///
+    /// Returns [`None`] if the broker is not assigned the partition.
+    fn revoke(&mut self, topic_partition: &TopicPartition) -> Option<Self::PartitionState>;
+
+    /// Get all of the assignments for the broker.
+    fn get_assignments(&self) -> Vec<TopicPartition>;
+
+    /// Get the broker's node information
     fn get_node(&self) -> &Node;
+
+    /// Get a mutable reference to the broker's node information
     fn get_node_mut(&mut self) -> &mut Node;
 }
 

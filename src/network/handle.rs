@@ -4,6 +4,7 @@ use std::sync::{
 };
 
 use arc_swap::ArcSwapOption;
+use rustc_hash::FxHashSet;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
@@ -11,7 +12,6 @@ use crate::{
         Sendable,
         broker::{
             connector::{NodeConnector, VersionedConnection},
-            partition_queue::PartitionQueueMap,
             task::{BrokerTaskFactory, BrokerTaskHandle},
         },
         connect::Connect,
@@ -141,7 +141,7 @@ impl<Conn: Connect + Send + 'static> BrokerTaskFactory<Conn> for NetworkTaskFact
         let task = NetworkTask {
             rx,
             connector,
-            partitions: PartitionQueueMap::default(),
+            partitions: FxHashSet::default(),
         };
 
         (handle, task)

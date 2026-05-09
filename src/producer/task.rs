@@ -57,6 +57,8 @@ pub(super) struct ProducerSendMessage {
     pub delivery: DeliveryMetadata,
 }
 
+pub(super) type ProducerPartitionState = PartitionQueue<ProducerSendMessage>;
+
 impl From<PreparedRecord> for ProducerSendMessage {
     fn from(value: PreparedRecord) -> Self {
         ProducerSendMessage {
@@ -165,7 +167,8 @@ impl PartialProducerTask {
 }
 
 impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
-    type PartitionMessage = ProducerSendMessage;
+    type PartitionState = ProducerPartitionState;
+    type PublicPartitionState = mpsc::Sender<ProducerSendMessage>;
 
     async fn run(self, ctx: BrokerTaskContext, cluster: ClusterMetadata) -> Option<Self> {
         if self.partitions.is_empty() {
@@ -357,16 +360,32 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ProducerTask<Conn> {
         }
     }
 
-    fn get_partitions_mut(&mut self) -> &mut PartitionQueueMap<Self::PartitionMessage> {
-        &mut self.partitions
-    }
-
     fn get_node(&self) -> &Node {
         self.inner_task.get_node()
     }
 
     fn get_node_mut(&mut self) -> &mut Node {
         self.inner_task.get_node_mut()
+    }
+
+    fn assign(&mut self, topic_partition: TopicPartition, state: Self::PartitionState) {
+        self.partitions.insert(topic_partition, state);
+    }
+
+    fn assign_new(&mut self, topic_partition: TopicPartition) -> Self::PublicPartitionState {
+        let (tx, rx) = mpsc::channel(self.config.producer.batch_count);
+
+        self.assign(topic_partition, PartitionQueue::new(rx));
+
+        tx
+    }
+
+    fn revoke(&mut self, topic_partition: &TopicPartition) -> Option<Self::PartitionState> {
+        self.partitions.remove(topic_partition)
+    }
+
+    fn get_assignments(&self) -> Vec<TopicPartition> {
+        self.partitions.keys().cloned().collect()
     }
 }
 

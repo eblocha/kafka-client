@@ -6,10 +6,7 @@ use kafka_protocol::messages::{
     metadata_response::MetadataResponseBroker,
 };
 use rustc_hash::FxHashMap;
-use tokio::{
-    sync::mpsc,
-    task::{JoinError, JoinSet},
-};
+use tokio::task::{JoinError, JoinSet};
 
 use crate::{
     common::{BrokerHost, Node, TopicPartition},
@@ -17,7 +14,6 @@ use crate::{
     conn::{
         broker::{
             connector::NodeConnector,
-            partition_queue::PartitionQueue,
             task::{BrokerTask, BrokerTaskContext, BrokerTaskFactory, BrokerTaskHandle},
         },
         selector::{BrokerMapEntry, Cluster},
@@ -209,21 +205,19 @@ impl<
 
                 let tp = TopicPartition::new(topic_name.clone(), partition.partition_index);
 
-                let stream = match partition_streams.remove(&tp) {
-                    Some(s) => s,
-                    None => {
-                        let (tx, rx) = mpsc::channel(self.config.producer.batch_count);
-                        self.cluster.partitions.insert(tp.clone(), tx);
-                        PartitionQueue::new(rx)
-                    }
-                };
-
                 let task = tasks
                     .entry(broker_id)
                     .or_insert_with(|| self.create_new_task(Node::from(*broker)).0);
 
-                // Assign this partition to the broker task
-                task.get_partitions_mut().insert(tp, stream);
+                match partition_streams.remove(&tp) {
+                    Some(s) => {
+                        task.assign(tp, s);
+                    }
+                    None => {
+                        let public_state = task.assign_new(tp.clone());
+                        self.cluster.partitions.insert(tp, public_state);
+                    }
+                }
             }
         }
 
@@ -337,12 +331,10 @@ impl<
         metadata: &MetadataResponse,
     ) -> (
         FxHashMap<i32, Task>,
-        FxHashMap<TopicPartition, PartitionQueue<Task::PartitionMessage>>,
+        FxHashMap<TopicPartition, Task::PartitionState>,
     ) {
-        let mut partition_streams: FxHashMap<
-            TopicPartition,
-            PartitionQueue<Task::PartitionMessage>,
-        > = HashMap::default();
+        let mut partition_streams: FxHashMap<TopicPartition, Task::PartitionState> =
+            HashMap::default();
         let mut tasks: FxHashMap<i32, Task> = Default::default();
 
         let requested_topics = metadata
@@ -383,10 +375,9 @@ impl<
 
             let Some(broker) = new_broker_ids.get(&id) else {
                 // This broker is no longer in the cluster. Stop the connection to its host and collect its partitions.
-                let parts = task.get_partitions_mut();
-                let tps = parts.keys().cloned().collect::<Vec<_>>();
+                let tps = task.get_assignments();
                 for part in tps {
-                    let stream = parts.remove(&part).expect(
+                    let stream = task.revoke(&part).expect(
                         "expected partition stream to exist since we are iterating over known keys",
                     );
                     partition_streams.insert(part, stream);
@@ -409,8 +400,7 @@ impl<
                 task = task.shutdown().await;
             }
 
-            let parts = task.get_partitions_mut();
-            let tps = parts.keys().cloned().collect::<Vec<_>>();
+            let tps = task.get_assignments();
 
             // Revoke existing partitions
             for part in tps {
@@ -439,7 +429,7 @@ impl<
                 }
                 // else -> partition does not exist
 
-                let stream = parts.remove(&part).expect(
+                let stream = task.revoke(&part).expect(
                     "expected partition stream to exist since we are iterating over known keys",
                 );
                 partition_streams.insert(part, stream);
@@ -515,19 +505,17 @@ mod test {
             let partitions = &expect_assignments[node.id as usize];
 
             for partition in &all_partitions {
-                let queue = task
-                    .get_partitions_mut()
-                    .remove(&TopicPartition::new(topic_name.clone(), *partition));
+                let state = task.revoke(&TopicPartition::new(topic_name.clone(), *partition));
 
                 if partitions.contains(&partition) {
                     assert!(
-                        queue.is_some(),
+                        state.is_some(),
                         "Node {} was not assigned partition {partition}",
                         node.id
                     );
                 } else {
                     assert!(
-                        queue.is_none(),
+                        state.is_none(),
                         "Node {} was assigned partition {partition}",
                         node.id
                     );
@@ -535,12 +523,10 @@ mod test {
             }
 
             for partition in &removed_partitions {
-                let queue = task
-                    .get_partitions_mut()
-                    .remove(&TopicPartition::new(topic_name.clone(), *partition));
+                let state = task.revoke(&TopicPartition::new(topic_name.clone(), *partition));
 
                 assert!(
-                    queue.is_none(),
+                    state.is_none(),
                     "Node {} was assigned partition {partition}",
                     node.id
                 );

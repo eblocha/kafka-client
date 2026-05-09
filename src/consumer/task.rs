@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use itertools::Itertools;
 use kafka_protocol::{
     messages::{
@@ -10,6 +8,7 @@ use kafka_protocol::{
     },
     records::RecordBatchDecoder,
 };
+use rustc_hash::FxHashMap;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
@@ -18,10 +17,7 @@ use crate::{
     common::{Node, TopicPartition},
     config::KafkaConfig,
     conn::{
-        broker::{
-            partition_queue::PartitionQueueMap,
-            task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle},
-        },
+        broker::task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle},
         selector::ClusterMetadata,
     },
     connect::Connect,
@@ -30,11 +26,11 @@ use crate::{
     network::{handle::NetworkTaskHandle, task::NetworkTask},
 };
 
-type PartitionState = ListOffsetsPartitionResponse;
-type ConsumerState = HashMap<TopicPartition, PartitionState>;
+pub type ConsumerPartitionState = Option<ListOffsetsPartitionResponse>;
+pub type ConsumerState = FxHashMap<TopicPartition, ConsumerPartitionState>;
 
 pub struct ConsumerTask<Conn> {
-    pub(super) partitions: PartitionQueueMap<()>,
+    pub(super) partitions: ConsumerState,
     pub(super) inner_handle: NetworkTaskHandle,
     pub(super) inner_task: NetworkTask<Conn>,
     pub(super) config: KafkaConfig,
@@ -42,18 +38,17 @@ pub struct ConsumerTask<Conn> {
 }
 
 struct PartialConsumerTask {
-    partitions: PartitionQueueMap<()>,
     inner_handle: NetworkTaskHandle,
     config: KafkaConfig,
     tx: mpsc::Sender<ConsumerRecordsResult>,
 }
 
 impl<Conn> ConsumerTask<Conn> {
-    fn split(self) -> (NetworkTask<Conn>, PartialConsumerTask) {
+    fn split(self) -> (NetworkTask<Conn>, ConsumerState, PartialConsumerTask) {
         (
             self.inner_task,
+            self.partitions,
             PartialConsumerTask {
-                partitions: self.partitions,
                 inner_handle: self.inner_handle,
                 config: self.config,
                 tx: self.tx,
@@ -86,6 +81,7 @@ impl<Conn> ConsumerTask<Conn> {
 impl PartialConsumerTask {
     async fn stop<Conn>(
         self,
+        state: ConsumerState,
         join_handle: JoinHandle<Option<NetworkTask<Conn>>>,
         ctx: BrokerTaskContext,
         node: &Node,
@@ -114,7 +110,7 @@ impl PartialConsumerTask {
         };
 
         Some(ConsumerTask {
-            partitions: self.partitions,
+            partitions: state,
             inner_handle: self.inner_handle,
             inner_task,
             config: self.config,
@@ -124,22 +120,22 @@ impl PartialConsumerTask {
 }
 
 impl<Conn: Connect + Send + 'static> BrokerTask for ConsumerTask<Conn> {
-    type PartitionMessage = ();
+    type PartitionState = ConsumerPartitionState;
+    type PublicPartitionState = ();
 
     async fn run(self, ctx: BrokerTaskContext, cluster: ClusterMetadata) -> Option<Self> {
         if self.partitions.is_empty() {
             return self.run_empty(ctx, cluster).await;
         }
 
-        let (inner_task, this) = self.split();
+        let (inner_task, mut state, this) = self.split();
         let node = inner_task.get_node().clone();
-        let mut state = HashMap::<TopicPartition, ListOffsetsPartitionResponse>::new();
 
-        let sorted_tps = this
-            .partitions
+        let sorted_tps = state
             .iter()
             .map(|(tp, _)| tp)
             .sorted()
+            .cloned()
             .collect::<Vec<_>>();
 
         tracing::debug!(
@@ -269,7 +265,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ConsumerTask<Conn> {
             };
         }
 
-        this.stop(connection_join_handle, network_ctx, &node, flushing)
+        this.stop(state, connection_join_handle, network_ctx, &node, flushing)
             .await
     }
 
@@ -283,10 +279,6 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ConsumerTask<Conn> {
         }
     }
 
-    fn get_partitions_mut(&mut self) -> &mut PartitionQueueMap<Self::PartitionMessage> {
-        &mut self.partitions
-    }
-
     fn get_node(&self) -> &Node {
         self.inner_task.get_node()
     }
@@ -294,11 +286,27 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ConsumerTask<Conn> {
     fn get_node_mut(&mut self) -> &mut Node {
         self.inner_task.get_node_mut()
     }
+
+    fn assign(&mut self, topic_partition: TopicPartition, state: Self::PartitionState) {
+        self.partitions.insert(topic_partition, state);
+    }
+
+    fn assign_new(&mut self, topic_partition: TopicPartition) -> Self::PublicPartitionState {
+        self.assign(topic_partition, ConsumerPartitionState::default());
+    }
+
+    fn revoke(&mut self, topic_partition: &TopicPartition) -> Option<Self::PartitionState> {
+        self.partitions.remove(topic_partition)
+    }
+
+    fn get_assignments(&self) -> Vec<TopicPartition> {
+        self.partitions.keys().cloned().collect()
+    }
 }
 
 /// Build the [`FetchRequest`] and [`Vec<ListOffsetsTopic>`] based on the current [`ConsumerState`].
 fn build_requests(
-    sorted_tps: &[&TopicPartition],
+    sorted_tps: &[TopicPartition],
     state: &ConsumerState,
     cluster: &ClusterMetadata,
 ) -> (FetchRequest, Vec<ListOffsetsTopic>) {
@@ -309,7 +317,8 @@ fn build_requests(
     let mut list_offsets_topics = Vec::<ListOffsetsTopic>::new();
 
     for tp in sorted_tps.iter() {
-        if let Some(tp_state) = state.get(tp) {
+        // The outer `None` case should be impossible here.
+        if let Some(Some(tp_state)) = state.get(tp) {
             // If we have current state, add to the fetch request
             // The partitions are iterated in sorted order, so we only have to look at the last topic
             // to see if we should append or create a new topic
@@ -399,12 +408,12 @@ fn update_fetch_request_and_state(
                 .unwrap_or_else(|ins| ins);
 
             fetch_topic.partitions.insert(pos, fetch_partition);
-            state.insert(tp, partition);
+            state.insert(tp, Some(partition));
         }
     }
 }
 
-fn build_fetch_partition(state: &PartitionState) -> FetchPartition {
+fn build_fetch_partition(state: &ListOffsetsPartitionResponse) -> FetchPartition {
     FetchPartition::default()
         .with_current_leader_epoch(state.leader_epoch)
         .with_fetch_offset(state.offset)
@@ -445,14 +454,10 @@ fn build_records_result_and_update_state(
                 .max();
 
             // Update the state with the fetch response
-            if let Some(state) = state.get_mut(&tp) {
+            if let Some(Some(state)) = state.get_mut(&tp) {
                 let next_offset = largest_offset.map(|o| o + 1).unwrap_or(state.offset);
                 state.leader_epoch = partition_data.current_leader.leader_epoch;
                 state.offset = next_offset;
-            } else {
-                dbg!(&state);
-                dbg!(&tp);
-                panic!()
             }
 
             consumer_records.push(ConsumerRecords {

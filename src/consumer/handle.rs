@@ -6,12 +6,14 @@ use crate::{
         Sendable,
         broker::{
             connector::NodeConnector,
-            partition_queue::PartitionQueueMap,
             task::{BrokerTaskFactory, BrokerTaskHandle},
         },
     },
     connect::Connect,
-    consumer::{record::ConsumerRecordsResult, task::ConsumerTask},
+    consumer::{
+        record::ConsumerRecordsResult,
+        task::{ConsumerState, ConsumerTask},
+    },
     error::KafkaError,
     network::handle::{NetworkTaskFactory, NetworkTaskHandle},
     proto::ver::{FromVersionRange, GetApiKey},
@@ -70,7 +72,7 @@ impl<Conn: Connect + Send + 'static> BrokerTaskFactory<Conn> for ConsumerTaskFac
         };
 
         let task = ConsumerTask {
-            partitions: PartitionQueueMap::default(),
+            partitions: ConsumerState::default(),
             inner_handle,
             inner_task,
             config: self.config.clone(),
