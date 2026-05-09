@@ -184,6 +184,27 @@ impl Default for ProducerConfig {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub enum ConsumerAutoOffsetReset {
+    Earliest,
+    #[default]
+    Latest,
+    None,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConsumerConfig {
+    pub auto_offset_reset: ConsumerAutoOffsetReset,
+}
+
+impl Default for ConsumerConfig {
+    fn default() -> Self {
+        Self {
+            auto_offset_reset: ConsumerAutoOffsetReset::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
     /// Maximum number of attempts to retry before bubbling up the error to the application. Use [`None`] to never give up.
@@ -247,6 +268,9 @@ pub struct KafkaConfig {
     /// Producer configuration.
     pub producer: ProducerConfig,
 
+    /// Consumer configuration.
+    pub consumer: ConsumerConfig,
+
     /// General retry configuration
     pub retry: RetryConfig,
 }
@@ -262,6 +286,7 @@ impl Default for KafkaConfig {
             metadata: MetadataConfig::default(),
             allow_auto_create_topics: false,
             producer: ProducerConfig::default(),
+            consumer: ConsumerConfig::default(),
             retry: RetryConfig::default(),
         }
     }

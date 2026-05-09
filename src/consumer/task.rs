@@ -15,7 +15,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use crate::{
     cancel::OrCancelled,
     common::{Node, TopicPartition},
-    config::KafkaConfig,
+    config::{ConsumerAutoOffsetReset, KafkaConfig},
     conn::{
         broker::task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle},
         selector::ClusterMetadata,
@@ -167,7 +167,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ConsumerTask<Conn> {
             }
 
             let (mut fetch_request, list_offsets_topics) =
-                build_requests(&sorted_tps, &state, &cluster);
+                build_requests(&sorted_tps, &state, &cluster, &this.config);
 
             // Fetch state for partitions without state
 
@@ -309,6 +309,7 @@ fn build_requests(
     sorted_tps: &[TopicPartition],
     state: &ConsumerState,
     cluster: &ClusterMetadata,
+    config: &KafkaConfig,
 ) -> (FetchRequest, Vec<ListOffsetsTopic>) {
     let mut fetch_request = FetchRequest::default()
         .with_max_bytes(4096)
@@ -362,10 +363,13 @@ fn build_requests(
 
         let partition = ListOffsetsPartition::default()
             .with_partition_index(tp.partition())
-            // -1 means "log_end"
-            // typically this is configured to use log_start, log_end, or error (if in a group)
-            // TODO config
-            .with_timestamp(-1);
+            .with_timestamp(match config.consumer.auto_offset_reset {
+                ConsumerAutoOffsetReset::Earliest => 0,
+                ConsumerAutoOffsetReset::Latest => -1,
+                ConsumerAutoOffsetReset::None => {
+                    unimplemented!("consumer.auto_offset_reset = None is not implemented")
+                }
+            });
 
         list_offsets_topic.partitions.push(partition);
     }
