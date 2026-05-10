@@ -23,7 +23,14 @@ It uses [kafka-protocol](https://github.com/tychedelia/kafka-protocol-rs) for th
   - Implement transactions
 
 - Consumer
-  - Figure out how groups actually work
+  - Implement consumer groups
+    - https://tomlee.co/2019/03/the-unofficial-kafka-rebalance-how-to/
+    - https://www.architecture-weekly.com/p/understanding-kafkas-consumer-protocol
+    - Start with a FindCoordinatorRequest with the group id. key_type = 0
+    - Next, JoinGroupRequest to join the group. This will tell you if you are the group leader
+    - Next, SyncGroupRequest to get/set partition assignments. If you are group leader, send assignments. If not, send empty assignments.
+    - While consuming, send heartbeat requests to coordinator in background task
+    - On shutdown, send a LeaveGroup request to expedite the rebalance
 
 - Respect the throttle time returned by the server.
 
