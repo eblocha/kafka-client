@@ -1,14 +1,13 @@
 use crate::{
     broker::{
         connector::NodeConnector,
-        partition_queue::PartitionQueueMap,
         task::{BrokerTaskFactory, BrokerTaskHandle},
     },
     config::KafkaConfig,
     conn::{Sendable, connect::Connect},
     error::KafkaError,
     network::handle::{NetworkTaskFactory, NetworkTaskHandle},
-    producer::task::ProducerTask,
+    producer::{partition_queue::PartitionQueueMap, task::ProducerTask},
     proto::ver::{FromVersionRange, GetApiKey},
 };
 

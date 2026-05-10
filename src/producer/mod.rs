@@ -5,3 +5,5 @@ pub mod partitioner;
 mod prepared_record;
 pub mod record;
 pub(crate) mod task;
+
+mod partition_queue;

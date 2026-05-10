@@ -22,10 +22,7 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
-    broker::{
-        partition_queue::{PartitionQueue, PartitionQueueMap},
-        task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle},
-    },
+    broker::task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle},
     cancel::OrCancelled,
     common::{Node, TopicPartition},
     config::KafkaConfig,
@@ -34,6 +31,7 @@ use crate::{
     network::{handle::NetworkTaskHandle, task::NetworkTask},
     producer::{
         errors::classify_error,
+        partition_queue::{PartitionQueue, PartitionQueueMap},
         prepared_record::{DeliveryMetadata, PreparedRecord},
         record::RecordMetadata,
     },
