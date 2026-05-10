@@ -1,5 +1,6 @@
-pub mod channel;
 mod codec;
+
+pub mod channel;
 pub mod connect;
 #[cfg(test)]
 pub mod testing;

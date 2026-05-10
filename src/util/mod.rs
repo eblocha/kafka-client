@@ -1,5 +1,3 @@
-pub mod chunks_timeout;
-
 use std::{sync::Arc, time::Duration};
 
 use extend::ext;
@@ -8,6 +6,8 @@ use kafka_protocol::{messages::TopicName, protocol::StrBytes};
 use uuid::Uuid;
 
 use crate::util::chunks_timeout::ChunksTimeout;
+
+pub mod chunks_timeout;
 
 #[ext]
 pub impl Uuid {

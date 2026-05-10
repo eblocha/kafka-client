@@ -1,9 +1,10 @@
-pub mod client;
 mod errors;
-pub(crate) mod handle;
-pub mod partitioner;
+mod partition_queue;
 mod prepared_record;
-pub mod record;
+
+pub(crate) mod handle;
 pub(crate) mod task;
 
-mod partition_queue;
+pub mod client;
+pub mod partitioner;
+pub mod record;

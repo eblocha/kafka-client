@@ -137,6 +137,14 @@ impl From<io::Error> for ConnectAttemptError {
 }
 
 impl<Conn: Connect> NodeConnector<Conn> {
+    /// Performs the handshake with the target broker, reusing an existing connection if possible.
+    ///
+    /// The handshake includes:
+    /// - establishing the network connection
+    /// - detecting the broker's version ranges
+    /// - performing authentication
+    ///
+    /// This will wait for backoff if appropriate.
     pub async fn connect(&mut self) -> Result<Arc<VersionedConnection>, ConnectionInitError> {
         self.backoff.wait_next().await;
 

@@ -1,9 +1,8 @@
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{broker::init_error::ConnectionInitError, conn::KafkaChannelError};
-
 pub use crate::proto::error_codes::ErrorCode;
+pub use crate::{broker::init_error::ConnectionInitError, conn::KafkaChannelError};
 
 /// All errors related to interacting with Kafka
 #[derive(Debug, Error)]
