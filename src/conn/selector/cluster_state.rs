@@ -251,12 +251,18 @@ pub struct ClusterMetadata {
     /// Maps the topic name to the uuid.
     /// The uuids will not be nil.
     topic_ids_by_name: FxHashMap<TopicName, Uuid>,
+    topic_names_by_id: FxHashMap<Uuid, TopicName>,
 }
 
 impl ClusterMetadata {
     #[inline]
     pub fn get_topic_uuid_by_name(&self, name: &TopicName) -> Option<Uuid> {
         self.topic_ids_by_name.get(name).copied()
+    }
+
+    #[inline]
+    pub fn get_topic_name_by_uuid(&self, uuid: &Uuid) -> Option<TopicName> {
+        self.topic_names_by_id.get(uuid).cloned()
     }
 
     #[inline]
@@ -301,25 +307,11 @@ impl ClusterMetadata {
         let Some(ref topic_name) = topic_meta.name else {
             // The topic name is empty, which means we requested a topic by id that does not exist.
             // Remove the uuid and metadata for the topic
-            let name = self
-                .topic_ids_by_name
-                .iter()
-                .find_map(|(name, existing_key)| {
-                    if *existing_key == topic_meta.topic_id {
-                        Some(name)
-                    } else {
-                        None
-                    }
-                });
+            let name = self.topic_names_by_id.remove(&topic_meta.topic_id);
 
             let Some(name) = name else {
                 return;
             };
-
-            // Clone is needed because `name` is a reference into `topic_ids_by_name`, which means we can't borrow it as
-            // mutable to remove the key.
-            // This is a cold path, so perf is not super critical here.
-            let name = name.clone();
 
             self.topic_ids_by_name.remove(&name);
 
@@ -341,8 +333,16 @@ impl ClusterMetadata {
         if !topic_meta.topic_id.is_nil() {
             self.topic_ids_by_name
                 .insert(topic_name.clone(), topic_meta.topic_id);
+            self.topic_names_by_id
+                .insert(topic_meta.topic_id, topic_name.clone());
         } else {
-            self.topic_ids_by_name.remove(&topic_name);
+            let old_id = self.topic_ids_by_name.remove(&topic_name);
+
+            if let Some(uuid) = old_id
+                && !uuid.is_nil()
+            {
+                self.topic_names_by_id.remove(&uuid);
+            }
         }
 
         let new_metadata = TopicMetadata::try_from((topic_name.clone(), topic_meta));

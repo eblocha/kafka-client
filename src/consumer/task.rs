@@ -235,7 +235,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ConsumerTask<Conn> {
             };
 
             let consumer_result = result.and_then(|fetch_response| {
-                build_records_result_and_update_state(fetch_response, &mut state)
+                build_records_result_and_update_state(fetch_response, &mut state, &cluster)
             });
 
             match consumer_result {
@@ -427,6 +427,7 @@ fn build_fetch_partition(state: &ListOffsetsPartitionResponse) -> FetchPartition
 fn build_records_result_and_update_state(
     fetch_response: FetchResponse,
     state: &mut ConsumerState,
+    cluster: &ClusterMetadata,
 ) -> ConsumerRecordsResult {
     if fetch_response.error_code != 0 {
         return Err(KafkaError::ErrorCode(fetch_response.error_code.into()));
@@ -440,8 +441,17 @@ fn build_records_result_and_update_state(
                 return Err(KafkaError::ErrorCode(partition_data.error_code.into()));
             }
 
-            // TODO: the topic name is empty when we fetch with topic ids.
-            let tp = TopicPartition::new(topic.topic.clone(), partition_data.partition_index);
+            let topic_name = if !topic.topic.is_empty() {
+                Some(topic.topic.clone())
+            } else {
+                cluster.get_topic_name_by_uuid(&topic.topic_id)
+            };
+
+            let Some(topic_name) = topic_name else {
+                continue;
+            };
+
+            let tp = TopicPartition::new(topic_name, partition_data.partition_index);
 
             let Some(mut part_records) = partition_data.records else {
                 continue;
