@@ -1,3 +1,5 @@
+//! The producer client
+
 mod errors;
 mod partition_queue;
 mod prepared_record;

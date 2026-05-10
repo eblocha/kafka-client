@@ -1,3 +1,5 @@
+//! The admin client
+
 use kafka_protocol::messages::{
     BrokerId, CreateTopicsRequest, DeleteTopicsRequest, DescribeClusterRequest, MetadataRequest,
     TopicName,
@@ -27,6 +29,9 @@ use crate::{
     util::TopicNameExt,
 };
 
+/// Performs administrative tasks on the Kafka cluster.
+///
+/// For example, the admin client can create, modify, and delete topics.
 pub struct Admin<Conn: Connect + Send + 'static> {
     selector: SelectorTaskHandle<NetworkTask<Conn>, NetworkTaskHandle>,
 }

@@ -1,3 +1,5 @@
+//! Data structures for consuming messages from topics
+
 use kafka_protocol::records::Record;
 
 use crate::{common::TopicPartition, error::KafkaError};
@@ -13,4 +15,5 @@ pub struct ConsumerRecords {
     pub largest_offset: Option<i64>,
 }
 
+/// A batch of records from multiple topic partitions
 pub type ConsumerRecordsResult = Result<Vec<ConsumerRecords>, KafkaError>;

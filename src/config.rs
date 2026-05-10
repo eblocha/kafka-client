@@ -1,7 +1,10 @@
+//! Configuration options
+
 use std::{fmt::Debug, time::Duration};
 
 use kafka_protocol::records::Compression;
 
+/// Credentials to authenticate with brokers
 #[derive(Clone)]
 pub struct SaslCredentials {
     pub username: String,
@@ -17,13 +20,18 @@ impl Debug for SaslCredentials {
     }
 }
 
+/// Authentication mechanism to use when connecting to brokers.
 #[derive(Debug, Clone)]
 pub enum SaslMecahnism {
+    /// Use plaintext
     Plain(SaslCredentials),
+    /// Use SCRAM-SHA256
     ScramSha256(SaslCredentials),
+    /// Use SCRAM-SHA512
     ScramSha512(SaslCredentials),
 }
 
+/// Configuration for broker sockets.
 #[derive(Debug, Clone)]
 pub struct SocketConfig {
     /// Size of the request send buffer. Further requests will experience backpressure.
@@ -76,6 +84,7 @@ impl Default for SocketConfig {
     }
 }
 
+/// Cluster metadata configuration.
 #[derive(Debug, Clone)]
 pub struct MetadataConfig {
     /// How often to proactively refresh cluster metadata to detect new topics or brokers.
@@ -135,6 +144,7 @@ impl From<CompressionCodec> for Compression {
     }
 }
 
+/// Producer configuration.
 #[derive(Debug, Clone)]
 pub struct ProducerConfig {
     /// Number of acknowledgements the leader must receive from ISR brokers before responding to a produce request.
@@ -184,19 +194,31 @@ impl Default for ProducerConfig {
     }
 }
 
+/// How to select the offset to start consuming from if no offset is stored for the group.
 #[derive(Debug, Default, Clone, Copy)]
+#[non_exhaustive]
 pub enum ConsumerAutoOffsetReset {
+    /// Start consuming from the earliest available offset in the partition.
     Earliest,
+    /// Start consuming from the latest available offset in the partition.
     #[default]
     Latest,
+    /// Return an error.
+    ///
+    /// Note: if the consumer does not have a group id, setting this to None will never consume from any partition.
     None,
 }
 
+/// Consumer configuration.
 #[derive(Debug, Clone, Default)]
 pub struct ConsumerConfig {
+    /// How to select the offset to start consuming from if no offset is stored for the group.
+    ///
+    /// Default: [`ConsumerAutoOffsetReset::Latest`]
     pub auto_offset_reset: ConsumerAutoOffsetReset,
 }
 
+/// General retry configuration
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
     /// Maximum number of attempts to retry before bubbling up the error to the application. Use [`None`] to never give up.
@@ -223,6 +245,7 @@ impl Default for RetryConfig {
     }
 }
 
+/// Configuration options for the Kafka client.
 #[derive(Debug, Clone)]
 pub struct KafkaConfig {
     /// Client id to include with every request.

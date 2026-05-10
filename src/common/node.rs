@@ -8,6 +8,7 @@ use crate::util::StrBytesExt;
 
 use super::BrokerHost;
 
+/// Full description of a specific broker.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
     pub id: i32,

@@ -1,3 +1,5 @@
+//! The admin client
+
 mod cluster_description;
 mod create_topics_result;
 mod delete_topic_result;

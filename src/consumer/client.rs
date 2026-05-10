@@ -1,3 +1,5 @@
+//! The consumer client
+
 use kafka_protocol::messages::TopicName;
 use tokio::sync::mpsc;
 
@@ -17,6 +19,7 @@ use crate::{
     util::TopicNameExt,
 };
 
+/// Consumes messages from topics
 pub struct Consumer<Conn: Connect + Send + 'static> {
     selector: SelectorTaskHandle<ConsumerTask<Conn>, ConsumerTaskHandle>,
     rx: mpsc::Receiver<ConsumerRecordsResult>,

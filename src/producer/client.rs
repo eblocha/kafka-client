@@ -1,3 +1,5 @@
+//! The producer client
+
 use std::{
     future::Future,
     pin::Pin,
@@ -43,6 +45,7 @@ impl Future for ProduceFuture {
     }
 }
 
+/// Produces messages to topics.
 pub struct Producer<Conn: Connect + Send + 'static, P> {
     selector: SelectorTaskHandle<ProducerTask<Conn>, ProducerTaskHandle>,
     partitioner: P,

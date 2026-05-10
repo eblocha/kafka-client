@@ -1,5 +1,8 @@
+//! Describe which topics to consume
+
 use crate::common::TopicPartition;
 
+/// A description of topics to be consumed
 #[derive(Debug, Hash, Clone)]
 #[non_exhaustive]
 pub enum Subscription {

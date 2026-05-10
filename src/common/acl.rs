@@ -1,7 +1,10 @@
+//! Access control information
+
 use rustc_hash::FxHashSet;
 
 const MIN: u8 = 0;
 
+/// Operations the client is authorized to perform
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AclOperation {
@@ -35,7 +38,7 @@ impl From<u8> for AclOperation {
 }
 
 #[must_use]
-pub fn acl_from_bitfield(bits: i32) -> Option<FxHashSet<AclOperation>> {
+pub(crate) fn acl_from_bitfield(bits: i32) -> Option<FxHashSet<AclOperation>> {
     if bits == i32::MIN {
         return None;
     }

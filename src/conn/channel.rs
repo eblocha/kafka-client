@@ -21,6 +21,7 @@ use super::codec::{
     sendable::{DecodableResponse, Sendable},
 };
 
+/// Errors related to sending messages to a broker.
 #[derive(Debug, Error)]
 pub enum KafkaChannelError {
     /// Indicates an IO problem. This could be a bad socket or an encoding problem.
@@ -255,7 +256,7 @@ impl<IO> KafkaChannelTask<IO> {
     }
 }
 
-/// A connection to a Kafka broker
+/// A connection to a Kafka broker.
 ///
 /// This connection supports multiplexed async io.
 #[derive(Debug, Clone)]
@@ -308,7 +309,7 @@ impl KafkaChannel {
     }
 
     /// Sends a request and returns a future to await the response
-    pub async fn send<R: Sendable>(
+    pub(crate) async fn send<R: Sendable>(
         &self,
         req: R,
         api_version: i16,
@@ -317,7 +318,7 @@ impl KafkaChannel {
     }
 
     /// Sends a request and returns a future that resolves when the message is sent.
-    pub async fn send_and_forget<R: Sendable>(
+    pub(crate) async fn send_and_forget<R: Sendable>(
         &self,
         req: R,
         api_version: i16,
@@ -326,14 +327,14 @@ impl KafkaChannel {
     }
 
     /// Obtain a new Sender to send and receive messages
-    pub fn sender(&self) -> &mpsc::Sender<KafkaChannelMessage> {
+    pub(crate) fn sender(&self) -> &mpsc::Sender<KafkaChannelMessage> {
         &self.sender
     }
 
     /// Shut down the connection. This is the preferred method to close a connection gracefully.
     ///
     /// Returns a future that can be awaited to wait for shutdown to complete.
-    pub fn shutdown(&self) -> impl Future<Output = ()> + '_ {
+    pub(crate) fn shutdown(&self) -> impl Future<Output = ()> + '_ {
         self.cancellation_token.cancel();
         self.task_tracker.close();
         self.task_tracker.wait()

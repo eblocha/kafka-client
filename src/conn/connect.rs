@@ -1,4 +1,4 @@
-use std::{future::Future, io, sync::Arc};
+use std::{future::Future, io};
 use tokio::net::TcpStream;
 
 use crate::{common::BrokerHost, config::KafkaConfig, conn::channel::KafkaChannel};
@@ -32,16 +32,6 @@ impl Connect for Tcp {
         };
 
         Ok(KafkaChannel::connect(conn, config))
-    }
-}
-
-impl<C: Connect> Connect for Arc<C> {
-    fn connect(
-        &self,
-        host: &BrokerHost,
-        config: &KafkaConfig,
-    ) -> impl Future<Output = Result<KafkaChannel, io::Error>> + Send {
-        self.as_ref().connect(host, config)
     }
 }
 

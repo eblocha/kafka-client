@@ -1,3 +1,5 @@
+//! Error types
+
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 

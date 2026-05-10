@@ -1,3 +1,5 @@
+//! The consumer client
+
 // mod state_machine;
 mod task;
 

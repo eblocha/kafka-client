@@ -12,6 +12,7 @@ use crate::{
     util::StrBytesExt,
 };
 
+/// Information about the Kafka cluster
 pub struct ClusterDescription {
     pub authorized_operations: Option<FxHashSet<AclOperation>>,
     pub cluster_id: Arc<str>,

@@ -1,3 +1,13 @@
+//! A Kafka client implementation built on tokio.
+//!
+//! ## Features
+//!
+//! - Multiplexed, async IO
+//! - Client-side load balancing
+//! - Connection retry with exponential backoff
+//! - Generic over the IO channel
+//! - Custom partitioning strategies
+
 mod backoff;
 mod broker;
 mod cancel;
@@ -15,5 +25,7 @@ pub mod error;
 pub mod producer;
 
 pub mod connect {
+    //! Low-level connection primitives
+    pub use crate::conn::channel::KafkaChannel;
     pub use crate::conn::connect::{Connect, Tcp};
 }

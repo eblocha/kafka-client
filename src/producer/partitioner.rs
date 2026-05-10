@@ -1,3 +1,5 @@
+//! Strategies for selecting message partitions
+
 use crate::{producer::record::ProducerRecord, selector::TopicMetadata};
 
 pub trait Partitioner {

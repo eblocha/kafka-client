@@ -1,3 +1,5 @@
+//! Shared data structures
+
 mod host;
 mod node;
 mod topic_collection;
