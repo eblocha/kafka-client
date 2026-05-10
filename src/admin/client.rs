@@ -228,9 +228,16 @@ impl Admin<Tcp> {
     }
 
     fn get_best_handle(&self) -> Result<NetworkTaskHandle, KafkaError> {
-        let Some(entry) = self.selector.cluster.load().brokers.get_best_connection() else {
+        let Some(handle) = self
+            .selector
+            .cluster
+            .load()
+            .brokers
+            .get_best_connection()
+            .map(|conn| conn.handle.clone())
+        else {
             return Err(KafkaChannelError::Closed.into());
         };
-        Ok(entry.handle)
+        Ok(handle)
     }
 }

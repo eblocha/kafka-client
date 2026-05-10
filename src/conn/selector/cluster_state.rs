@@ -60,7 +60,7 @@ impl<TaskHandle: BrokerTaskHandle> BrokerMap<TaskHandle> {
     ///
     /// This will prefer connected brokers with the minimum number of pending requests, then favor the minimum number of
     /// pending requests, connected or not.
-    pub fn get_best_connection(&self) -> Option<BrokerMapEntry<TaskHandle>> {
+    pub fn get_best_connection(&self) -> Option<&BrokerMapEntry<TaskHandle>> {
         // TODO shuffle before selecting
         // prefer connected, non-saturated nodes with least in-flight requests
         let least_loaded_connected = self
@@ -70,7 +70,7 @@ impl<TaskHandle: BrokerTaskHandle> BrokerMap<TaskHandle> {
             .min_by(least_in_flight);
 
         if let Some(entry) = least_loaded_connected {
-            return Some(entry.clone());
+            return Some(entry);
         }
 
         // next, prefer nodes with no failure streak and least in-flight requests
@@ -81,11 +81,17 @@ impl<TaskHandle: BrokerTaskHandle> BrokerMap<TaskHandle> {
             .min_by(least_in_flight);
 
         if let Some(entry) = least_loaded_no_failures {
-            return Some(entry.clone());
+            return Some(entry);
         }
 
         // lastly, prefer nodes with the lowest failure streak
-        self.0.iter().min_by(least_failure_streak).cloned()
+        self.0.iter().min_by(least_failure_streak)
+    }
+
+    // TODO used for consumer groups and transactional producer
+    #[allow(unused)]
+    pub fn get_connection_to(&self, broker_id: i32) -> Option<&BrokerMapEntry<TaskHandle>> {
+        self.0.iter().find(|entry| entry.node.id == broker_id)
     }
 
     pub(super) fn list_nodes(&self) -> Vec<&Node> {

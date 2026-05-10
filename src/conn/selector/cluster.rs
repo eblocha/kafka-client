@@ -135,7 +135,7 @@ impl<
         (this, shared_cluster)
     }
 
-    pub fn get_best_connection(&self) -> Option<BrokerMapEntry<TaskHandle>> {
+    pub fn get_best_connection(&self) -> Option<&BrokerMapEntry<TaskHandle>> {
         self.cluster.brokers.get_best_connection()
     }
 

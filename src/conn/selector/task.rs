@@ -267,7 +267,7 @@ impl<
 
                     let task = MetadataRefreshTask {
                         context: MetadataRefreshContext {
-                            entry: entry_for_refresh,
+                            entry: entry_for_refresh.clone(),
                             request: req,
                             backoff,
                         },
