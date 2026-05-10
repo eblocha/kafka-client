@@ -17,7 +17,7 @@ use crate::{
     },
     common::BrokerHost,
     config::KafkaConfig,
-    conn::connect::{Connect, Tcp},
+    conn::connect::Connect,
     error::KafkaError,
     selector::{
         cluster::ClusterTaskManager,
@@ -345,13 +345,20 @@ impl<Task: BrokerTask, TaskHandle> Debug for SelectorTaskHandle<Task, TaskHandle
 }
 
 impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, TaskHandle> {
-    /// Create a new selector task handle using TCP without TLS.
-    pub async fn try_new_tcp<Factory: BrokerTaskFactory<Tcp, Task = Task, Handle = TaskHandle>>(
+    /// Bootstrap a new selector task handle.
+    pub async fn bootstrap<
+        Conn: Connect + Clone + Send + 'static,
+        Factory: BrokerTaskFactory<Conn, Task = Task, Handle = TaskHandle>,
+    >(
+        connect: Conn,
         bootstrap: &[BrokerHost],
         config: KafkaConfig,
         task_factory: Factory,
     ) -> Result<Self, KafkaError> {
-        Self::try_new_with_connect(bootstrap, config, Tcp, task_factory).await
+        let (this, rx_bootstrap) =
+            SelectorTaskHandle::start(bootstrap, config, connect, task_factory);
+
+        this.await_bootstrap(rx_bootstrap).await
     }
 
     pub async fn await_shutdown(self) {
@@ -366,21 +373,6 @@ impl<Task: BrokerTask, TaskHandle: BrokerTaskHandle> SelectorTaskHandle<Task, Ta
     pub async fn flush(self) {
         self.context.flush.cancel();
         self.await_shutdown().await;
-    }
-
-    async fn try_new_with_connect<
-        Conn: Connect + Clone + Send + 'static,
-        Factory: BrokerTaskFactory<Conn, Task = Task, Handle = TaskHandle>,
-    >(
-        bootstrap: &[BrokerHost],
-        config: KafkaConfig,
-        connect: Conn,
-        task_factory: Factory,
-    ) -> Result<Self, KafkaError> {
-        let (this, rx_bootstrap) =
-            SelectorTaskHandle::start(bootstrap, config, connect, task_factory);
-
-        this.await_bootstrap(rx_bootstrap).await
     }
 
     async fn refresh_metadata_for_topic(&self, topic: &TopicName) -> Result<(), KafkaError> {

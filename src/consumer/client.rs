@@ -7,7 +7,7 @@ use crate::{
     common::BrokerHost,
     config::KafkaConfig,
     conn::KafkaChannelError,
-    connect::{Connect, Tcp},
+    connect::Connect,
     consumer::{
         handle::{ConsumerTaskFactory, ConsumerTaskHandle},
         record::ConsumerRecordsResult,
@@ -25,8 +25,13 @@ pub struct Consumer<Conn: Connect + Send + 'static> {
     rx: mpsc::Receiver<ConsumerRecordsResult>,
 }
 
-impl Consumer<Tcp> {
-    pub async fn try_new(
+impl<Conn: Connect + Clone + Send + 'static> Consumer<Conn> {
+    /// Bootstrap a new consumer client.
+    ///
+    /// Provide the connection mechanism with `connect`.
+    /// For example, [`crate::connect::Tcp`] for a non-TLS TCP connection.
+    pub async fn bootstrap(
+        connect: Conn,
         bootstrap: &[BrokerHost],
         config: KafkaConfig,
     ) -> Result<Self, KafkaError> {
@@ -34,7 +39,8 @@ impl Consumer<Tcp> {
 
         let (tx, rx) = mpsc::channel(1);
 
-        let selector = SelectorTaskHandle::try_new_tcp(
+        let selector = SelectorTaskHandle::bootstrap(
+            connect,
             bootstrap,
             config.clone(),
             ConsumerTaskFactory { config, tx },
@@ -46,13 +52,14 @@ impl Consumer<Tcp> {
 }
 
 impl<Conn: Connect + Send + 'static> Consumer<Conn> {
+    /// Subscribe to topics.
     pub async fn subscribe(&self, subscription: Subscription) -> Result<(), KafkaError> {
         // request topics
-        match &subscription {
+        match subscription {
             Subscription::TopicPattern(_) => unimplemented!(),
             Subscription::Topic(topic_name) => {
                 self.selector
-                    .check_topic_metadata(&TopicName::from_string(topic_name.clone()))
+                    .check_topic_metadata(&TopicName::from_string(topic_name))
                     .await?;
             }
             Subscription::TopicPartition(topic_partition) => {
@@ -77,6 +84,7 @@ impl<Conn: Connect + Send + 'static> Consumer<Conn> {
             .ok_or(KafkaError::Channel(KafkaChannelError::Closed))?
     }
 
+    /// Gracefully shut down the consumer, closing all connections.
     pub async fn shutdown(self) {
         self.selector.shutdown().await;
     }

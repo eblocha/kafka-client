@@ -86,7 +86,7 @@ impl Run for ProduceRandom {
         bootstrap: &[BrokerHost],
         config: KafkaConfig,
     ) -> anyhow::Result<Self::Response> {
-        let producer = Producer::try_new(bootstrap, config).await?;
+        let producer = Producer::bootstrap(Tcp, bootstrap, config).await?;
 
         let topic = self.topic.clone();
 
@@ -180,7 +180,7 @@ impl Run for ProduceFromFile {
         config: KafkaConfig,
     ) -> anyhow::Result<Self::Response> {
         let file = File::open(self.file).await?;
-        let producer = Producer::try_new(bootstrap, config).await?;
+        let producer = Producer::bootstrap(Tcp, bootstrap, config).await?;
 
         let now = Instant::now();
 

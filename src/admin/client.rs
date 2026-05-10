@@ -18,7 +18,7 @@ use crate::{
     common::{BrokerHost, TopicCollection},
     config::KafkaConfig,
     conn::KafkaChannelError,
-    connect::{Connect, Tcp},
+    connect::Connect,
     error::KafkaError,
     network::{
         handle::{NetworkTaskFactory, NetworkTaskHandle},
@@ -36,17 +36,25 @@ pub struct Admin<Conn: Connect + Send + 'static> {
     selector: SelectorTaskHandle<NetworkTask<Conn>, NetworkTaskHandle>,
 }
 
-impl Admin<Tcp> {
-    pub async fn try_new(
+impl<Conn: Connect + Clone + Send + 'static> Admin<Conn> {
+    /// Bootstrap a new admin client.
+    ///
+    /// Provide the connection mechanism with `connect`.
+    /// For example, [`crate::connect::Tcp`] for a non-TLS TCP connection.
+    pub async fn bootstrap(
+        connect: Conn,
         bootstrap: &[BrokerHost],
         config: KafkaConfig,
     ) -> Result<Self, KafkaError> {
         let selector =
-            SelectorTaskHandle::try_new_tcp(bootstrap, config.clone(), NetworkTaskFactory).await?;
+            SelectorTaskHandle::bootstrap(connect, bootstrap, config.clone(), NetworkTaskFactory)
+                .await?;
 
         Ok(Self { selector })
     }
+}
 
+impl<Conn: Connect + Send + 'static> Admin<Conn> {
     pub async fn describe_cluster(&self) -> Result<ClusterDescription, KafkaError> {
         let response = self
             .get_best_handle()?
@@ -230,6 +238,7 @@ impl Admin<Tcp> {
             .collect())
     }
 
+    /// Gracefully shut down the client, closing all connections.
     pub async fn shutdown(self) {
         self.selector.shutdown().await;
     }

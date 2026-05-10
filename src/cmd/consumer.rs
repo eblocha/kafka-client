@@ -67,7 +67,7 @@ impl Run for EchoTopics {
         bootstrap: &[BrokerHost],
         config: KafkaConfig,
     ) -> anyhow::Result<Self::Response> {
-        let consumer = Consumer::try_new(bootstrap, config).await?;
+        let consumer = Consumer::bootstrap(Tcp, bootstrap, config).await?;
         self.run_inner(consumer).await
     }
 }

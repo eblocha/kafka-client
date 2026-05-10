@@ -234,7 +234,7 @@ impl Run for AdminCommands {
         bootstrap: &[BrokerHost],
         config: KafkaConfig,
     ) -> anyhow::Result<Self::Response> {
-        let client = Admin::try_new(bootstrap, config)
+        let client = Admin::bootstrap(Tcp, bootstrap, config)
             .await
             .context("failed to bootstrap client")?;
 
