@@ -11,13 +11,13 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     backoff::{BackoffSession, exponential_backoff},
+    broker::{
+        init_error::ConnectionInitError,
+        task::{BrokerTask, BrokerTaskContext, BrokerTaskFactory, BrokerTaskHandle},
+    },
     common::BrokerHost,
     config::KafkaConfig,
     conn::{
-        broker::{
-            init_error::ConnectionInitError,
-            task::{BrokerTask, BrokerTaskContext, BrokerTaskFactory, BrokerTaskHandle},
-        },
         connect::{Connect, Tcp},
         selector::{
             cluster::ClusterTaskManager,
@@ -502,10 +502,10 @@ mod test {
     use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
     use crate::{
+        broker::{init_error::ConnectionInitError, task::BrokerTaskHandle},
         common::BrokerHost,
         config::KafkaConfig,
         conn::{
-            broker::{init_error::ConnectionInitError, task::BrokerTaskHandle},
             channel::{KafkaChannel, KafkaChannelMessage},
             selector::SelectorTaskHandle,
             testing::await_timeout,

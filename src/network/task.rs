@@ -4,17 +4,14 @@ use rustc_hash::FxHashSet;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
+    broker::{
+        connector::{NodeConnector, VersionedConnection},
+        init_error::ConnectionInitError,
+        task::{BrokerTask, BrokerTaskContext},
+    },
     cancel::OrCancelled,
     common::{Node, TopicPartition},
-    conn::{
-        broker::{
-            connector::{NodeConnector, VersionedConnection},
-            init_error::ConnectionInitError,
-            task::{BrokerTask, BrokerTaskContext},
-        },
-        connect::Connect,
-        selector::ClusterMetadata,
-    },
+    conn::{connect::Connect, selector::ClusterMetadata},
 };
 
 #[derive(Debug)]

@@ -13,8 +13,8 @@ use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
 use crate::{
+    broker::task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle},
     common::{Node, TopicPartition},
-    conn::broker::task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle},
     error::ErrorCode,
 };
 

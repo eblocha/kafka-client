@@ -9,15 +9,13 @@ use rustc_hash::FxHashMap;
 use tokio::task::{JoinError, JoinSet};
 
 use crate::{
+    broker::{
+        connector::NodeConnector,
+        task::{BrokerTask, BrokerTaskContext, BrokerTaskFactory, BrokerTaskHandle},
+    },
     common::{BrokerHost, Node, TopicPartition},
     config::KafkaConfig,
-    conn::{
-        broker::{
-            connector::NodeConnector,
-            task::{BrokerTask, BrokerTaskContext, BrokerTaskFactory, BrokerTaskHandle},
-        },
-        selector::{BrokerMapEntry, Cluster},
-    },
+    conn::selector::{BrokerMapEntry, Cluster},
     connect::Connect,
     error::ErrorCode,
 };
@@ -457,13 +455,10 @@ mod test {
     use uuid::Uuid;
 
     use crate::{
+        broker::task::{BrokerTask, BrokerTaskContext, BrokerTaskFactory},
         common::{BrokerHost, Node, TopicPartition},
         config::KafkaConfig,
-        conn::{
-            broker::task::{BrokerTask, BrokerTaskContext, BrokerTaskFactory},
-            selector::cluster::ClusterTaskManager,
-            testing::NeverConnects,
-        },
+        conn::{selector::cluster::ClusterTaskManager, testing::NeverConnects},
         network::handle::NetworkTaskFactory,
     };
 

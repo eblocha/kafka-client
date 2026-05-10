@@ -11,11 +11,10 @@ use tokio::time::error::Elapsed;
 
 use crate::{
     backoff::{BackoffSession, exponential_backoff},
+    broker::init_error::ConnectionInitError,
     common::{BrokerHost, Node},
     config::KafkaConfig,
-    conn::{
-        Sendable, broker::init_error::ConnectionInitError, channel::KafkaChannel, connect::Connect,
-    },
+    conn::{Sendable, channel::KafkaChannel, connect::Connect},
     error::{ErrorCode, KafkaError},
     proto::ver::{FromVersionRange, GetApiKey},
 };
@@ -307,10 +306,10 @@ mod test {
     use tokio_test::assert_err;
 
     use crate::{
+        broker::{connector::NodeConnector, init_error::ConnectionInitError},
         common::{BrokerHost, Node},
         config::KafkaConfig,
         conn::{
-            broker::{connector::NodeConnector, init_error::ConnectionInitError},
             channel::KafkaChannel,
             testing::{NeverConnects, TestHarness, create_channel},
         },

@@ -1,7 +1,7 @@
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::conn::{KafkaChannelError, broker::init_error::ConnectionInitError};
+use crate::{broker::init_error::ConnectionInitError, conn::KafkaChannelError};
 
 pub use crate::proto::error_codes::ErrorCode;
 

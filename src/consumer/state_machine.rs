@@ -8,11 +8,13 @@ use kafka_protocol::{
 };
 
 use crate::{
-    conn::{KafkaChannelError, broker::task::BrokerTaskHandle, selector::SelectorTaskHandle},
+    broker::task::BrokerTaskHandle,
+    conn::KafkaChannelError,
     connect::Connect,
     consumer::{handle::ConsumerTaskHandle, task::ConsumerTask},
     error::KafkaError,
     proto::ver::with_max_version,
+    selector::SelectorTaskHandle,
 };
 
 #[derive(Debug, Clone)]

@@ -4,11 +4,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    broker::connector::NodeConnector,
     common::{Node, TopicPartition},
     config::KafkaConfig,
     conn::{
         Sendable,
-        broker::connector::NodeConnector,
         selector::{ClusterMetadata, RefreshMetadataRequest},
     },
     error::KafkaError,

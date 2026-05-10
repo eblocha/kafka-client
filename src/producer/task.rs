@@ -22,14 +22,14 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
+    broker::{
+        partition_queue::{PartitionQueue, PartitionQueueMap},
+        task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle},
+    },
     cancel::OrCancelled,
     common::{Node, TopicPartition},
     config::KafkaConfig,
     conn::{
-        broker::{
-            partition_queue::{PartitionQueue, PartitionQueueMap},
-            task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle},
-        },
         connect::Connect,
         selector::{ClusterMetadata, RefreshMetadataRequest},
     },

@@ -12,9 +12,10 @@ use crate::{
         TopicListing, TopicMetadataAndConfig,
         delete_topic_result::{DeleteTopicsResult, DeletedTopic},
     },
+    broker::task::BrokerTaskHandle,
     common::{BrokerHost, TopicCollection},
     config::KafkaConfig,
-    conn::{KafkaChannelError, broker::task::BrokerTaskHandle, selector::SelectorTaskHandle},
+    conn::{KafkaChannelError, selector::SelectorTaskHandle},
     connect::{Connect, Tcp},
     error::KafkaError,
     network::{

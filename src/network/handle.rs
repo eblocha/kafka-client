@@ -8,14 +8,11 @@ use rustc_hash::FxHashSet;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    conn::{
-        Sendable,
-        broker::{
-            connector::{NodeConnector, VersionedConnection},
-            task::{BrokerTaskFactory, BrokerTaskHandle},
-        },
-        connect::Connect,
+    broker::{
+        connector::{NodeConnector, VersionedConnection},
+        task::{BrokerTaskFactory, BrokerTaskHandle},
     },
+    conn::{Sendable, connect::Connect},
     error::KafkaError,
     network::task::{NetworkTask, NetworkTaskMessage},
     proto::ver::{FromVersionRange, GetApiKey},

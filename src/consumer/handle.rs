@@ -1,14 +1,12 @@
 use tokio::sync::mpsc;
 
 use crate::{
-    config::KafkaConfig,
-    conn::{
-        Sendable,
-        broker::{
-            connector::NodeConnector,
-            task::{BrokerTaskFactory, BrokerTaskHandle},
-        },
+    broker::{
+        connector::NodeConnector,
+        task::{BrokerTaskFactory, BrokerTaskHandle},
     },
+    config::KafkaConfig,
+    conn::Sendable,
     connect::Connect,
     consumer::{
         record::ConsumerRecordsResult,

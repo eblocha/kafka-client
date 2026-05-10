@@ -1,14 +1,11 @@
 use crate::{
-    config::KafkaConfig,
-    conn::{
-        Sendable,
-        broker::{
-            connector::NodeConnector,
-            partition_queue::PartitionQueueMap,
-            task::{BrokerTaskFactory, BrokerTaskHandle},
-        },
-        connect::Connect,
+    broker::{
+        connector::NodeConnector,
+        partition_queue::PartitionQueueMap,
+        task::{BrokerTaskFactory, BrokerTaskHandle},
     },
+    config::KafkaConfig,
+    conn::{Sendable, connect::Connect},
     error::KafkaError,
     network::handle::{NetworkTaskFactory, NetworkTaskHandle},
     producer::task::ProducerTask,

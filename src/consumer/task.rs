@@ -13,13 +13,11 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
+    broker::task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle},
     cancel::OrCancelled,
     common::{Node, TopicPartition},
     config::{ConsumerAutoOffsetReset, KafkaConfig},
-    conn::{
-        broker::task::{BrokerTask, BrokerTaskContext, BrokerTaskHandle},
-        selector::ClusterMetadata,
-    },
+    conn::selector::ClusterMetadata,
     connect::Connect,
     consumer::record::{ConsumerRecords, ConsumerRecordsResult},
     error::KafkaError,

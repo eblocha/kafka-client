@@ -3,7 +3,7 @@ use kafka_protocol::messages::{
 };
 
 use crate::{
-    backoff::BackoffSession, conn::broker::task::BrokerTaskHandle, error::KafkaError,
+    backoff::BackoffSession, broker::task::BrokerTaskHandle, error::KafkaError,
     proto::ver::with_max_version,
 };
 
