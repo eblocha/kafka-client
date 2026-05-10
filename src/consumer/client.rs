@@ -73,4 +73,8 @@ impl<Conn: Connect + Send + 'static> Consumer<Conn> {
             .await
             .ok_or(KafkaError::Channel(KafkaChannelError::Closed))?
     }
+
+    pub async fn shutdown(self) {
+        self.selector.shutdown().await;
+    }
 }

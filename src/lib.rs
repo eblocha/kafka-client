@@ -9,7 +9,7 @@ mod selector;
 
 pub mod consumer;
 pub mod error;
-pub mod network;
+mod network;
 pub mod producer;
 mod proto;
 mod util;

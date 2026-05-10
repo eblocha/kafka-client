@@ -15,7 +15,7 @@ pub struct EchoTopics {
 }
 
 impl EchoTopics {
-    async fn run_inner(self, consumer: &mut Consumer<Tcp>) -> anyhow::Result<()> {
+    async fn run_inner(self, mut consumer: Consumer<Tcp>) -> anyhow::Result<()> {
         for topic in self.topics {
             consumer
                 .subscribe(Subscription::Topic(topic))
@@ -23,8 +23,19 @@ impl EchoTopics {
                 .context("failed to subscribe to topics")?;
         }
 
+        let signal = shutdown_signal();
+        tokio::pin!(signal);
+
         loop {
-            let records = consumer.recv().await?;
+            let result = tokio::select! {
+                biased;
+                _ = &mut signal => {
+                    break;
+                },
+                res = consumer.recv() => res
+            };
+
+            let records = result?;
 
             for set in records {
                 for record in set.records {
@@ -42,6 +53,8 @@ impl EchoTopics {
             }
         }
 
+        consumer.shutdown().await;
+
         Ok(())
     }
 }
@@ -54,7 +67,7 @@ impl Run for EchoTopics {
         bootstrap: &[BrokerHost],
         config: KafkaConfig,
     ) -> anyhow::Result<Self::Response> {
-        let mut consumer = Consumer::try_new(bootstrap, config).await?;
-        self.run_inner(&mut consumer).await
+        let consumer = Consumer::try_new(bootstrap, config).await?;
+        self.run_inner(consumer).await
     }
 }

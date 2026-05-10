@@ -5,7 +5,6 @@ use bytes::Bytes;
 use clap::Subcommand;
 use indexmap::IndexMap;
 use indicatif::{HumanCount, ProgressBar, ProgressStyle};
-use kafka_protocol::{messages::TopicName, protocol::StrBytes};
 use rand::RngCore;
 use tokio::{
     fs::File,

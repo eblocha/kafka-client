@@ -1,4 +1,3 @@
-#![allow(unused)]
 mod cmd;
 mod shutdown;
 
