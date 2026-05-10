@@ -192,17 +192,9 @@ pub enum ConsumerAutoOffsetReset {
     None,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ConsumerConfig {
     pub auto_offset_reset: ConsumerAutoOffsetReset,
-}
-
-impl Default for ConsumerConfig {
-    fn default() -> Self {
-        Self {
-            auto_offset_reset: ConsumerAutoOffsetReset::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

@@ -129,12 +129,7 @@ impl<Conn: Connect + Send + 'static> BrokerTask for ConsumerTask<Conn> {
         let (inner_task, mut state, this) = self.split();
         let node = inner_task.get_node().clone();
 
-        let sorted_tps = state
-            .iter()
-            .map(|(tp, _)| tp)
-            .cloned()
-            .sorted()
-            .collect::<Vec<_>>();
+        let sorted_tps = state.keys().cloned().sorted().collect::<Vec<_>>();
 
         tracing::debug!(
             broker_id = node.id,
