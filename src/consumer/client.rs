@@ -25,7 +25,7 @@ pub struct Consumer<Conn: Connect + Send + 'static> {
     rx: mpsc::Receiver<ConsumerRecordsResult>,
 }
 
-impl<Conn: Connect + Clone + Send + 'static> Consumer<Conn> {
+impl<Conn: Connect + Send + 'static> Consumer<Conn> {
     /// Bootstrap a new consumer client.
     ///
     /// Provide the connection mechanism with `connect`.
@@ -34,7 +34,10 @@ impl<Conn: Connect + Clone + Send + 'static> Consumer<Conn> {
         connect: Conn,
         bootstrap: &[BrokerHost],
         config: KafkaConfig,
-    ) -> Result<Self, KafkaError> {
+    ) -> Result<Self, KafkaError>
+    where
+        Conn: Clone,
+    {
         tracing::debug!("{config:#?}");
 
         let (tx, rx) = mpsc::channel(1);
@@ -49,9 +52,7 @@ impl<Conn: Connect + Clone + Send + 'static> Consumer<Conn> {
 
         Ok(Self { selector, rx })
     }
-}
 
-impl<Conn: Connect + Send + 'static> Consumer<Conn> {
     /// Subscribe to topics.
     pub async fn subscribe(&self, subscription: Subscription) -> Result<(), KafkaError> {
         // request topics

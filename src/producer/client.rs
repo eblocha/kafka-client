@@ -52,7 +52,7 @@ pub struct Producer<Conn: Connect + Send + 'static, P> {
     partitioner: P,
 }
 
-impl<Conn: Connect + Clone + Send + 'static> Producer<Conn, KeyHashPartitioner> {
+impl<Conn: Connect + Send + 'static> Producer<Conn, KeyHashPartitioner> {
     /// Bootstrap a new producer client using the [`KeyHashPartitioner`].
     ///
     /// Provide the connection mechanism with `connect`.
@@ -61,7 +61,10 @@ impl<Conn: Connect + Clone + Send + 'static> Producer<Conn, KeyHashPartitioner> 
         connect: Conn,
         bootstrap: &[BrokerHost],
         config: KafkaConfig,
-    ) -> Result<Self, KafkaError> {
+    ) -> Result<Self, KafkaError>
+    where
+        Conn: Clone,
+    {
         tracing::debug!("{config:#?}");
 
         let selector = SelectorTaskHandle::bootstrap(
@@ -77,19 +80,24 @@ impl<Conn: Connect + Clone + Send + 'static> Producer<Conn, KeyHashPartitioner> 
             partitioner: KeyHashPartitioner,
         })
     }
+}
 
+impl<Conn: Connect + Send + 'static, P> Producer<Conn, P> {
     /// Bootstrap a new producer client with a custom partitioner.
     ///
     /// Provide the connection mechanism with `connect`.
     /// For example, [`crate::connect::Tcp`] for a non-TLS TCP connection.
     ///
     /// Provide the record partitioner with `partitioner`.
-    pub async fn bootstrap_with_partitioner<P>(
+    pub async fn bootstrap_with_partitioner(
         connect: Conn,
         bootstrap: &[BrokerHost],
         config: KafkaConfig,
         partitioner: P,
-    ) -> Result<Producer<Conn, P>, KafkaError> {
+    ) -> Result<Self, KafkaError>
+    where
+        Conn: Clone,
+    {
         tracing::debug!("{config:#?}");
 
         let selector = SelectorTaskHandle::bootstrap(
@@ -105,9 +113,7 @@ impl<Conn: Connect + Clone + Send + 'static> Producer<Conn, KeyHashPartitioner> 
             partitioner,
         })
     }
-}
 
-impl<Conn: Connect + Clone + Send + 'static, P> Producer<Conn, P> {
     /// Change the partitioner for a producer.
     ///
     /// This consumes the existing producer, returning a new one in its place without shutting down.
@@ -118,18 +124,14 @@ impl<Conn: Connect + Clone + Send + 'static, P> Producer<Conn, P> {
         }
     }
 
-    /// Flush any remaining messages, then stop the client. This closes all connections and consumes the producer.
-    pub async fn flush_and_shutdown(self) {
-        self.selector.flush().await;
-    }
-}
-
-impl<Conn: Connect + Send + 'static, P: Partitioner> Producer<Conn, P> {
     /// Produce a message.
     ///
     /// This returns a nested future. The outer future completes when the message is queued.
     /// The inner future completes when the server ackowledges the message (or when the message is flushed when acks=0).
-    pub async fn produce(&self, mut record: ProducerRecord) -> Result<ProduceFuture, KafkaError> {
+    pub async fn produce(&self, mut record: ProducerRecord) -> Result<ProduceFuture, KafkaError>
+    where
+        P: Partitioner,
+    {
         let topic_name = TopicName::from_string(record.topic.clone());
         self.selector.check_topic_metadata(&topic_name).await?;
 
@@ -182,5 +184,10 @@ impl<Conn: Connect + Send + 'static, P: Partitioner> Producer<Conn, P> {
             .await?;
 
         Ok(ProduceFuture { rx })
+    }
+
+    /// Flush any remaining messages, then stop the client. This closes all connections and consumes the producer.
+    pub async fn flush_and_shutdown(self) {
+        self.selector.flush().await;
     }
 }

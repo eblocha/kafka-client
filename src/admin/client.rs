@@ -36,7 +36,7 @@ pub struct Admin<Conn: Connect + Send + 'static> {
     selector: SelectorTaskHandle<NetworkTask<Conn>, NetworkTaskHandle>,
 }
 
-impl<Conn: Connect + Clone + Send + 'static> Admin<Conn> {
+impl<Conn: Connect + Send + 'static> Admin<Conn> {
     /// Bootstrap a new admin client.
     ///
     /// Provide the connection mechanism with `connect`.
@@ -45,16 +45,18 @@ impl<Conn: Connect + Clone + Send + 'static> Admin<Conn> {
         connect: Conn,
         bootstrap: &[BrokerHost],
         config: KafkaConfig,
-    ) -> Result<Self, KafkaError> {
+    ) -> Result<Self, KafkaError>
+    where
+        Conn: Clone,
+    {
         let selector =
             SelectorTaskHandle::bootstrap(connect, bootstrap, config.clone(), NetworkTaskFactory)
                 .await?;
 
         Ok(Self { selector })
     }
-}
 
-impl<Conn: Connect + Send + 'static> Admin<Conn> {
+    /// Describe the cluster, which lists the current brokers, controller id, and access control information.
     pub async fn describe_cluster(&self) -> Result<ClusterDescription, KafkaError> {
         let response = self
             .get_best_handle()?
@@ -66,6 +68,9 @@ impl<Conn: Connect + Send + 'static> Admin<Conn> {
         Ok(response.try_into()?)
     }
 
+    /// List all topics in the cluster.
+    ///
+    /// This does not include detailed per-partition information. For that, use [`Admin::describe_topics`].
     pub async fn list_topics(&self) -> Result<Vec<TopicListing>, KafkaError> {
         let response = self
             .get_best_handle()?
@@ -79,6 +84,11 @@ impl<Conn: Connect + Send + 'static> Admin<Conn> {
             .collect()
     }
 
+    /// Get detailed topic information.
+    ///
+    /// This will include per-partition details about the leader id and replicas, as well as access control information.
+    ///
+    /// Topics are described in the order they are requested.
     pub async fn describe_topics(
         &self,
         topics: Vec<String>,
@@ -125,6 +135,7 @@ impl<Conn: Connect + Send + 'static> Admin<Conn> {
             .collect())
     }
 
+    /// Create topics.
     pub async fn create_topics(
         &self,
         topics: Vec<NewTopic>,
@@ -186,6 +197,7 @@ impl<Conn: Connect + Send + 'static> Admin<Conn> {
             .collect())
     }
 
+    /// Delete topics.
     pub async fn delete_topics(
         &self,
         topics: TopicCollection,
