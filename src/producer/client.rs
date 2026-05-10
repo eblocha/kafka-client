@@ -12,10 +12,7 @@ use tokio::sync::oneshot;
 use crate::{
     common::{BrokerHost, TopicPartition},
     config::KafkaConfig,
-    conn::{
-        connect::{Connect, Tcp},
-        selector::SelectorTaskHandle,
-    },
+    conn::connect::{Connect, Tcp},
     error::{ErrorCode, KafkaError},
     producer::{
         handle::{ProducerTaskFactory, ProducerTaskHandle},
@@ -24,6 +21,7 @@ use crate::{
         record::{ProducerRecord, RecordMetadata},
         task::{ProducerSendMessage, ProducerSendRecord, ProducerTask},
     },
+    selector::SelectorTaskHandle,
     util::TopicNameExt,
 };
 

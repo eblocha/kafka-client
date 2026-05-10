@@ -5,6 +5,7 @@ mod cancel;
 pub mod common;
 pub mod config;
 mod conn;
+mod selector;
 
 pub mod consumer;
 pub mod error;

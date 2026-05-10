@@ -15,7 +15,7 @@ use crate::{
     broker::task::BrokerTaskHandle,
     common::{BrokerHost, TopicCollection},
     config::KafkaConfig,
-    conn::{KafkaChannelError, selector::SelectorTaskHandle},
+    conn::KafkaChannelError,
     connect::{Connect, Tcp},
     error::KafkaError,
     network::{
@@ -23,6 +23,7 @@ use crate::{
         task::NetworkTask,
     },
     proto::ver::with_max_version,
+    selector::SelectorTaskHandle,
     util::TopicNameExt,
 };
 

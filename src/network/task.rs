@@ -11,7 +11,8 @@ use crate::{
     },
     cancel::OrCancelled,
     common::{Node, TopicPartition},
-    conn::{connect::Connect, selector::ClusterMetadata},
+    conn::connect::Connect,
+    selector::ClusterMetadata,
 };
 
 #[derive(Debug)]

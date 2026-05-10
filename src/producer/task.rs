@@ -29,10 +29,7 @@ use crate::{
     cancel::OrCancelled,
     common::{Node, TopicPartition},
     config::KafkaConfig,
-    conn::{
-        connect::Connect,
-        selector::{ClusterMetadata, RefreshMetadataRequest},
-    },
+    conn::connect::Connect,
     error::{ErrorCode, KafkaError},
     network::{handle::NetworkTaskHandle, task::NetworkTask},
     producer::{
@@ -40,6 +37,7 @@ use crate::{
         prepared_record::{DeliveryMetadata, PreparedRecord},
         record::RecordMetadata,
     },
+    selector::{ClusterMetadata, RefreshMetadataRequest},
     util::{StreamExt, TopicNameExt},
 };
 

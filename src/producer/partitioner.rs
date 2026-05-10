@@ -1,4 +1,4 @@
-use crate::{conn::selector::TopicMetadata, producer::record::ProducerRecord};
+use crate::{producer::record::ProducerRecord, selector::TopicMetadata};
 
 pub trait Partitioner {
     fn partition(&self, record: &mut ProducerRecord, topic_data: &TopicMetadata);

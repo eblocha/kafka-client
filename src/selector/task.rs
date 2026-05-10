@@ -17,14 +17,12 @@ use crate::{
     },
     common::BrokerHost,
     config::KafkaConfig,
-    conn::{
-        connect::{Connect, Tcp},
-        selector::{
-            cluster::ClusterTaskManager,
-            metadata::{MetadataRefreshContext, MetadataRefreshTask},
-        },
-    },
+    conn::connect::{Connect, Tcp},
     error::KafkaError,
+    selector::{
+        cluster::ClusterTaskManager,
+        metadata::{MetadataRefreshContext, MetadataRefreshTask},
+    },
 };
 
 use super::{cluster_state::Cluster, metadata::MetadataRefreshResult};
@@ -507,7 +505,6 @@ mod test {
         config::KafkaConfig,
         conn::{
             channel::{KafkaChannel, KafkaChannelMessage},
-            selector::SelectorTaskHandle,
             testing::await_timeout,
         },
         error::KafkaError,
@@ -515,6 +512,7 @@ mod test {
             handle::{NetworkTaskFactory, NetworkTaskHandle},
             task::NetworkTask,
         },
+        selector::SelectorTaskHandle,
     };
 
     fn setup_single_node(

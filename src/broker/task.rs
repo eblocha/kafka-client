@@ -7,12 +7,10 @@ use crate::{
     broker::connector::NodeConnector,
     common::{Node, TopicPartition},
     config::KafkaConfig,
-    conn::{
-        Sendable,
-        selector::{ClusterMetadata, RefreshMetadataRequest},
-    },
+    conn::Sendable,
     error::KafkaError,
     proto::ver::{FromVersionRange, GetApiKey},
+    selector::{ClusterMetadata, RefreshMetadataRequest},
 };
 
 #[derive(Debug, Clone)]

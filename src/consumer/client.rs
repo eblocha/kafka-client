@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use crate::{
     common::BrokerHost,
     config::KafkaConfig,
-    conn::{KafkaChannelError, selector::SelectorTaskHandle},
+    conn::KafkaChannelError,
     connect::{Connect, Tcp},
     consumer::{
         handle::{ConsumerTaskFactory, ConsumerTaskHandle},
@@ -13,6 +13,7 @@ use crate::{
         task::ConsumerTask,
     },
     error::KafkaError,
+    selector::SelectorTaskHandle,
     util::TopicNameExt,
 };
 

@@ -17,11 +17,11 @@ use crate::{
     cancel::OrCancelled,
     common::{Node, TopicPartition},
     config::{ConsumerAutoOffsetReset, KafkaConfig},
-    conn::selector::ClusterMetadata,
     connect::Connect,
     consumer::record::{ConsumerRecords, ConsumerRecordsResult},
     error::KafkaError,
     network::{handle::NetworkTaskHandle, task::NetworkTask},
+    selector::ClusterMetadata,
 };
 
 pub type ConsumerPartitionState = Option<ListOffsetsPartitionResponse>;

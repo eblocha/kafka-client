@@ -15,9 +15,9 @@ use crate::{
     },
     common::{BrokerHost, Node, TopicPartition},
     config::KafkaConfig,
-    conn::selector::{BrokerMapEntry, Cluster},
     connect::Connect,
     error::ErrorCode,
+    selector::{BrokerMapEntry, Cluster},
 };
 
 /// Synchronizes broker tasks with cluster state.
@@ -458,8 +458,9 @@ mod test {
         broker::task::{BrokerTask, BrokerTaskContext, BrokerTaskFactory},
         common::{BrokerHost, Node, TopicPartition},
         config::KafkaConfig,
-        conn::{selector::cluster::ClusterTaskManager, testing::NeverConnects},
+        conn::testing::NeverConnects,
         network::handle::NetworkTaskFactory,
+        selector::cluster::ClusterTaskManager,
     };
 
     /// Stop and collect the tasks inside a cluster task manager for inspection
